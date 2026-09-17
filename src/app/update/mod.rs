@@ -366,6 +366,7 @@ impl OpenCADStudio {
         {
             self.snapper.clear_tracking();
             self.otrack_active = None;
+            self.otrack_cross = None;
             self.otrack_kind = None;
         }
         if let Some((started, tab_id, before)) = perf_edit_before {
@@ -402,6 +403,7 @@ impl OpenCADStudio {
     pub(in crate::app) fn reset_tracking_after_point(&mut self) {
         self.snapper.clear_tracking();
         self.otrack_active = None;
+        self.otrack_cross = None;
         self.otrack_kind = None;
     }
 
@@ -3982,6 +3984,7 @@ impl OpenCADStudio {
                 if !self.snapper.otrack_enabled {
                     self.snapper.clear_tracking();
                     self.otrack_active = None;
+                    self.otrack_cross = None;
                     self.otrack_kind = None;
                 }
                 Task::none()
