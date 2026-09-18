@@ -802,6 +802,11 @@ pub(super) struct OpenCADStudio {
     /// `SelectionChangedV4` fires once per real change rather than per message.
     #[cfg(not(target_arch = "wasm32"))]
     last_plugin_selection: Option<(u64, u64)>,
+    /// `(tab id, geometry epoch)` last published to the V4 document view.
+    /// Built-in edits bypass HostSession, so this is checked at message
+    /// boundaries as well as after plugin-initiated writes.
+    #[cfg(not(target_arch = "wasm32"))]
+    last_plugin_document: Option<(u64, u64)>,
     /// External add-on packages found in the plugins folder, refreshed when the
     /// Plugin Manager opens.
     external_plugins: Vec<crate::plugin::external::ExternalPlugin>,
@@ -3750,6 +3755,8 @@ impl OpenCADStudio {
             disabled_plugins: rustc_hash::FxHashSet::default(),
             #[cfg(not(target_arch = "wasm32"))]
             last_plugin_selection: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_plugin_document: None,
             external_plugins: Vec::new(),
             loaded_plugin_ids: rustc_hash::FxHashSet::default(),
             plugin_load_errors: rustc_hash::FxHashMap::default(),

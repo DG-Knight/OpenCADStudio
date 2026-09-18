@@ -92,7 +92,11 @@ impl<'a> HostSession<'a> {
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
-        v4_support::publish_document_view_v4(self.tab_id(), doc);
+        {
+            v4_support::publish_document_view_v4(self.tab_id(), doc);
+            self.app.last_plugin_document =
+                Some((self.tab_id(), self.app.tabs[self.tab].scene.geometry_epoch));
+        }
     }
 
     pub fn add_entity(&mut self, entity: EntityType) -> Handle {
