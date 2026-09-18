@@ -1,0 +1,28 @@
+{
+  "internal_kinds": ["Block", "BlockEnd", "Seqend"],
+  "opaque_kinds": ["Extended", "Unknown"],
+  "editable": {
+    "Point": ["layer", "location", "thickness", "normal", "x_axis_angle"],
+    "Line": ["layer", "start", "end", "thickness", "normal"],
+    "Circle": ["layer", "center", "radius", "thickness", "normal"],
+    "Arc": ["layer", "center", "radius", "start_angle", "end_angle", "thickness", "normal"],
+    "Ellipse": ["layer", "center", "major_axis", "minor_axis_ratio", "start_parameter", "end_parameter", "normal"],
+    "Polyline": ["layer", "closed", "vertices"],
+    "Polyline2D": ["layer", "closed", "smooth_surface", "start_width", "end_width", "thickness", "elevation", "normal", "vertices"],
+    "Polyline3D": ["layer", "flags", "default_start_width", "default_end_width", "mesh_m_count", "mesh_n_count", "smooth_m_density", "smooth_n_density", "elevation", "normal", "vertices"],
+    "LwPolyline": ["layer", "vertices", "is_closed", "plinegen", "constant_width", "elevation", "thickness", "normal"],
+    "Spline": ["layer", "degree", "flags", "knots", "control_points", "weights", "fit_points", "normal", "knot_tolerance", "control_tolerance", "fit_tolerance", "begin_tangent", "end_tangent", "knot_parameterization", "cv_frame_visible", "dwg_flags1", "dxf_flags"],
+    "Text": ["layer", "text", "insertion", "alignment_point", "height", "rotation", "width_factor", "oblique_angle", "style", "horizontal_alignment", "vertical_alignment", "normal", "thickness", "generation_flags"],
+    "MText": ["layer", "text", "insertion", "height", "rectangle_width", "rectangle_height", "rotation", "dwg_x_direction", "style", "attachment_point", "drawing_direction", "line_spacing_factor", "line_spacing_style", "normal", "background_fill_flags", "background_scale", "background_transparency", "is_annotative", "column_data", "extents_width", "extents_height"],
+    "Ray": ["layer", "base_point", "direction"],
+    "XLine": ["layer", "base_point", "direction"],
+    "Solid": ["layer", "first_corner", "second_corner", "third_corner", "fourth_corner", "normal", "thickness", "is_trace"],
+    "Face3D": ["layer", "first_corner", "second_corner", "third_corner", "fourth_corner", "invisible_edges"]
+  },
+  "aliases": {
+    "Polyline": {"closed": "flags"},
+    "Polyline2D": {"closed": "flags"},
+    "Text": {"text": "value", "insertion": "insertion_point"},
+    "MText": {"text": "value", "insertion": "insertion_point"}
+  }
+}

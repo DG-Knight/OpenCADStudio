@@ -83,5 +83,10 @@ pub fn handle_plugin_request(
         SetSystemVariable { name, value } => {
             PluginResponse::SystemVariableResult(host.set_system_variable(&name, value))
         }
+        UpdateEntitiesTransaction { label, entities } => PluginResponse::EntityTransactionResult(
+            host.update_entities_transaction(&label, entities),
+        ),
+        GetSelection => PluginResponse::Selection(host.selection()),
+        SetSelection { handles } => PluginResponse::SelectionResult(host.set_selection(&handles)),
     }
 }

@@ -276,6 +276,7 @@ impl OpenCADStudio {
             return;
         }
         self.last_plugin_document = Some(key);
+        crate::plugin::v4_support::publish_drawing_changed(tab.id, tab.scene.geometry_epoch);
         crate::plugin::v4_support::publish_document_view_v4(tab.id, &tab.scene.document);
     }
 
@@ -305,7 +306,22 @@ impl OpenCADStudio {
                 return Task::none();
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let command_before = self.tabs.get(self.active_tab).map(|tab| {
+            (tab.id, tab.active_cmd.as_ref().map(|command| command.name().to_owned()))
+        });
         let task = self.update_inner(msg);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let command_after = self.tabs.get(self.active_tab).map(|tab| {
+                (tab.id, tab.active_cmd.as_ref().map(|command| command.name().to_owned()))
+            });
+            if command_before != command_after {
+                if let Some((tab_id, command)) = command_after {
+                    crate::plugin::v4_support::publish_command_state_changed(tab_id, command);
+                }
+            }
+        }
         self.refresh_gpu_status();
         self.show_next_startup_modal();
         self.sync_open_command_history();

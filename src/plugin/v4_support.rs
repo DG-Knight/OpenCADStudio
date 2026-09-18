@@ -51,6 +51,16 @@ pub fn publish_selection_changed_v4(tab_id: u64, handles: Vec<acadrust::Handle>)
     broadcast(HostNotification::SelectionChangedV4 { tab_id, handles });
 }
 
+/// Broadcast a change in a tab's active interactive command.
+pub fn publish_command_state_changed(tab_id: u64, command: Option<String>) {
+    broadcast(HostNotification::CommandStateChanged { tab_id, command });
+}
+
+/// Broadcast drawing changes independently of shared-view subscriptions.
+pub fn publish_drawing_changed(tab_id: u64, epoch: u64) {
+    broadcast(HostNotification::DrawingChanged { tab_id, epoch });
+}
+
 /// V4 notification handler installed on the plugin manager.
 ///
 /// Forwards REPL status messages to the log; other notifications are handled

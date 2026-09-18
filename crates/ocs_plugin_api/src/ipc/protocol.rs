@@ -76,6 +76,8 @@ pub enum HostRequest {
         code: String,
         tab_index: usize,
     },
+    /// V7: release an interactive command after completion or cancellation.
+    DropInteractive { command_id: u64 },
 }
 
 /// Responses the plugin runner sends back for `HostRequest`.
@@ -142,6 +144,11 @@ pub enum PluginRequest {
     GetSystemVariable { name: String },
     /// Change a host-managed setting without nested command dispatch.
     SetSystemVariable { name: String, value: HostSettingValue },
+    /// V7: validate and replace existing entities in a single undo step.
+    UpdateEntitiesTransaction { label: String, entities: Vec<EntityType> },
+    /// V7: synchronous selection read/write for the dispatch tab.
+    GetSelection,
+    SetSelection { handles: Vec<Handle> },
 }
 
 /// Responses the host sends back for `PluginRequest`.
@@ -170,6 +177,9 @@ pub enum PluginResponse {
     DocumentPath(Option<std::ffi::OsString>),
     SystemVariable(Option<HostSettingValue>),
     SystemVariableResult(Result<HostSettingValue, String>),
+    EntityTransactionResult(Result<(), String>),
+    Selection(Vec<Handle>),
+    SelectionResult(Result<(), String>),
 }
 
 /// Messages sent from the host to the plugin runner.

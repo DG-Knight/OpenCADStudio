@@ -191,6 +191,10 @@ fn handle_host_request(
                 Err(_) => HostResponse::Error("interactive command panicked".to_string()),
             }
         }
+        HostRequest::DropInteractive { command_id } => {
+            interactive.borrow_mut().remove(&command_id);
+            HostResponse::Bool(true)
+        }
         HostRequest::GetPrompt { command_id } => {
             let result = {
                 let registry = interactive.borrow();
@@ -289,6 +293,10 @@ fn handle_host_request_v4(
                 Ok(s) => Some(HostResponse::CommandStep(Box::new(s))),
                 Err(_) => Some(HostResponse::Error("interactive command panicked".to_string())),
             }
+        }
+        HostRequest::DropInteractive { command_id } => {
+            interactive.borrow_mut().remove(&command_id);
+            Some(HostResponse::Bool(true))
         }
         HostRequest::GetPrompt { command_id } => {
             let result = {

@@ -20,8 +20,9 @@
 /// a multiplexed socket while leaving the V2/V3 ABI and protocol untouched. v5
 /// adds the `BuiltinPlugin::on_load` lifecycle callback and
 /// `HostApi::document_path`. v6 appends generic host system-variable access
-/// (`HostApi::system_variable` / `set_system_variable`).
-pub const API_VERSION: u32 = 6;
+/// (`HostApi::system_variable` / `set_system_variable`). v7 appends atomic,
+/// undoable replacement of a set of existing entities.
+pub const API_VERSION: u32 = 7;
 
 /// Oldest plugin API major the current host still loads. This keeps previously
 /// compiled cdylibs usable as long as their vtable layout is a prefix of the

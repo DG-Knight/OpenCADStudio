@@ -93,6 +93,10 @@ impl<'a> HostSession<'a> {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let key = (self.tab_id(), self.app.tabs[self.tab].scene.geometry_epoch);
+            if self.app.last_plugin_document != Some(key) {
+                v4_support::publish_drawing_changed(key.0, key.1);
+            }
             v4_support::publish_document_view_v4(self.tab_id(), doc);
             self.app.last_plugin_document =
                 Some((self.tab_id(), self.app.tabs[self.tab].scene.geometry_epoch));
@@ -123,6 +127,73 @@ impl<'a> HostSession<'a> {
             self.publish_document_view();
         }
         ok
+    }
+
+    pub fn update_entities_transaction(
+        &mut self,
+        label: &str,
+        entities: Vec<EntityType>,
+    ) -> Result<(), String> {
+        use std::collections::HashSet;
+        if label.trim().is_empty() { return Err("transaction label is empty".into()); }
+        if entities.is_empty() { return Ok(()); }
+        let mut seen = HashSet::new();
+        for entity in &entities {
+            let handle = entity.common().handle;
+            if handle.is_null() || !seen.insert(handle) {
+                return Err(format!("null or duplicate entity handle: {handle:?}"));
+            }
+            let Some(existing) = self.document().get_entity(handle) else {
+                return Err(format!("entity {handle:?} does not exist"));
+            };
+            if std::mem::discriminant(existing) != std::mem::discriminant(entity) {
+                return Err(format!("entity {handle:?} changes kind"));
+            }
+            if existing.common().owner_handle != entity.common().owner_handle {
+                return Err(format!("entity {handle:?} changes owner"));
+            }
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(existing, entity)
+                .map_err(|error| format!("entity {handle:?}: {error}"))?;
+            if self.app.tabs[self.tab].scene.is_layer_locked(handle) {
+                return Err(format!("entity {handle:?} is on a locked layer"));
+            }
+        }
+        self.push_undo(label);
+        for entity in entities {
+            // Validation above makes this infallible while the session owns
+            // the document exclusively.
+            assert!(self.app.tabs[self.tab].scene.update_entity(entity));
+        }
+        self.set_dirty();
+        self.publish_document_view();
+        Ok(())
+    }
+
+    pub fn selection(&self) -> Vec<Handle> {
+        self.app.tabs[self.tab].scene.selected_handles_in_order()
+    }
+
+    pub fn set_selection(&mut self, handles: &[Handle]) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for handle in handles {
+            if !seen.insert(*handle) {
+                return Err(format!("duplicate selected entity: {handle:?}"));
+            }
+            if self.document().get_entity(*handle).is_none() {
+                return Err(format!("entity {handle:?} does not exist"));
+            }
+        }
+        if self.selection() == handles { return Ok(()); }
+        let scene = &mut self.app.tabs[self.tab].scene;
+        scene.replace_selection_exact(handles);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.tab == self.app.active_tab {
+                self.app.last_plugin_selection = Some((self.tab_id(), self.app.tabs[self.tab].scene.selection_fingerprint()));
+            }
+            crate::plugin::v4_support::publish_selection_changed_v4(self.tab_id(), self.selection());
+        }
+        Ok(())
     }
 
     /// Delete the entity with `handle`, keeping the scene's render caches in
@@ -188,6 +259,8 @@ impl<'a> HostSession<'a> {
         if let Some(ah) = app_handle {
             xd.raw_dwg_eed.retain(|(a, _)| *a != ah);
         }
+        self.bump_geometry();
+        self.set_dirty();
         self.publish_document_view();
         true
     }
@@ -225,6 +298,8 @@ impl<'a> HostSession<'a> {
         if let Some(ah) = app_handle {
             xd.raw_dwg_eed.retain(|(a, _)| *a != ah);
         }
+        self.bump_geometry();
+        self.set_dirty();
         self.publish_document_view();
         true
     }
@@ -322,6 +397,11 @@ impl HostApi for HostSession<'_> {
     fn update_entity(&mut self, entity: EntityType) -> bool {
         self.update_entity(entity)
     }
+    fn update_entities_transaction(&mut self, label: &str, entities: Vec<EntityType>) -> Result<(), String> {
+        self.update_entities_transaction(label, entities)
+    }
+    fn selection(&self) -> Vec<Handle> { self.selection() }
+    fn set_selection(&mut self, handles: &[Handle]) -> Result<(), String> { self.set_selection(handles) }
     fn remove_entity(&mut self, handle: Handle) -> bool {
         self.remove_entity(handle)
     }
@@ -489,6 +569,12 @@ impl PluginProcessInteractiveAdapter {
     }
 }
 
+impl Drop for PluginProcessInteractiveAdapter {
+    fn drop(&mut self) {
+        let _ = self.process.drop_interactive(self.command_id);
+    }
+}
+
 impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
     fn name(&self) -> &'static str {
         "PLUGIN"
@@ -558,6 +644,87 @@ mod tests {
     use acadrust::entities::Point;
     use acadrust::xdata::XDataValue;
     use ocs_plugin_api::host::DocumentReader;
+
+    #[test]
+    fn selection_query_is_live_and_replacement_is_validated() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let a = host.add_entity(EntityType::Point(Point::new()));
+        let b = host.add_entity(EntityType::Point(Point::new()));
+        assert!(host.selection().is_empty());
+        host.set_selection(&[b, a]).unwrap();
+        assert_eq!(host.selection(), vec![b, a]);
+        assert!(host.set_selection(&[Handle::new(99999)]).is_err());
+        assert!(host.set_selection(&[a, a]).is_err());
+        assert_eq!(host.selection(), vec![b, a]);
+        host.set_selection(&[]).unwrap();
+        assert!(host.selection().is_empty());
+    }
+
+    #[test]
+    fn scripted_selection_does_not_expand_linked_leader_annotation() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let annotation = host.add_entity(EntityType::Text(acadrust::entities::Text::default()));
+        let mut leader = acadrust::entities::Leader::default();
+        leader.annotation_handle = annotation;
+        let leader_handle = host.add_entity(EntityType::Leader(leader));
+        host.set_selection(&[leader_handle]).unwrap();
+        assert_eq!(host.selection(), vec![leader_handle]);
+    }
+
+    #[test]
+    fn entity_transaction_validates_before_mutation_and_undoes_as_one_step() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let (first, second);
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            first = host.add_entity(EntityType::Point(Point::at(acadrust::types::Vector3::new(1.0, 0.0, 0.0))));
+            second = host.add_entity(EntityType::Point(Point::at(acadrust::types::Vector3::new(2.0, 0.0, 0.0))));
+            let mut a = host.document().get_entity(first).unwrap().clone();
+            let mut b = host.document().get_entity(second).unwrap().clone();
+            if let EntityType::Point(p) = &mut a { p.location.x = 10.0; }
+            if let EntityType::Point(p) = &mut b { p.location.x = 20.0; }
+            let mut invalid = b.clone();
+            invalid.common_mut().owner_handle = Handle::new(99999);
+            assert!(host.update_entities_transaction("Move points", vec![a.clone(), invalid]).is_err());
+            let mut invalid_geometry = b.clone();
+            if let EntityType::Point(p) = &mut invalid_geometry { p.location.x = f64::NAN; }
+            assert!(host.update_entities_transaction("Move points", vec![a.clone(), invalid_geometry])
+                .unwrap_err().contains("Point.location"));
+            assert_eq!(host.app.tabs[0].history.undo_stack.len(), 0);
+            assert!(matches!(host.document().get_entity(first), Some(EntityType::Point(p)) if p.location.x == 1.0));
+            host.update_entities_transaction("Move points", vec![a, b]).unwrap();
+            assert!(matches!(host.document().get_entity(first), Some(EntityType::Point(p)) if p.location.x == 10.0));
+        }
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 1);
+        app.undo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(first), Some(EntityType::Point(p)) if p.location.x == 1.0));
+        assert!(matches!(app.tabs[0].scene.document.get_entity(second), Some(EntityType::Point(p)) if p.location.x == 2.0));
+    }
+
+    #[test]
+    fn unmapped_canvas_kind_layer_change_undoes() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let handle;
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            handle = host.add_entity(EntityType::Hatch(acadrust::entities::Hatch::default()));
+            let original = host.document().get_entity(handle).unwrap();
+            let changed = ocs_plugin_api::entity_coverage::patch_canvas_layer(original, "HATCHES").unwrap();
+            host.update_entities_transaction("Move hatch layer", vec![changed]).unwrap();
+            assert_eq!(host.document().get_entity(handle).unwrap().common().layer, "HATCHES");
+        }
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 1);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle).unwrap().common().layer, "0");
+    }
 
     #[test]
     fn system_variables_change_without_command_reentry() {

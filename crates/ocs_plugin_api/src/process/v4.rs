@@ -71,6 +71,7 @@ fn request_kind(req: &HostRequest) -> &'static str {
         HostRequest::GetPrompt { .. } => "GetPrompt",
         HostRequest::NeedsEntityPick { .. } => "NeedsEntityPick",
         HostRequest::ExecuteCode { .. } => "ExecuteCode",
+        HostRequest::DropInteractive { .. } => "DropInteractive",
         HostRequest::Shutdown => "Shutdown",
     }
 }

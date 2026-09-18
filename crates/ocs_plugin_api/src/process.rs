@@ -237,6 +237,7 @@ fn request_kind(req: &HostRequest) -> &'static str {
         HostRequest::GetPrompt { .. } => "GetPrompt",
         HostRequest::NeedsEntityPick { .. } => "NeedsEntityPick",
         HostRequest::ExecuteCode { .. } => "ExecuteCode",
+        HostRequest::DropInteractive { .. } => "DropInteractive",
         HostRequest::Shutdown => "Shutdown",
     }
 }
@@ -596,6 +597,15 @@ impl PluginProcess {
                     }
                 }
             }
+        }
+    }
+
+    /// Release a completed or abandoned V4 interactive command in the runner.
+    pub fn drop_interactive(&self, command_id: u64) -> Result<(), PluginError> {
+        let Some(v4) = &self.v4 else { return Ok(()); };
+        match v4.call(&mut NullHost, HostRequest::DropInteractive { command_id }, &mut |_| {})? {
+            HostResponse::Bool(true) => Ok(()),
+            other => Err(PluginError::UnexpectedResponse(Box::new(other))),
         }
     }
 

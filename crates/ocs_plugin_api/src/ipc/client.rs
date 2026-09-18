@@ -444,6 +444,40 @@ impl HostApi for PluginHostApi {
             Err(error) => Err(error.to_string()),
         }
     }
+
+    fn update_entities_transaction(
+        &mut self,
+        label: &str,
+        entities: Vec<EntityType>,
+    ) -> Result<(), String> {
+        match self.client.request(PluginRequest::UpdateEntitiesTransaction {
+            label: label.to_owned(), entities,
+        }) {
+            Ok(PluginResponse::EntityTransactionResult(result)) => {
+                if result.is_ok() { self.document_cache = OnceCell::new(); }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected entity transaction response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn selection(&self) -> Vec<Handle> {
+        match self.client.request(PluginRequest::GetSelection) {
+            Ok(PluginResponse::Selection(handles)) => handles,
+            _ => Vec::new(),
+        }
+    }
+
+    fn set_selection(&mut self, handles: &[Handle]) -> Result<(), String> {
+        match self.client.request(PluginRequest::SetSelection { handles: handles.to_vec() }) {
+            Ok(PluginResponse::SelectionResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected selection response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 /// Sentinel reader used when the shared-memory view could not be initialized.

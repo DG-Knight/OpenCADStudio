@@ -14,6 +14,18 @@ use serde_reflection::{
 // Include the stable schema types so the same definitions are used at build
 // time and at runtime. The file is self-contained and only depends on serde.
 include!("src/type_registry_types.rs");
+mod entity_coverage_schema {
+    include!("src/entity_coverage_types.rs");
+}
+use entity_coverage_schema::{EntityCoverageCatalog, EntityKindCoverage, EntityScope, ModelAccess, PropertyCoverage};
+
+#[derive(serde::Deserialize)]
+struct EntityCoveragePolicy {
+    internal_kinds: Vec<String>,
+    opaque_kinds: Vec<String>,
+    editable: BTreeMap<String, Vec<String>>,
+    aliases: BTreeMap<String, BTreeMap<String, String>>,
+}
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -23,6 +35,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         workspace_cargo_lock_path().display()
     );
+    println!("cargo:rerun-if-changed=entity_coverage_policy.json");
+    println!("cargo:rerun-if-changed=src/entity_coverage_types.rs");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -486,6 +500,103 @@ fn generate_type_registry(out_dir: &Path) {
     );
     let json = serde_json::to_string_pretty(&registry).unwrap();
     fs::write(out_dir.join("type_registry.json"), json).unwrap();
+    generate_entity_coverage(out_dir, &registry);
+}
+
+fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
+    use std::collections::HashSet;
+    let policy: EntityCoveragePolicy = serde_json::from_str(include_str!("entity_coverage_policy.json"))
+        .expect("valid entity coverage policy");
+    let variants = &registry.types[&TypeId::new("EntityType")].variants;
+    let variant_names: HashSet<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+    for name in policy.internal_kinds.iter().chain(&policy.opaque_kinds)
+        .chain(policy.editable.keys()) {
+        assert!(variant_names.contains(name.as_str()), "coverage policy names unknown kind: {name}");
+    }
+    for name in &policy.internal_kinds {
+        assert!(!policy.opaque_kinds.contains(name) && !policy.editable.contains_key(name),
+            "internal kind has conflicting coverage: {name}");
+    }
+    for name in &policy.opaque_kinds {
+        assert!(!policy.editable.contains_key(name), "opaque kind is editable: {name}");
+    }
+    for name in policy.aliases.keys() {
+        assert!(policy.editable.contains_key(name), "aliases for non-editable kind: {name}");
+    }
+
+    let common = &registry.types[&TypeId::new("EntityCommon")];
+    let mut entity_kinds = Vec::with_capacity(variants.len());
+    for variant in variants {
+        let kind = &variant.name;
+        let scope = if policy.internal_kinds.contains(kind) { EntityScope::Internal }
+            else if policy.opaque_kinds.contains(kind) { EntityScope::Opaque }
+            else { EntityScope::Canvas };
+        let editable = policy.editable.get(kind).cloned().unwrap_or_default();
+        let mut unresolved: HashSet<String> = editable.iter().cloned().collect();
+        assert_eq!(unresolved.len(), editable.len(), "duplicate editable property in {kind}");
+        let aliases = policy.aliases.get(kind);
+        let mut properties = vec![PropertyCoverage {
+            name: "kind".into(), source_path: "<variant>".into(), type_id: "String".into(),
+            optional: false, is_sequence: false, snapshot_readable: true,
+            model_access: ModelAccess::ReadOnly, validation: "none".into(),
+        }];
+        for field in &common.fields {
+            let (name, access) = match field.name.as_str() {
+                "handle" => ("handle".to_owned(), ModelAccess::ReadOnly),
+                "layer" if scope == EntityScope::Canvas => {
+                    unresolved.remove("layer");
+                    ("layer".to_owned(), ModelAccess::ReadWrite)
+                },
+                "layer" => ("layer".to_owned(), ModelAccess::ReadOnly),
+                other => (format!("common.{other}"), ModelAccess::Unmapped),
+            };
+            properties.push(PropertyCoverage {
+                name, source_path: format!("common.{}", field.name), type_id: field.type_id.as_str().to_owned(),
+                optional: field.optional, is_sequence: field.is_sequence, snapshot_readable: true,
+                validation: if access == ModelAccess::ReadWrite && field.name == "layer" {
+                    "transaction_nonempty"
+                } else if access == ModelAccess::ReadWrite { "type_conversion_only" } else { "none" }.into(),
+                model_access: access,
+            });
+        }
+        let shape_type = variant.fields.first().expect("entity variant payload").type_id.clone();
+        let shape = &registry.types[&shape_type];
+        for field in &shape.fields {
+            if field.name == "common" { continue; }
+            let exposed = editable.iter().find(|name| {
+                aliases.and_then(|map| map.get(*name)).map_or(name.as_str(), String::as_str) == field.name
+            });
+            let (name, access) = match exposed {
+                Some(name) => {
+                    unresolved.remove(name);
+                    ((*name).clone(), ModelAccess::ReadWrite)
+                }
+                None => (field.name.clone(), ModelAccess::Unmapped),
+            };
+            let validation = if access != ModelAccess::ReadWrite { "none" }
+                else if matches!((kind.as_str(), name.as_str()),
+                    ("Point", "location") | ("Line", "start" | "end") |
+                    ("Circle" | "Arc", "center" | "radius") |
+                    ("Ray" | "XLine", "base_point" | "direction") |
+                    ("Solid", "first_corner" | "second_corner" | "third_corner" | "fourth_corner" | "normal" | "thickness") |
+                    ("Face3D", "first_corner" | "second_corner" | "third_corner" | "fourth_corner" | "invisible_edges")) {
+                    "transaction_geometry"
+                } else { "type_conversion_only" };
+            properties.push(PropertyCoverage {
+                name, source_path: field.name.clone(),
+                type_id: if exposed.is_some_and(|name| name == "closed") { "bool".into() }
+                    else { field.type_id.as_str().to_owned() },
+                optional: field.optional, is_sequence: field.is_sequence, snapshot_readable: true,
+                validation: validation.into(),
+                model_access: access,
+            });
+        }
+        assert!(unresolved.is_empty(), "{kind} has coverage keys absent from registry: {unresolved:?}");
+        entity_kinds.push(EntityKindCoverage { kind: kind.clone(), scope, properties });
+    }
+    let catalog = EntityCoverageCatalog { schema_version: 1, entity_kinds };
+    fs::write(out_dir.join("entity_coverage.json"), serde_json::to_string_pretty(&catalog).unwrap())
+        .expect("write entity coverage");
 }
 
 fn trace<T>(tracer: &mut Tracer, samples: &Samples)
@@ -908,7 +1019,7 @@ fn generate_version_info(out_dir: &Path) {
         "acadrust_version": acadrust.version.to_string(),
         "acadrust_source": acadrust.source.as_ref().map(|s| s.to_string()),
         "rustc_version": rustc_version,
-        "api_version": 6,
+        "api_version": 7,
         "api_version_min_supported": 2,
         "build_timestamp": build_timestamp,
     });

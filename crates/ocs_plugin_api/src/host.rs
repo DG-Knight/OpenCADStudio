@@ -83,6 +83,10 @@ pub enum HostNotification {
     DocumentTabClosed { tab_id: u64 },
     /// V4 selection changed for a specific tab. Discriminant 7.
     SelectionChangedV4 { tab_id: u64, handles: Vec<Handle> },
+    /// V7 active interactive-command state for a tab. Discriminant 8.
+    CommandStateChanged { tab_id: u64, command: Option<String> },
+    /// V7 drawing epoch, broadcast even without an open shared view. Discriminant 9.
+    DrawingChanged { tab_id: u64, epoch: u64 },
     /// Fallback for notification variants added in future minor revisions.
     /// Carries the raw bincode payload so an older peer can ignore it without
     /// failing deserialization.
@@ -133,6 +137,20 @@ impl Serialize for HostNotification {
                 bincode::serialize_into(&mut bytes, handles)
                     .map_err(serde::ser::Error::custom)?;
             }
+            HostNotification::CommandStateChanged { tab_id, command } => {
+                bytes.push(8);
+                bincode::serialize_into(&mut bytes, tab_id)
+                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, command)
+                    .map_err(serde::ser::Error::custom)?;
+            }
+            HostNotification::DrawingChanged { tab_id, epoch } => {
+                bytes.push(9);
+                bincode::serialize_into(&mut bytes, tab_id)
+                    .map_err(serde::ser::Error::custom)?;
+                bincode::serialize_into(&mut bytes, epoch)
+                    .map_err(serde::ser::Error::custom)?;
+            }
             HostNotification::Unknown(raw) => bytes.extend_from_slice(raw),
         }
         bytes.serialize(serializer)
@@ -169,6 +187,12 @@ impl<'de> Deserialize<'de> for HostNotification {
                 .map_err(serde::de::Error::custom),
             7 => bincode::deserialize(rest)
                 .map(|(tab_id, handles)| HostNotification::SelectionChangedV4 { tab_id, handles })
+                .map_err(serde::de::Error::custom),
+            8 => bincode::deserialize(rest)
+                .map(|(tab_id, command)| HostNotification::CommandStateChanged { tab_id, command })
+                .map_err(serde::de::Error::custom),
+            9 => bincode::deserialize(rest)
+                .map(|(tab_id, epoch)| HostNotification::DrawingChanged { tab_id, epoch })
                 .map_err(serde::de::Error::custom),
             _ => Ok(HostNotification::Unknown(bytes)),
         }
@@ -574,6 +598,27 @@ pub trait HostApi {
         _value: HostSettingValue,
     ) -> Result<HostSettingValue, String> {
         Err("system variable is not supported by this host".to_owned())
+    }
+
+    /// Validate and replace existing entities as one undo step (API v7).
+    /// Callers clone entities from `document()`, change only supported fields,
+    /// and submit all replacements together. Identity and kind must be kept.
+    /// An error leaves the drawing and undo history unchanged.
+    fn update_entities_transaction(
+        &mut self,
+        _label: &str,
+        _entities: Vec<EntityType>,
+    ) -> Result<(), String> {
+        Err("entity transactions are not supported by this host".to_owned())
+    }
+
+    /// Current ordered selection in this session's tab (API v7).
+    fn selection(&self) -> Vec<Handle> { Vec::new() }
+
+    /// Replace this tab's selection with exactly these handles, in order.
+    /// Missing or duplicate handles reject the request (API v7).
+    fn set_selection(&mut self, _handles: &[Handle]) -> Result<(), String> {
+        Err("selection writes are not supported by this host".to_owned())
     }
 }
 

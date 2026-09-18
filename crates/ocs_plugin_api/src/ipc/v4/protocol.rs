@@ -87,6 +87,37 @@ mod tests {
     }
 
     #[test]
+    fn command_state_notification_roundtrips() {
+        let notification = HostNotification::CommandStateChanged {
+            tab_id: 42,
+            command: Some("LINE".to_owned()),
+        };
+        let bytes = bincode::serialize(&notification).unwrap();
+        let decoded: HostNotification = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, notification);
+        let stopped = HostNotification::CommandStateChanged { tab_id: 42, command: None };
+        let bytes = bincode::serialize(&stopped).unwrap();
+        let decoded: HostNotification = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, stopped);
+        let changed = HostNotification::DrawingChanged { tab_id: 42, epoch: 7 };
+        let bytes = bincode::serialize(&changed).unwrap();
+        let decoded: HostNotification = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, changed);
+    }
+
+    #[test]
+    fn selection_request_and_response_roundtrip() {
+        let request = PluginRequest::SetSelection { handles: vec![acadrust::Handle::new(9)] };
+        let bytes = bincode::serialize(&request).unwrap();
+        assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
+            PluginRequest::SetSelection { handles } if handles == vec![acadrust::Handle::new(9)]));
+        let response = PluginResponse::Selection(vec![acadrust::Handle::new(9)]);
+        let bytes = bincode::serialize(&response).unwrap();
+        assert!(matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+            PluginResponse::Selection(handles) if handles == vec![acadrust::Handle::new(9)]));
+    }
+
+    #[test]
     fn plugin_notification_roundtrip() {
         let frame = PluginToHostV4::Notification(NotificationEnvelope {
             command_id: None,
