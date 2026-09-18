@@ -734,9 +734,9 @@ mod tests {
             assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
         };
         dispatch(&mut host, concat!(
-            "PY_EVAL ocs.add({'kind':'Line',",
-            "'start':{'x':0.0,'y':0.0,'z':0.0},",
-            "'end':{'x':1.0,'y':0.0,'z':0.0}})"
+            "PY_EVAL ocs.active_document.create_entity('Line',",
+            "start={'x':0.0,'y':0.0,'z':0.0},",
+            "end={'x':1.0,'y':0.0,'z':0.0}).handle"
         ));
         let handles: Vec<_> = host.document().entities().map(|entity| entity.common().handle).collect();
         assert_eq!(handles.len(), 1, "Python add did not reach the host");
@@ -761,7 +761,7 @@ mod tests {
         let dxf_doc = acadrust::DxfReader::from_reader(std::io::Cursor::new(dxf_bytes))
             .expect("open edited DXF").read().expect("reopen edited DXF");
         assert!(matches!(dxf_doc.get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0));
-        dispatch(&mut host, &format!("PY_EVAL ocs.remove_entity({})", handle.value()));
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
         assert!(host.document().get_entity(handle).is_none(), "Python removal did not reach the host");
         drop(process);
         drop(host);

@@ -7,7 +7,7 @@ Completion gate codes: **C** = create through Python document model; **R** = rea
 | Kind | Baseline | Gate evidence / blocker |
 |---|---|---|
 | Point | Mapped | Host transaction test now checks invalid batch rollback, grouped edit undo, and redo; creation/deletion history, real plugin execution, GUI, and DWG/DXF gates remain pending. |
-| Line | Mapped | Actual staged-plugin IPC Python create/edit/delete, three undo entries and undo/redo, and edited DWG/DXF reopen pass in `staged_python_plugin_line_lifecycle_over_real_ipc`. GUI pick/visibility, invalid-input/reference preservation, and document-model create/delete API still pending; not complete. |
+| Line | Integration-tested | High-level document-model create/delete and transaction edit pass through the actual staged-plugin IPC runner; three undo entries, undo/redo, duplicate-handle atomic rejection, and edited DWG/DXF reopen pass in `staged_python_plugin_line_lifecycle_over_real_ipc`. GUI pick/visible-geometry observation and broader invalid-value/unmapped-field preservation checks remain pending; not complete. |
 | Circle | Mapped | Full gate pending. |
 | Arc | Mapped | Full gate pending. |
 | Ellipse | Mapped | Existing focused DWG conversion test; full gate pending. |
