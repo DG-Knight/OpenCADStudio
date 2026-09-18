@@ -705,6 +705,237 @@ mod tests {
         app.undo_steps(1);
         assert!(matches!(app.tabs[0].scene.document.get_entity(first), Some(EntityType::Point(p)) if p.location.x == 1.0));
         assert!(matches!(app.tabs[0].scene.document.get_entity(second), Some(EntityType::Point(p)) if p.location.x == 2.0));
+        app.redo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(first), Some(EntityType::Point(p)) if p.location.x == 10.0));
+        assert!(matches!(app.tabs[0].scene.document.get_entity(second), Some(EntityType::Point(p)) if p.location.x == 20.0));
+    }
+
+    /// Opt-in end-to-end check using the staged Python cdylib and the actual
+    /// OCS executable as its out-of-process runner. Run with OCS_TEST_PYTHON_PLUGIN
+    /// and OCS_PLUGIN_RUNNER_EXE set; unlike the local-socket protocol test,
+    /// this executes Python and calls the app's HostSession over real IPC.
+    #[test]
+    fn staged_python_plugin_line_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
+        let plugin_path = std::path::PathBuf::from(plugin_path);
+        assert!(plugin_path.is_file(), "missing staged Python plugin: {}", plugin_path.display());
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            &plugin_path, &mut host, crate::plugin::v4_support::notification_handler(),
+        ).expect("spawn staged Python plugin");
+        assert_eq!(process.id(), "opencad.python");
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        dispatch(&mut host, concat!(
+            "PY_EVAL ocs.add({'kind':'Line',",
+            "'start':{'x':0.0,'y':0.0,'z':0.0},",
+            "'end':{'x':1.0,'y':0.0,'z':0.0}})"
+        ));
+        let handles: Vec<_> = host.document().entities().map(|entity| entity.common().handle).collect();
+        assert_eq!(handles.len(), 1, "Python add did not reach the host");
+        let handle = handles[0];
+        assert!(matches!(host.document().get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 1.0));
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Move line', [{{'handle':{},'end':{{'x':5.0,'y':0.0,'z':0.0}}}}])",
+            handle.value()
+        ));
+        assert!(matches!(host.document().get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0));
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Reject duplicate', [{{'handle':{},'end':{{'x':8.0,'y':0.0,'z':0.0}}}},{{'handle':{},'end':{{'x':9.0,'y':0.0,'z':0.0}}}}])",
+            handle.value(), handle.value()
+        ));
+        assert!(matches!(host.document().get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0),
+            "rejected batch changed the line");
+        let dwg_bytes = acadrust::DwgWriter::write_to_vec(host.document()).expect("write edited DWG");
+        let dwg_doc = acadrust::DwgReader::from_stream(std::io::Cursor::new(dwg_bytes))
+            .read().expect("reopen edited DWG");
+        assert!(matches!(dwg_doc.get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0));
+        let dxf_bytes = acadrust::DxfWriter::new(host.document()).write_to_vec().expect("write edited DXF");
+        let dxf_doc = acadrust::DxfReader::from_reader(std::io::Cursor::new(dxf_bytes))
+            .expect("open edited DXF").read().expect("reopen edited DXF");
+        assert!(matches!(dxf_doc.get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0));
+        dispatch(&mut host, &format!("PY_EVAL ocs.remove_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none(), "Python removal did not reach the host");
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3,
+            "create, edit, and delete should each form one undo entry");
+        app.undo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0));
+        app.undo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 1.0));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
+    fn staged_python_point_pick_and_cancel_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let process = {
+            let mut host = HostSession::new(&mut app, 0);
+            std::sync::Arc::new(ocs_plugin_api::process::PluginProcess::spawn(
+                std::path::Path::new(&plugin_path), &mut host,
+                crate::plugin::v4_support::notification_handler(),
+            ).expect("spawn staged Python plugin"))
+        };
+        let request = |app: &mut OpenCADStudio, prompt: &str, entity: bool| {
+            let mut started = None;
+            {
+                let mut host = HostSession::new(app, 0);
+                let method = if entity { "request_entity" } else { "request_point" };
+                let cmd = format!("PY_EVAL ocs.active_document.{method}('{prompt}')");
+                assert!(process.dispatch(&mut host, &cmd, &mut |id| started = Some(id)).unwrap());
+            }
+            let output = app.command_line.history.last().unwrap().text.clone();
+            let token = output.split_whitespace().find_map(|part| part.parse::<u64>().ok())
+                .unwrap_or_else(|| panic!("Python pick token missing from {output:?}"));
+            let id = started.expect("Python request started an interactive command");
+            app.set_active_command(0, Box::new(PluginProcessInteractiveAdapter::new(
+                std::sync::Arc::clone(&process), id,
+            )));
+            token
+        };
+
+        let picked_token = request(&mut app, "Pick a point", false);
+        let result = app.tabs[0].active_cmd.as_mut().unwrap().on_point(glam::DVec3::new(3.0, 4.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        assert!(app.tabs[0].active_cmd.is_none());
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, &format!("PY_EVAL ocs.active_document.poll_input({picked_token})"), &mut |_| {}).unwrap());
+        }
+        assert!(app.command_line.history.last().unwrap().text.contains("point"));
+
+        let target = {
+            let mut host = HostSession::new(&mut app, 0);
+            host.add_entity(EntityType::Point(Point::at(acadrust::types::Vector3::new(6.0, 7.0, 0.0))))
+        };
+        let entity_token = request(&mut app, "Pick an entity", true);
+        assert!(app.tabs[0].active_cmd.as_ref().unwrap().needs_entity_pick());
+        let result = app.tabs[0].active_cmd.as_mut().unwrap()
+            .on_entity_pick(target, glam::DVec3::new(6.0, 7.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, &format!("PY_EVAL ocs.active_document.poll_input({entity_token})"), &mut |_| {}).unwrap());
+        }
+        assert!(app.command_line.history.last().unwrap().text.contains("entity"));
+        assert!(app.command_line.history.last().unwrap().text.contains(&target.value().to_string()));
+
+        let cancelled_token = request(&mut app, "Cancel a point", false);
+        let result = app.tabs[0].active_cmd.as_mut().unwrap().on_enter();
+        let _ = app.apply_cmd_result(result);
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, &format!("PY_EVAL ocs.active_document.poll_input({cancelled_token})"), &mut |_| {}).unwrap());
+        }
+        assert!(app.command_line.history.last().unwrap().text.contains("cancelled"));
+    }
+
+    #[test]
+    fn staged_python_tabs_isolate_tokens_and_notifications() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        app.tabs.push(crate::app::document::DocumentTab::new_drawing(2));
+        app.tabs[1].is_start = false;
+        let tab0 = app.tabs[0].id;
+        let tab1 = app.tabs[1].id;
+        assert_ne!(tab0, tab1);
+        let process = {
+            let mut host = HostSession::new(&mut app, 0);
+            std::sync::Arc::new(ocs_plugin_api::process::PluginProcess::spawn(
+                std::path::Path::new(&plugin_path), &mut host,
+                crate::plugin::v4_support::notification_handler(),
+            ).expect("spawn staged Python plugin"))
+        };
+        let mut started = None;
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, "PY_EVAL ocs.active_document.request_point('Tab zero')",
+                &mut |id| started = Some(id)).unwrap());
+        }
+        let token = app.command_line.history.last().unwrap().text.split_whitespace()
+            .find_map(|part| part.parse::<u64>().ok()).expect("pick token");
+        app.set_active_command(0, Box::new(PluginProcessInteractiveAdapter::new(
+            std::sync::Arc::clone(&process), started.unwrap(),
+        )));
+        {
+            let mut host = HostSession::new(&mut app, 1);
+            assert!(process.dispatch(&mut host, &format!("PY_EVAL ocs.active_document.poll_input({token})"), &mut |_| {}).unwrap());
+        }
+        assert!(app.command_line.history.last().unwrap().text.contains("None"),
+            "other tab must not consume the pending token");
+        let result = app.tabs[0].active_cmd.as_mut().unwrap().on_point(glam::DVec3::new(2.0, 3.0, 0.0));
+        let _ = app.apply_cmd_result(result);
+        {
+            let mut host = HostSession::new(&mut app, 1);
+            assert!(process.dispatch(&mut host, &format!("PY_EVAL ocs.active_document.poll_input({token})"), &mut |_| {}).unwrap());
+        }
+        assert!(app.command_line.history.last().unwrap().text.contains("None"));
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, &format!("PY_EVAL ocs.active_document.poll_input({token})"), &mut |_| {}).unwrap());
+        }
+        assert!(app.command_line.history.last().unwrap().text.contains("point"));
+
+        use ocs_plugin_api::host::HostNotification;
+        process.notify_plugin(None, HostNotification::DrawingChanged { tab_id: tab0, epoch: 101 }).unwrap();
+        process.notify_plugin(None, HostNotification::DrawingChanged { tab_id: tab1, epoch: 202 }).unwrap();
+        // Notifications are best-effort and consumed by the runner's reader
+        // thread before its next Dispatch. Give that thread a bounded handoff.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        {
+            let mut host = HostSession::new(&mut app, 1);
+            assert!(process.dispatch(&mut host, "PY_EVAL ocs.active_document.poll_events()", &mut |_| {}).unwrap());
+        }
+        let other_events = &app.command_line.history.last().unwrap().text;
+        assert!(other_events.contains("202") && !other_events.contains("101"), "{other_events}");
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, "PY_EVAL ocs.active_document.poll_events()", &mut |_| {}).unwrap());
+        }
+        let first_events = &app.command_line.history.last().unwrap().text;
+        assert!(first_events.contains("101") && !first_events.contains("202"), "{first_events}");
+
+        for epoch in 0..257 {
+            process.notify_plugin(None, HostNotification::DrawingChanged { tab_id: tab0, epoch }).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, "PY_EVAL ocs.active_document.poll_events()", &mut |_| {}).unwrap());
+        }
+        let overflow = &app.command_line.history.last().unwrap().text;
+        assert!(overflow.contains("overflow") && overflow.contains("dropped"), "{overflow}");
+
+        process.notify_plugin(None, HostNotification::DrawingChanged { tab_id: tab0, epoch: 303 }).unwrap();
+        process.notify_plugin(None, HostNotification::DocumentTabClosed { tab_id: tab0 }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            assert!(process.dispatch(&mut host, "PY_EVAL ocs.active_document.poll_events()", &mut |_| {}).unwrap());
+        }
+        assert!(app.command_line.history.last().unwrap().text.contains("[]"),
+            "closing a tab must discard its queued events");
     }
 
     #[test]

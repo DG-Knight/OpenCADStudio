@@ -444,15 +444,20 @@ mod tests {
 
     struct DummyHost {
         push_info_messages: StdMutex<Vec<String>>,
+        transactions: StdMutex<Vec<(String, Vec<acadrust::EntityType>)>>,
     }
     impl DummyHost {
         fn new() -> Self {
             Self {
                 push_info_messages: StdMutex::new(Vec::new()),
+                transactions: StdMutex::new(Vec::new()),
             }
         }
         fn take_push_info(&self) -> Vec<String> {
             std::mem::take(&mut *self.push_info_messages.lock().unwrap())
+        }
+        fn take_transactions(&self) -> Vec<(String, Vec<acadrust::EntityType>)> {
+            std::mem::take(&mut *self.transactions.lock().unwrap())
         }
     }
     impl HostApi for DummyHost {
@@ -490,6 +495,14 @@ mod tests {
             false
         }
         fn push_undo(&mut self, _label: &str) {}
+        fn update_entities_transaction(
+            &mut self,
+            label: &str,
+            entities: Vec<acadrust::EntityType>,
+        ) -> Result<(), String> {
+            self.transactions.lock().unwrap().push((label.to_owned(), entities));
+            Ok(())
+        }
         fn set_dirty(&mut self) {}
         fn push_info(&mut self, msg: &str) {
             self.push_info_messages.lock().unwrap().push(msg.to_string());
@@ -657,6 +670,49 @@ mod tests {
         assert!(matches!(resp, HostResponse::Bool(true)));
         let infos = host.take_push_info();
         assert_eq!(infos, vec!["nested".to_string()], "push_info should be delivered to host");
+        runner.join().unwrap();
+        restore_test_env();
+    }
+
+    #[test]
+    fn v4_connection_routes_entity_transaction_over_nested_ipc() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        set_test_env();
+        let (host_stream, mut runner_stream) = connect_pair();
+        let handler: Arc<dyn Fn(Option<u64>, PluginNotification) + Send + Sync> =
+            Arc::new(|_, _| {});
+        let conn = V4Connection::new(host_stream, handler).unwrap();
+        let mut point = acadrust::entities::Point::new();
+        point.common.handle = Handle::new(42);
+        point.location.x = 7.0;
+        let expected = acadrust::EntityType::Point(point);
+        let sent = expected.clone();
+
+        let runner = thread::spawn(move || {
+            let req = recv::<HostToPluginV4>(&mut runner_stream).unwrap();
+            let HostToPluginV4::Request { id, payload: HostRequest::Dispatch { .. } } = req else {
+                panic!("unexpected host request: {req:?}");
+            };
+            send(&mut runner_stream, &PluginToHostV4::Request {
+                id: 99,
+                tab_id: Some(0),
+                payload: PluginRequest::UpdateEntitiesTransaction {
+                    label: "Move point".into(),
+                    entities: vec![sent],
+                },
+            }).unwrap();
+            assert!(matches!(recv::<HostToPluginV4>(&mut runner_stream).unwrap(),
+                HostToPluginV4::Response { id: 99, payload: PluginResponse::EntityTransactionResult(Ok(())) }));
+            send(&mut runner_stream, &PluginToHostV4::Response {
+                id,
+                payload: HostResponse::Bool(true),
+            }).unwrap();
+        });
+
+        let mut host = DummyHost::new();
+        assert!(matches!(conn.call(&mut host, HostRequest::Dispatch { cmd: "MOVE".into() }, &mut |_| {}).unwrap(),
+            HostResponse::Bool(true)));
+        assert_eq!(host.take_transactions(), vec![("Move point".into(), vec![expected])]);
         runner.join().unwrap();
         restore_test_env();
     }
