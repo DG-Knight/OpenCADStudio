@@ -727,6 +727,31 @@ mod tests {
     }
 
     #[test]
+    fn insert_transform_transaction_undoes_without_changing_block_identity() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let handle;
+        {
+            let mut host = HostSession::new(&mut app, 0);
+            let insert = acadrust::entities::Insert::new("DOOR", acadrust::types::Vector3::new(1.0, 2.0, 0.0));
+            handle = host.add_entity(EntityType::Insert(insert));
+            let mut changed = host.document().get_entity(handle).unwrap().clone();
+            if let EntityType::Insert(insert) = &mut changed {
+                insert.insert_point.x = 4.0;
+                insert.set_x_scale(2.0);
+            }
+            host.update_entities_transaction("Move block", vec![changed]).unwrap();
+            assert!(matches!(host.document().get_entity(handle), Some(EntityType::Insert(insert))
+                if insert.insert_point.x == 4.0 && insert.x_scale() == 2.0 && insert.block_name == "DOOR"));
+        }
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 1);
+        app.undo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(handle), Some(EntityType::Insert(insert))
+            if insert.insert_point.x == 1.0 && insert.x_scale() == 1.0 && insert.block_name == "DOOR"));
+    }
+
+    #[test]
     fn system_variables_change_without_command_reentry() {
         let mut app = OpenCADStudio::new_for_test();
         app.tabs[0].is_start = false;

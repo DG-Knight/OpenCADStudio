@@ -41,6 +41,12 @@ fn solid_normal(name: &str, value: &crate::host::acadrust::types::Vector3) -> Re
     else { Err(format!("{name} must be nonzero")) }
 }
 
+#[cfg(feature = "host")]
+fn insert_scale(name: &str, value: f64) -> Result<(), String> {
+    if value.is_finite() && value.abs() >= 1e-12 { Ok(()) }
+    else { Err(format!("{name} must be finite and nonzero")) }
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -167,6 +173,34 @@ pub fn validate_entity_mutation(
                 return Err("Face3D.invisible_edges has unknown bits".into());
             }
         }
+        (EntityType::Insert(old), EntityType::Insert(new)) => {
+            if old.block_name != new.block_name || old.attributes != new.attributes ||
+                old.view_rep_handle != new.view_rep_handle || old.seqend_handle != new.seqend_handle {
+                return Err("Insert block identity and attached records cannot change in a geometry transaction".into());
+            }
+            changed3("Insert.insert_point", &old.insert_point, &new.insert_point)?;
+            if !same3(&old.normal, &new.normal) { solid_normal("Insert.normal", &new.normal)?; }
+            for (name, before, after) in [
+                ("x_scale", old.x_scale(), new.x_scale()),
+                ("y_scale", old.y_scale(), new.y_scale()),
+                ("z_scale", old.z_scale(), new.z_scale()),
+            ] {
+                if before.to_bits() != after.to_bits() { insert_scale(&format!("Insert.{name}"), after)?; }
+            }
+            for (name, before, after) in [
+                ("rotation", old.rotation, new.rotation),
+                ("column_spacing", old.column_spacing, new.column_spacing),
+                ("row_spacing", old.row_spacing, new.row_spacing),
+            ] {
+                if before.to_bits() != after.to_bits() && !after.is_finite() {
+                    return Err(format!("Insert.{name} must be finite"));
+                }
+            }
+            if (old.column_count != new.column_count && new.column_count == 0) ||
+                (old.row_count != new.row_count && new.row_count == 0) {
+                return Err("Insert array counts must be greater than zero".into());
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -222,7 +256,7 @@ mod tests {
             if entry.scope != EntityScope::Canvas || !matches!(entry.kind.as_str(),
                 "Point" | "Line" | "Circle" | "Arc" | "Ellipse" | "Polyline" |
                 "Polyline2D" | "Polyline3D" | "LwPolyline" | "Spline" | "Text" | "MText" |
-                "Ray" | "XLine" | "Solid" | "Face3D") {
+                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert") {
                 assert!(entry.properties.iter().all(|p| p.model_access != ModelAccess::ReadWrite
                     || (entry.scope == EntityScope::Canvas && p.name == "layer")), "{}", entry.kind);
             }
@@ -249,6 +283,11 @@ mod tests {
             "Face3D.first_corner".to_owned(), "Face3D.second_corner".to_owned(),
             "Face3D.third_corner".to_owned(), "Face3D.fourth_corner".to_owned(),
             "Face3D.invisible_edges".to_owned(),
+            "Insert.insert_point".to_owned(), "Insert.x_scale".to_owned(),
+            "Insert.y_scale".to_owned(), "Insert.z_scale".to_owned(),
+            "Insert.rotation".to_owned(), "Insert.normal".to_owned(),
+            "Insert.column_count".to_owned(), "Insert.row_count".to_owned(),
+            "Insert.column_spacing".to_owned(), "Insert.row_spacing".to_owned(),
         ]));
     }
 
@@ -263,6 +302,17 @@ mod tests {
                 assert_eq!(layer.validation, "transaction_nonempty");
             }
         }
+    }
+
+    #[test]
+    fn insert_catalog_separates_transform_writes_from_block_identity() {
+        let catalog: EntityCoverageCatalog = serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
+        let insert = catalog.entity_kinds.iter().find(|entry| entry.kind == "Insert").unwrap();
+        let block_name = insert.properties.iter().find(|property| property.name == "block_name").unwrap();
+        assert_eq!(block_name.model_access, ModelAccess::ReadOnly);
+        assert_eq!(block_name.validation, "none");
+        assert!(insert.properties.iter().find(|property| property.name == "attributes").unwrap().model_access == ModelAccess::Unmapped);
+        assert!(insert.properties.iter().find(|property| property.name == "insert_point").unwrap().model_access == ModelAccess::ReadWrite);
     }
 
     #[cfg(feature = "host")]
@@ -324,6 +374,30 @@ mod tests {
         changed.invisible_edges = acadrust::entities::InvisibleEdgeFlags::from_bits(0x10);
         assert!(validate_entity_mutation(&acadrust::EntityType::Face3D(face), &acadrust::EntityType::Face3D(changed))
             .unwrap_err().contains("Face3D.invisible_edges"));
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn insert_transaction_checks_transforms_and_protects_references() {
+        use crate::host::acadrust::{self, types::Vector3};
+        let before = acadrust::entities::Insert::new("DOOR", Vector3::new(1.0, 2.0, 0.0));
+        let mut moved = before.clone();
+        moved.insert_point = Vector3::new(5.0, 6.0, 0.0);
+        moved.set_x_scale(2.0);
+        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before.clone()),
+            &acadrust::EntityType::Insert(moved)).is_ok());
+        let mut bad = before.clone();
+        bad.set_y_scale(f64::NAN);
+        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before.clone()),
+            &acadrust::EntityType::Insert(bad)).unwrap_err().contains("Insert.y_scale"));
+        let mut bad = before.clone();
+        bad.column_count = 0;
+        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before.clone()),
+            &acadrust::EntityType::Insert(bad)).unwrap_err().contains("array counts"));
+        let mut bad = before.clone();
+        bad.block_name = "OTHER".into();
+        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before),
+            &acadrust::EntityType::Insert(bad)).unwrap_err().contains("block identity"));
     }
 
     #[cfg(feature = "host")]

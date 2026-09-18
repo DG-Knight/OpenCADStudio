@@ -24,6 +24,7 @@ struct EntityCoveragePolicy {
     internal_kinds: Vec<String>,
     opaque_kinds: Vec<String>,
     editable: BTreeMap<String, Vec<String>>,
+    readable: BTreeMap<String, Vec<String>>,
     aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
 
@@ -510,7 +511,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
     let variants = &registry.types[&TypeId::new("EntityType")].variants;
     let variant_names: HashSet<&str> = variants.iter().map(|v| v.name.as_str()).collect();
     for name in policy.internal_kinds.iter().chain(&policy.opaque_kinds)
-        .chain(policy.editable.keys()) {
+        .chain(policy.editable.keys()).chain(policy.readable.keys()) {
         assert!(variant_names.contains(name.as_str()), "coverage policy names unknown kind: {name}");
     }
     for name in &policy.internal_kinds {
@@ -532,8 +533,9 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
             else if policy.opaque_kinds.contains(kind) { EntityScope::Opaque }
             else { EntityScope::Canvas };
         let editable = policy.editable.get(kind).cloned().unwrap_or_default();
-        let mut unresolved: HashSet<String> = editable.iter().cloned().collect();
-        assert_eq!(unresolved.len(), editable.len(), "duplicate editable property in {kind}");
+        let readable = policy.readable.get(kind).cloned().unwrap_or_default();
+        let mut unresolved: HashSet<String> = editable.iter().chain(&readable).cloned().collect();
+        assert_eq!(unresolved.len(), editable.len() + readable.len(), "duplicate mapped property in {kind}");
         let aliases = policy.aliases.get(kind);
         let mut properties = vec![PropertyCoverage {
             name: "kind".into(), source_path: "<variant>".into(), type_id: "String".into(),
@@ -563,13 +565,13 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
         let shape = &registry.types[&shape_type];
         for field in &shape.fields {
             if field.name == "common" { continue; }
-            let exposed = editable.iter().find(|name| {
+            let exposed = editable.iter().chain(&readable).find(|name| {
                 aliases.and_then(|map| map.get(*name)).map_or(name.as_str(), String::as_str) == field.name
             });
             let (name, access) = match exposed {
                 Some(name) => {
                     unresolved.remove(name);
-                    ((*name).clone(), ModelAccess::ReadWrite)
+                    ((*name).clone(), if editable.contains(name) { ModelAccess::ReadWrite } else { ModelAccess::ReadOnly })
                 }
                 None => (field.name.clone(), ModelAccess::Unmapped),
             };
@@ -579,7 +581,9 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                     ("Circle" | "Arc", "center" | "radius") |
                     ("Ray" | "XLine", "base_point" | "direction") |
                     ("Solid", "first_corner" | "second_corner" | "third_corner" | "fourth_corner" | "normal" | "thickness") |
-                    ("Face3D", "first_corner" | "second_corner" | "third_corner" | "fourth_corner" | "invisible_edges")) {
+                    ("Face3D", "first_corner" | "second_corner" | "third_corner" | "fourth_corner" | "invisible_edges") |
+                    ("Insert", "insert_point" | "x_scale" | "y_scale" | "z_scale" | "rotation" | "normal" |
+                        "column_count" | "row_count" | "column_spacing" | "row_spacing")) {
                     "transaction_geometry"
                 } else { "type_conversion_only" };
             properties.push(PropertyCoverage {

@@ -28,11 +28,14 @@ The v7 transaction path checks changed Point locations, Line endpoints,
 Circle/Arc centers, Ray/XLine base points, and Solid/Face3D corners for finite
 coordinates. Circle/Arc radii must be finite and positive; Ray/XLine directions
 must be unit vectors; Solid normals must be nonzero, its thickness finite,
-and Face3D invisible-edge flags limited to four known bits. Those fields report `transaction_geometry` in the
+and Face3D invisible-edge flags limited to four known bits. Insert transactions
+validate placement, finite rotation and spacing, nonzero finite scale and normal,
+and positive array counts. They reject changes to the referenced block and
+attached attribute and sequence records. Those fields report `transaction_geometry` in the
 catalog. All 43 canvas kinds also support nonempty `layer` changes through
 the same undoable transaction; internal and opaque variants remain read-only
 through the document model. The adapter accepts only `layer` patches for
-canvas kinds outside its 16 geometry converters. Other writable properties
+canvas kinds outside its 17 geometry converters. Other writable properties
 still report `type_conversion_only`; broader CAD range and cross-property
 checks remain outstanding.
 The host's `entity_snapshot` helper serializes any typed entity as a detached
@@ -45,7 +48,11 @@ null and cannot be used as a lossless replacement entity.
 
 The separate PandoraBox adapter currently maps these entity kinds to Python
 dictionaries: Point, Line, Circle, Arc, Ellipse, Polyline, Polyline2D,
-Polyline3D, LwPolyline, Spline, Text, MText, Ray, XLine, Solid, and Face3D. The authoritative per-field mapping
+Polyline3D, LwPolyline, Spline, Text, MText, Ray, XLine, Solid, Face3D, and
+Insert. Insert is update-only: the block name is readable but cannot be
+changed, and Python creation is withheld until block-table references can be
+established safely. Attached attributes remain available in the raw snapshot.
+The authoritative per-field mapping
 is `plugins/opencad-python/entity_manifest.json` in PandoraBox. The generated
 mapping excludes fields it cannot represent, including common color, line
 weight, transparency, Polyline3D smooth type, and MText background color.
@@ -81,7 +88,7 @@ Input tokens are bound to the drawing tab that requested the pick. Polling a
 token from another tab returns no result and does not consume it.
 
 Python `doc.entities[handle]` returns a descriptor for every entity. For kinds
-outside the 16-kind generated schema it contains only handle, kind, and layer;
+outside the 17-kind generated schema it contains only handle, kind, and layer;
 `layer` is editable on canvas kinds. `doc.coverage()` enumerates the
 catalog; `doc.coverage("Line")` and `line.coverage` return one entry. For
 covered kinds, the coverage object lists actual readable and editable
