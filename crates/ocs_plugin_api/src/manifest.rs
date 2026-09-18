@@ -19,8 +19,9 @@
 /// vtable so API v2 plugins keep working. v4 adds full-duplex notifications on
 /// a multiplexed socket while leaving the V2/V3 ABI and protocol untouched. v5
 /// adds the `BuiltinPlugin::on_load` lifecycle callback and
-/// `HostApi::document_path`.
-pub const API_VERSION: u32 = 5;
+/// `HostApi::document_path`. v6 appends generic host system-variable access
+/// (`HostApi::system_variable` / `set_system_variable`).
+pub const API_VERSION: u32 = 6;
 
 /// Oldest plugin API major the current host still loads. This keeps previously
 /// compiled cdylibs usable as long as their vtable layout is a prefix of the
@@ -28,7 +29,7 @@ pub const API_VERSION: u32 = 5;
 pub const API_VERSION_MIN_SUPPORTED: u32 = 2;
 
 /// Environment variable that caps the API major accepted by the host at
-/// runtime. Set to `4` to disable V5 plugins, `3` to disable V4, or `2` for
+/// runtime. Set to `5` to disable V6 plugins, `4` to disable V5, or `2` for
 /// V2-only mode.
 pub const MAX_API_VERSION_ENV: &str = "OCS_PLUGIN_MAX_API_VERSION";
 

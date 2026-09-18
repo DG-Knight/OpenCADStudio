@@ -60,6 +60,13 @@ pub enum LogLevel {
     Error,
 }
 
+/// Value of a host-managed drafting or document setting exposed to plugins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HostSettingValue {
+    Text(String),
+    Number(f64),
+}
+
 /// A notification the host sends to a plugin. These are best-effort,
 /// full-duplex messages correlated with an optional `command_id`.
 #[derive(Debug, Clone, PartialEq)]
@@ -551,6 +558,22 @@ pub trait HostApi {
     fn document_path(&self, tab_id: u64) -> Option<PathBuf> {
         let _ = tab_id;
         None
+    }
+
+    /// Read a named host setting without invoking the command dispatcher.
+    /// Names are case-insensitive. Hosts may support only a subset.
+    fn system_variable(&self, _name: &str) -> Option<HostSettingValue> {
+        None
+    }
+
+    /// Set a named host setting without re-entering command dispatch.
+    /// Returns the effective value after validation and normalization.
+    fn set_system_variable(
+        &mut self,
+        _name: &str,
+        _value: HostSettingValue,
+    ) -> Result<HostSettingValue, String> {
+        Err("system variable is not supported by this host".to_owned())
     }
 }
 

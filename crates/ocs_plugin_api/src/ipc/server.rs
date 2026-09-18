@@ -77,5 +77,11 @@ pub fn handle_plugin_request(
         DocumentPath { tab_id } => PluginResponse::DocumentPath(
             host.document_path(tab_id).map(|path| path.into_os_string()),
         ),
+        GetSystemVariable { name } => {
+            PluginResponse::SystemVariable(host.system_variable(&name))
+        }
+        SetSystemVariable { name, value } => {
+            PluginResponse::SystemVariableResult(host.set_system_variable(&name, value))
+        }
     }
 }

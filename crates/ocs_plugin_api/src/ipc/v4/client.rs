@@ -17,7 +17,7 @@ use interprocess::TryClone;
 
 use crate::host::{
     DocumentReader, ExecutionResult, HostApi, HostNotification, InteractiveCommand,
-    PluginNotification, PluginRequestSender, PluginRequestError, ReaderEntity,
+    PluginNotification, PluginRequestSender, PluginRequestError, ReaderEntity, HostSettingValue,
 };
 use crate::ipc::protocol::{
     HostRequest, HostResponse, PluginRequest, PluginResponse, RunnerHandshake,
@@ -728,6 +728,34 @@ impl HostApi for V4PluginHostApi {
                 eprintln!("[plugin] DocumentPath request failed: {e}");
                 None
             }
+        }
+    }
+
+    fn system_variable(&self, name: &str) -> Option<HostSettingValue> {
+        match self.request(PluginRequest::GetSystemVariable { name: name.to_owned() }) {
+            Ok(PluginResponse::SystemVariable(value)) => value,
+            _ => None,
+        }
+    }
+
+    fn set_system_variable(
+        &mut self,
+        name: &str,
+        value: HostSettingValue,
+    ) -> Result<HostSettingValue, String> {
+        match self.request(PluginRequest::SetSystemVariable {
+            name: name.to_owned(),
+            value,
+        }) {
+            Ok(PluginResponse::SystemVariableResult(result)) => {
+                if result.is_ok() {
+                    self.document_cache = OnceCell::new();
+                }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected system variable response: {other:?}")),
+            Err(error) => Err(error.to_string()),
         }
     }
 }

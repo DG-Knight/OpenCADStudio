@@ -4,7 +4,7 @@ use std::any::Any;
 
 use acadrust::tables::AppId;
 use acadrust::xdata::ExtendedDataRecord;
-use ocs_plugin_api::host::{CadDocument, EntityType, Handle, HostApi};
+use ocs_plugin_api::host::{CadDocument, EntityType, Handle, HostApi, HostSettingValue};
 use ocs_plugin_api::shm::{DocumentSnapshotStore, DocumentViewData};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -250,6 +250,41 @@ impl<'a> HostSession<'a> {
         self.app.tabs[self.tab].dirty = true;
     }
 
+    pub fn system_variable(&self, name: &str) -> Option<HostSettingValue> {
+        match name.to_ascii_uppercase().as_str() {
+            "CLAYER" => Some(HostSettingValue::Text(
+                self.document().header.current_layer_name.clone(),
+            )),
+            "SNAPANG" => Some(HostSettingValue::Number(self.app.snap_angle_deg as f64)),
+            _ => None,
+        }
+    }
+
+    pub fn set_system_variable(
+        &mut self,
+        name: &str,
+        value: HostSettingValue,
+    ) -> Result<HostSettingValue, String> {
+        match (name.to_ascii_uppercase().as_str(), value) {
+            ("CLAYER", HostSettingValue::Text(layer)) => {
+                self.app.set_current_layer_name(self.tab, &layer)?;
+                Ok(HostSettingValue::Text(layer))
+            }
+            ("SNAPANG", HostSettingValue::Number(angle)) if (angle as f32).is_finite() => {
+                self.app.snap_angle_deg = (angle as f32).rem_euclid(360.0);
+                Ok(HostSettingValue::Number(self.app.snap_angle_deg as f64))
+            }
+            ("SNAPANG", HostSettingValue::Number(_)) => {
+                Err("SNAPANG: finite number required".to_owned())
+            }
+            ("CLAYER", _) | ("SNAPANG", _) => Err(format!(
+                "{}: wrong value type",
+                name.to_ascii_uppercase()
+            )),
+            _ => Err(format!("unsupported system variable {name:?}")),
+        }
+    }
+
     pub fn push_info(&mut self, msg: &str) {
         self.app.command_line.push_info(msg);
     }
@@ -355,6 +390,16 @@ impl HostApi for HostSession<'_> {
     }
     fn document_path(&self, tab_id: u64) -> Option<std::path::PathBuf> {
         self.document_path(tab_id)
+    }
+    fn system_variable(&self, name: &str) -> Option<HostSettingValue> {
+        self.system_variable(name)
+    }
+    fn set_system_variable(
+        &mut self,
+        name: &str,
+        value: HostSettingValue,
+    ) -> Result<HostSettingValue, String> {
+        self.set_system_variable(name, value)
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn document_view_v4(&mut self, tab_id: u64) -> Option<ocs_plugin_api::shm::DocumentViewInfo> {
@@ -513,6 +558,35 @@ mod tests {
     use acadrust::entities::Point;
     use acadrust::xdata::XDataValue;
     use ocs_plugin_api::host::DocumentReader;
+
+    #[test]
+    fn system_variables_change_without_command_reentry() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        assert_eq!(host.system_variable("clayer"), Some(HostSettingValue::Text("0".into())));
+        assert_eq!(host.system_variable("SNAPANG"), Some(HostSettingValue::Number(0.0)));
+        assert!(host.set_system_variable("CLAYER", HostSettingValue::Text("Missing".into())).is_err());
+        assert_eq!(host.system_variable("CLAYER"), Some(HostSettingValue::Text("0".into())));
+
+        let mut point = Point::new();
+        point.common.layer = "Annotations".into();
+        host.add_entity(EntityType::Point(point));
+        assert_eq!(host.set_system_variable("clayer", HostSettingValue::Text("Annotations".into())),
+                   Ok(HostSettingValue::Text("Annotations".into())));
+        assert_eq!(host.system_variable("CLAYER"), Some(HostSettingValue::Text("Annotations".into())));
+        assert_eq!(host.app.tabs[0].active_layer, "Annotations");
+        assert_eq!(host.app.tabs[0].layers.current_layer, "Annotations");
+        assert_eq!(host.app.ribbon.active_layer, "Annotations");
+        assert!(host.app.tabs[0].dirty);
+
+        assert_eq!(host.set_system_variable("snapang", HostSettingValue::Number(450.0)),
+                   Ok(HostSettingValue::Number(90.0)));
+        assert_eq!(host.system_variable("SNAPANG"), Some(HostSettingValue::Number(90.0)));
+        assert!(host.set_system_variable("SNAPANG", HostSettingValue::Number(f64::INFINITY)).is_err());
+        assert!(host.set_system_variable("SNAPANG", HostSettingValue::Number(f64::MAX)).is_err());
+        assert_eq!(host.system_variable("SNAPANG"), Some(HostSettingValue::Number(90.0)));
+    }
 
     #[test]
     fn xdata_record_round_trips_and_registers_appid() {

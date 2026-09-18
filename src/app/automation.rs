@@ -739,6 +739,16 @@ impl OpenCADStudio {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clayer_command_sets_layer_used_by_new_geometry() {
+        let mut app = super::OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LAYER NEW Annotations"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"CLAYER Annotations"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,0"}"#);
+        let lines = app.automation_op(r#"{"op":"query","type":"Line"}"#);
+        assert_eq!(lines["entities"][0]["layer"], "Annotations");
+    }
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn built_in_edits_advance_plugin_document_fingerprint_once() {

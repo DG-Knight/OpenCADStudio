@@ -9,7 +9,7 @@ cheaply. The runtime host surface is enabled by the `host` feature.
 ## Plugin Architecture
 
 OCS is scriptable and extensible through a versioned plugin API. The API
-supports four major generations: **V2**, **V3**, **V4**, and **V5**. Each
+supports five major generations: **V2**, **V3**, **V4**, **V5**, and **V6**. Each
 generation keeps the previous ABI stable by appending new vtable entries and new
 enum variants at the end, so older plugins continue to load on newer hosts.
 
@@ -19,16 +19,21 @@ enum variants at the end, so older plugins continue to load on newer hosts.
 | **V3** | Out-of-process runner | Local cached `document()`/`document_mut()` + shared-memory `DocumentReader`/`document_view` for large reads | New vtable entries appended; new `PluginRequest`/`PluginResponse` variants appended |
 | **V4** | Out-of-process runner over a multiplexed local socket | Full-duplex notifications + asynchronous REPL `ExecuteCode` | New `HostToPluginV4`/`PluginToHostV4` frame layer; `BuiltinPlugin::on_notification` and `start_execute_code` appended to trait |
 | **V5** | V4 multiplexed runner | One-shot initialization + tab-keyed document paths | `BuiltinPlugin::on_load` and `HostApi::document_path` appended to the traits |
+| **V6** | V4 multiplexed runner | Read and write supported host system variables | `HostApi::system_variable` and `HostApi::set_system_variable` appended to the trait; request/response variants appended |
 
 The host controls which generations are accepted at runtime through
-`OCS_PLUGIN_MAX_API_VERSION` (e.g. `2` for V2-only mode, `4` to disable V5). The
-current host advertises [`API_VERSION = 5`](src/manifest.rs) and supports plugins
+`OCS_PLUGIN_MAX_API_VERSION` (e.g. `2` for V2-only mode, `5` to disable V6). The
+current host advertises [`API_VERSION = 6`](src/manifest.rs) and supports plugins
 back to `API_VERSION_MIN_SUPPORTED = 2`.
 
 V5 calls `BuiltinPlugin::on_load` once after the runner connects and before the
 first user command. Plugins can cache `HostApi::plugin_request_sender()` there
 for worker-thread access. A panic in the callback fails plugin loading.
 `HostApi::document_path(tab_id)` returns the saved path for a document tab.
+
+V6 adds a typed system-variable interface. This fork currently implements
+`CLAYER` (current drawing layer) and `SNAPANG` (snap-angle degrees). Unknown
+variables return an error rather than silently accepting a value.
 
 ### High-level layout
 

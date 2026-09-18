@@ -2649,10 +2649,7 @@ impl OpenCADStudio {
                     self.command_line
                         .push_output(crate::tf!("CLAYER = \"{cur}\"").as_ref());
                 } else {
-                    if self.tabs[i].scene.document.layers.contains(name_arg) {
-                        self.tabs[i].scene.document.header.current_layer_name =
-                            name_arg.to_string();
-                        self.tabs[i].dirty = true;
+                    if self.set_current_layer_name(i, name_arg).is_ok() {
                         self.command_line
                             .push_output(crate::tf!("CLAYER set to \"{name_arg}\"").as_ref());
                     } else {

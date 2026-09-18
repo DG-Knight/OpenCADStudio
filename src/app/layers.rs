@@ -2,6 +2,27 @@ use super::OpenCADStudio;
 use crate::ui;
 
 impl OpenCADStudio {
+    /// Apply the current layer to the document header and all per-tab/UI
+    /// creation state. Both built-in commands and plugin settings use this.
+    pub(super) fn set_current_layer_name(&mut self, tab: usize, layer: &str) -> Result<(), String> {
+        let handle = self.tabs[tab]
+            .scene
+            .document
+            .layers
+            .get(layer)
+            .map(|entry| entry.handle)
+            .ok_or_else(|| format!("layer {layer:?} does not exist"))?;
+        self.tabs[tab].scene.document.header.current_layer_name = layer.to_owned();
+        self.tabs[tab].scene.document.header.current_layer_handle = handle;
+        self.tabs[tab].active_layer = layer.to_owned();
+        self.tabs[tab].layers.current_layer = layer.to_owned();
+        self.tabs[tab].dirty = true;
+        if tab == self.active_tab {
+            self.ribbon.active_layer = layer.to_owned();
+            self.refresh_layer_panel();
+        }
+        Ok(())
+    }
     pub(super) fn load_layer_state_editor(&mut self, selected: Option<String>) {
         let i = self.active_tab;
         if let Some(name) = selected {

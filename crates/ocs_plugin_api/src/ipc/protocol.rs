@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::host::{CommandSource, CommandStep};
+use crate::host::{CommandSource, CommandStep, HostSettingValue};
 use crate::manifest::ApiVersion;
 use crate::ribbon::owned::{OwnedPluginManifest, OwnedRibbonGroup};
 
@@ -138,6 +138,10 @@ pub enum PluginRequest {
     GetTabId,
     /// V5: ask the host for the filesystem path of the document in `tab_id`.
     DocumentPath { tab_id: u64 },
+    /// Read a host-managed setting without nested command dispatch.
+    GetSystemVariable { name: String },
+    /// Change a host-managed setting without nested command dispatch.
+    SetSystemVariable { name: String, value: HostSettingValue },
 }
 
 /// Responses the host sends back for `PluginRequest`.
@@ -164,6 +168,8 @@ pub enum PluginResponse {
     TabId(u64),
     /// V5: filesystem path of the document in the requested tab, if any.
     DocumentPath(Option<std::ffi::OsString>),
+    SystemVariable(Option<HostSettingValue>),
+    SystemVariableResult(Result<HostSettingValue, String>),
 }
 
 /// Messages sent from the host to the plugin runner.
