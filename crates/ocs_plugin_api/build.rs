@@ -545,6 +545,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
         for field in &common.fields {
             let (name, access) = match field.name.as_str() {
                 "handle" => ("handle".to_owned(), ModelAccess::ReadOnly),
+                "owner_handle" => ("owner_handle".to_owned(), ModelAccess::ReadOnly),
                 "layer" if scope == EntityScope::Canvas => {
                     unresolved.remove("layer");
                     ("layer".to_owned(), ModelAccess::ReadWrite)
@@ -588,7 +589,13 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                         "dimension_style_name" | "text_height" | "dimension_gap") |
                     ("Shape", "insertion_point" | "size" | "shape_name" | "shape_number" |
                         "rotation" | "relative_x_scale" | "oblique_angle" | "normal" |
-                        "thickness" | "style_name")) {
+                        "thickness" | "style_name") |
+                    ("AttributeDefinition", "tag" | "prompt" | "default_value" |
+                        "insertion_point" | "alignment_point" | "height" | "rotation" |
+                        "width_factor" | "oblique_angle" | "text_style" |
+                        "text_generation_flags" | "horizontal_alignment" |
+                        "vertical_alignment" | "flags" | "field_length" | "normal" |
+                        "mtext_flag" | "is_multiline" | "line_count" | "lock_position")) {
                     "transaction_geometry"
                 } else { "type_conversion_only" };
             properties.push(PropertyCoverage {

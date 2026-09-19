@@ -106,6 +106,25 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             if !value.thickness.is_finite() { return Err("Shape.thickness must be finite".into()); }
             if value.style_name.trim().is_empty() { return Err("Shape.style_name is empty".into()); }
         }
+        EntityType::AttributeDefinition(value) => {
+            finite_vector("AttributeDefinition.insertion_point", &value.insertion_point)?;
+            finite_vector("AttributeDefinition.alignment_point", &value.alignment_point)?;
+            solid_normal("AttributeDefinition.normal", &value.normal)?;
+            if value.tag.trim().is_empty() || value.tag.chars().any(char::is_whitespace) {
+                return Err("AttributeDefinition.tag must be nonempty and contain no whitespace".into());
+            }
+            if !value.height.is_finite() || value.height <= 0.0 { return Err("AttributeDefinition.height must be finite and greater than zero".into()); }
+            if !value.rotation.is_finite() { return Err("AttributeDefinition.rotation must be finite".into()); }
+            if !value.width_factor.is_finite() || value.width_factor.abs() < 1e-12 {
+                return Err("AttributeDefinition.width_factor must be finite and nonzero".into());
+            }
+            if !value.oblique_angle.is_finite() || value.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2 {
+                return Err("AttributeDefinition.oblique_angle must be finite and between -PI/2 and PI/2".into());
+            }
+            if value.text_style.trim().is_empty() { return Err("AttributeDefinition.text_style is empty".into()); }
+            if value.field_length < 0 { return Err("AttributeDefinition.field_length must be nonnegative".into()); }
+            if value.line_count < 1 { return Err("AttributeDefinition.line_count must be greater than zero".into()); }
+        }
         _ => {}
     }
     Ok(())
@@ -276,6 +295,45 @@ pub fn validate_entity_mutation(
                 return Err("Shape.style_handle is read-only".into());
             }
         }
+        (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
+            changed3("AttributeDefinition.insertion_point", &old.insertion_point, &new.insertion_point)?;
+            changed3("AttributeDefinition.alignment_point", &old.alignment_point, &new.alignment_point)?;
+            if !same3(&old.normal, &new.normal) { solid_normal("AttributeDefinition.normal", &new.normal)?; }
+            if old.tag != new.tag && (new.tag.trim().is_empty() || new.tag.chars().any(char::is_whitespace)) {
+                return Err("AttributeDefinition.tag must be nonempty and contain no whitespace".into());
+            }
+            if old.height.to_bits() != new.height.to_bits() && (!new.height.is_finite() || new.height <= 0.0) {
+                return Err("AttributeDefinition.height must be finite and greater than zero".into());
+            }
+            for (name, before, after) in [
+                ("rotation", old.rotation, new.rotation),
+                ("oblique_angle", old.oblique_angle, new.oblique_angle),
+            ] {
+                if before.to_bits() != after.to_bits() && !after.is_finite() {
+                    return Err(format!("AttributeDefinition.{name} must be finite"));
+                }
+            }
+            if old.width_factor.to_bits() != new.width_factor.to_bits()
+                && (!new.width_factor.is_finite() || new.width_factor.abs() < 1e-12) {
+                return Err("AttributeDefinition.width_factor must be finite and nonzero".into());
+            }
+            if old.oblique_angle.to_bits() != new.oblique_angle.to_bits()
+                && new.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2 {
+                return Err("AttributeDefinition.oblique_angle must be between -PI/2 and PI/2".into());
+            }
+            if old.text_style != new.text_style && new.text_style.trim().is_empty() {
+                return Err("AttributeDefinition.text_style is empty".into());
+            }
+            if old.field_length != new.field_length && new.field_length < 0 {
+                return Err("AttributeDefinition.field_length must be nonnegative".into());
+            }
+            if old.line_count != new.line_count && new.line_count < 1 {
+                return Err("AttributeDefinition.line_count must be greater than zero".into());
+            }
+            if old.embedded_mtext != new.embedded_mtext {
+                return Err("AttributeDefinition.embedded_mtext is unmapped and read-only".into());
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -289,6 +347,15 @@ pub fn validate_canvas_entity_references(
     entity: &crate::host::EntityType,
 ) -> Result<(), String> {
     use crate::host::EntityType;
+    let owner = entity.common().owner_handle;
+    if !owner.is_null() {
+        let block_owner = document.block_records.iter().any(|record| record.handle == owner);
+        let insert_owner = matches!(entity, EntityType::AttributeEntity(_))
+            && matches!(document.get_entity(owner), Some(EntityType::Insert(_)));
+        if !block_owner && !insert_owner {
+            return Err(format!("entity owner {owner:?} does not exist"));
+        }
+    }
     if let EntityType::Tolerance(value) = entity {
         let found = value.dimension_style_handle.filter(|handle| !handle.is_null()).map_or_else(
             || document.dim_styles.iter().any(|style| style.name.eq_ignore_ascii_case(value.dimension_style_name.trim())),
@@ -303,6 +370,19 @@ pub fn validate_canvas_entity_references(
             .ok_or_else(|| format!("Shape text style {:?} does not exist", value.style_name))?;
         if !style.is_shape_file { return Err(format!("Shape text style {:?} is not a shape-file style", style.name)); }
         if style.font_file.trim().is_empty() { return Err(format!("Shape text style {:?} has no SHX file", style.name)); }
+    }
+    if let EntityType::AttributeDefinition(value) = entity {
+        let owner = entity.common().owner_handle;
+        let block = document.block_records.iter().find(|record| record.handle == owner)
+            .ok_or_else(|| "AttributeDefinition requires an existing block-record owner".to_owned())?;
+        if block.is_model_space() || block.is_paper_space() {
+            return Err("AttributeDefinition owner must be a block definition".into());
+        }
+        let style = document.text_styles.get(value.text_style.trim())
+            .ok_or_else(|| format!("AttributeDefinition text style {:?} does not exist", value.text_style))?;
+        if style.is_shape_file {
+            return Err(format!("AttributeDefinition text style {:?} is a shape-file style", style.name));
+        }
     }
     Ok(())
 }
@@ -364,6 +444,7 @@ mod tests {
             assert!(variants.iter().any(|v| v.name == entry.kind));
             assert!(entry.properties.iter().any(|p| p.name == "handle" && p.model_access == ModelAccess::ReadOnly));
             assert!(entry.properties.iter().any(|p| p.name == "kind" && p.model_access == ModelAccess::ReadOnly));
+            assert!(entry.properties.iter().any(|p| p.name == "owner_handle" && p.model_access == ModelAccess::ReadOnly));
             let mut source_paths = std::collections::HashSet::new();
             for property in &entry.properties {
                 assert!(source_paths.insert(&property.source_path), "duplicate source path in {}: {}", entry.kind, property.source_path);
@@ -382,7 +463,8 @@ mod tests {
             if entry.scope != EntityScope::Canvas || !matches!(entry.kind.as_str(),
                 "Point" | "Line" | "Circle" | "Arc" | "Ellipse" | "Polyline" |
                 "Polyline2D" | "Polyline3D" | "LwPolyline" | "Spline" | "Text" | "MText" |
-                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert" | "Tolerance" | "Shape") {
+                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert" | "Tolerance" | "Shape" |
+                "AttributeDefinition") {
                 assert!(entry.properties.iter().all(|p| p.model_access != ModelAccess::ReadWrite
                     || (entry.scope == EntityScope::Canvas && p.name == "layer")), "{}", entry.kind);
             }
@@ -423,6 +505,21 @@ mod tests {
             "Shape.rotation".to_owned(), "Shape.relative_x_scale".to_owned(),
             "Shape.oblique_angle".to_owned(), "Shape.normal".to_owned(),
             "Shape.thickness".to_owned(), "Shape.style_name".to_owned(),
+            "AttributeDefinition.tag".to_owned(), "AttributeDefinition.prompt".to_owned(),
+            "AttributeDefinition.default_value".to_owned(),
+            "AttributeDefinition.insertion_point".to_owned(),
+            "AttributeDefinition.alignment_point".to_owned(),
+            "AttributeDefinition.height".to_owned(), "AttributeDefinition.rotation".to_owned(),
+            "AttributeDefinition.width_factor".to_owned(),
+            "AttributeDefinition.oblique_angle".to_owned(),
+            "AttributeDefinition.text_style".to_owned(),
+            "AttributeDefinition.text_generation_flags".to_owned(),
+            "AttributeDefinition.horizontal_alignment".to_owned(),
+            "AttributeDefinition.vertical_alignment".to_owned(),
+            "AttributeDefinition.flags".to_owned(), "AttributeDefinition.field_length".to_owned(),
+            "AttributeDefinition.normal".to_owned(), "AttributeDefinition.mtext_flag".to_owned(),
+            "AttributeDefinition.is_multiline".to_owned(), "AttributeDefinition.line_count".to_owned(),
+            "AttributeDefinition.lock_position".to_owned(),
         ]));
     }
 
@@ -592,5 +689,51 @@ mod tests {
         expected.common_mut().layer = "HATCHES".into();
         assert_eq!(patched, expected);
         assert!(patch_canvas_layer(&hatch, " ").is_err());
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn attribute_definition_requires_a_block_owner_and_text_style() {
+        use crate::host::acadrust::{self, entities::{Block, BlockEnd}, types::{Handle, Vector3}};
+        let mut document = acadrust::CadDocument::new();
+        let next = document.next_handle();
+        let record_handle = Handle::new(next);
+        let block_handle = Handle::new(next + 1);
+        let end_handle = Handle::new(next + 2);
+        let mut record = acadrust::tables::BlockRecord::new("TAGBLOCK");
+        record.handle = record_handle;
+        record.block_entity_handle = block_handle;
+        record.block_end_handle = end_handle;
+        document.block_records.add(record).unwrap();
+        let mut block = Block::new("TAGBLOCK", Vector3::ZERO);
+        block.common.handle = block_handle;
+        block.common.owner_handle = record_handle;
+        document.add_entity(acadrust::EntityType::Block(block)).unwrap();
+        let mut end = BlockEnd::new();
+        end.common.handle = end_handle;
+        end.common.owner_handle = record_handle;
+        document.add_entity(acadrust::EntityType::BlockEnd(end)).unwrap();
+
+        let mut definition = acadrust::entities::AttributeDefinition::new(
+            "PART_NO".into(), "Part number".into(), "PN-001".into());
+        definition.common.owner_handle = record_handle;
+        definition.insertion_point = Vector3::new(1.0, 2.0, 0.0);
+        let entity = acadrust::EntityType::AttributeDefinition(definition.clone());
+        validate_new_canvas_entity(&entity).unwrap();
+        validate_canvas_entity_references(&document, &entity).unwrap();
+
+        definition.common.owner_handle = Handle::NULL;
+        assert!(validate_canvas_entity_references(
+            &document, &acadrust::EntityType::AttributeDefinition(definition.clone()))
+            .unwrap_err().contains("block-record owner"));
+        definition.common.owner_handle = record_handle;
+        definition.text_style = "Missing".into();
+        assert!(validate_canvas_entity_references(
+            &document, &acadrust::EntityType::AttributeDefinition(definition.clone()))
+            .unwrap_err().contains("does not exist"));
+        definition.text_style = "Standard".into();
+        definition.tag = "BAD TAG".into();
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::AttributeDefinition(definition))
+            .unwrap_err().contains("no whitespace"));
     }
 }

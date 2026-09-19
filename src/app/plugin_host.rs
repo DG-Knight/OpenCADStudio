@@ -1020,6 +1020,174 @@ mod tests {
     }
 
     #[test]
+    fn staged_python_attribute_definition_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let next = host.document().next_handle();
+        let block_record_handle = Handle::new(next);
+        let block_handle = Handle::new(next + 1);
+        let block_end_handle = Handle::new(next + 2);
+        let mut block_record = acadrust::tables::BlockRecord::new("TAGBLOCK");
+        block_record.handle = block_record_handle;
+        block_record.block_entity_handle = block_handle;
+        block_record.block_end_handle = block_end_handle;
+        host.document_mut().block_records.add(block_record).unwrap();
+        let mut block = acadrust::entities::Block::new(
+            "TAGBLOCK", acadrust::types::Vector3::ZERO);
+        block.common.handle = block_handle;
+        block.common.owner_handle = block_record_handle;
+        host.document_mut().add_entity(EntityType::Block(block)).unwrap();
+        let mut block_end = acadrust::entities::BlockEnd::new();
+        block_end.common.handle = block_end_handle;
+        block_end.common.owner_handle = block_record_handle;
+        host.document_mut().add_entity(EntityType::BlockEnd(block_end)).unwrap();
+        let insert = acadrust::entities::Insert::new(
+            "TAGBLOCK", acadrust::types::Vector3::new(10.0, 0.0, 0.0));
+        let insert_handle = host.document_mut().add_entity(EntityType::Insert(insert)).unwrap();
+
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        ).expect("spawn staged Python plugin");
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        dispatch(&mut host, &format!(concat!(
+            "PY_EVAL ocs.active_document.create_entity('AttributeDefinition',",
+            "owner_handle={},tag='PART_NO',prompt='Part number',default_value='PN-001',",
+            "insertion_point={{'x':1.0,'y':2.0,'z':0.0}},height=2.5).handle"
+        ), block_record_handle.value()));
+        let handle = host.document().entities()
+            .find(|entity| matches!(entity, EntityType::AttributeDefinition(_)))
+            .expect("Python created an AttributeDefinition").common().handle;
+        let Some(EntityType::AttributeDefinition(created)) = host.document().get_entity(handle) else {
+            panic!("expected AttributeDefinition");
+        };
+        assert_eq!(created.common.owner_handle, block_record_handle);
+        assert_eq!(created.tag, "PART_NO");
+        assert_eq!(created.text_style, "Standard");
+        assert!(host.document().block_records.get("TAGBLOCK").unwrap()
+            .entity_handles.contains(&handle));
+        let created = created.clone();
+        dispatch(&mut host, &format!(
+            "PY_EVAL (ocs.active_document.entities[{}].tag, ocs.active_document.entities[{}].owner_handle)",
+            handle.value(), handle.value()));
+        let readback = &host.app.command_line.history.last().unwrap().text;
+        assert!(readback.contains("PART_NO") && readback.contains(&block_record_handle.value().to_string()));
+
+        let script_path = std::env::temp_dir().join(format!(
+            "ocs_attribute_definition_document_model_{}.py", std::process::id()));
+        std::fs::write(&script_path, format!(concat!(
+            "doc = ocs.active_document\n",
+            "definition = doc.entities[{}]\n",
+            "with doc.transaction('Edit attribute definition'):\n",
+            "    definition.insertion_point = (4.0, 5.0, 0.0)\n",
+            "    definition.default_value = 'PN-002'\n",
+            "    definition.rotation = 0.25\n",
+            "    definition.width_factor = 1.25\n",
+            "doc.selection = [definition]\n"
+        ), handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script_path.display()));
+        let _ = std::fs::remove_file(&script_path);
+        let expected = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::AttributeDefinition(edited) = &expected else { unreachable!() };
+        assert_eq!(edited.insertion_point, acadrust::types::Vector3::new(4.0, 5.0, 0.0));
+        assert_eq!(edited.default_value, "PN-002");
+        assert_eq!(edited.rotation, 0.25);
+        assert_eq!(edited.width_factor, 1.25);
+        assert_eq!(edited.common, created.common);
+        assert_eq!(edited.tag, created.tag);
+        assert_eq!(edited.prompt, created.prompt);
+        assert_eq!(edited.text_style, created.text_style);
+        assert_eq!(edited.flags, created.flags);
+        assert_eq!(edited.embedded_mtext, created.embedded_mtext);
+        assert_eq!(host.selection(), vec![handle]);
+        assert!(matches!(host.document().get_entity(insert_handle), Some(EntityType::Insert(value))
+            if value.block_name == "TAGBLOCK"));
+
+        let render = edited.to_render(host.document()).expect("attribute definition render");
+        let crate::scene::convert::acad_to_render::RenderObject::Text(strokes) = render.object else {
+            panic!("expected attribute definition text");
+        };
+        assert!(!strokes.is_empty());
+        assert!(strokes.iter().any(|stroke| stroke.run.as_ref()
+            .is_some_and(|run| run.text.contains("PN-002"))));
+
+        for (label, patch, message) in [
+            ("Reject tag", "'tag':'BAD TAG'", "whitespace"),
+            ("Reject height", "'height':0.0", "greater than zero"),
+            ("Reject style", "'text_style':'Missing'", "does not exist"),
+            ("Reject owner", "'owner_handle':999999", "read-only"),
+        ] {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many({label:?}, [{{'handle':{}, {patch}}}])", handle.value()));
+            assert_eq!(host.document().get_entity(handle), Some(&expected));
+            assert!(host.app.command_line.history.last().unwrap().text.contains(message));
+        }
+
+        let assert_persisted = |label: &str, document: &CadDocument, full_text_state: bool| {
+            let actual = document.get_entity(handle);
+            assert!(matches!(actual, Some(EntityType::AttributeDefinition(value))
+                if value.common.owner_handle == block_record_handle
+                    && value.tag == "PART_NO" && value.default_value == "PN-002"
+                    && value.insertion_point == acadrust::types::Vector3::new(4.0, 5.0, 0.0)
+                    && (value.rotation - 0.25).abs() < 1e-12), "{label}: {actual:?}");
+            if full_text_state {
+                assert!(matches!(actual, Some(EntityType::AttributeDefinition(value))
+                    if value.width_factor == 1.25 && value.text_style == "Standard"
+                        && value.prompt == "Part number"), "{label}: {actual:?}");
+            }
+            assert!(document.block_records.get("TAGBLOCK").unwrap().entity_handles.contains(&handle));
+            assert!(matches!(document.get_entity(insert_handle), Some(EntityType::Insert(value))
+                if value.block_name == "TAGBLOCK"));
+        };
+        let dwg_bytes = acadrust::DwgWriter::write_to_vec(host.document()).unwrap();
+        let dwg_doc = crate::io::load_bytes("attribute-definition.dwg", dwg_bytes).unwrap();
+        assert_persisted("DWG", &dwg_doc, true);
+        let dxf_bytes = acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap();
+        let dxf_doc = crate::io::load_bytes("attribute-definition.dxf", dxf_bytes).unwrap();
+        // The pinned cadcodec DXF ATTDEF reader retains identity, placement,
+        // height, value, prompt and rotation, but currently drops several
+        // optional AcDbText fields such as width factor. Keep that external
+        // codec gap explicit in the coverage ledger rather than claiming a
+        // complete DXF property round trip here.
+        assert_persisted("DXF", &dxf_doc, false);
+
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none());
+        // CadDocument intentionally leaves the block membership slot in place
+        // so delta undo can restore the shared entity without rewriting the
+        // record. Writers must still omit the absent entity.
+        let deleted_dwg = acadrust::DwgWriter::write_to_vec(host.document()).unwrap();
+        assert!(crate::io::load_bytes("attribute-definition-deleted.dwg", deleted_dwg)
+            .unwrap().get_entity(handle).is_none());
+        let deleted_dxf = acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap();
+        assert!(crate::io::load_bytes("attribute-definition-deleted.dxf", deleted_dxf)
+            .unwrap().get_entity(handle).is_none());
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        app.undo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(handle),
+            Some(EntityType::AttributeDefinition(value))
+                if value.default_value == "PN-001" && value.insertion_point.x == 1.0));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
         let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
