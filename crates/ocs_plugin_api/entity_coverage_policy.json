@@ -22,7 +22,8 @@
     "Tolerance": ["layer", "insertion_point", "direction", "normal", "text", "dimension_style_name", "text_height", "dimension_gap"],
     "Shape": ["layer", "insertion_point", "size", "shape_name", "shape_number", "rotation", "relative_x_scale", "oblique_angle", "normal", "thickness", "style_name"],
     "AttributeDefinition": ["layer", "tag", "prompt", "default_value", "insertion_point", "alignment_point", "height", "rotation", "width_factor", "oblique_angle", "text_style", "text_generation_flags", "horizontal_alignment", "vertical_alignment", "flags", "field_length", "normal", "mtext_flag", "is_multiline", "line_count", "lock_position"],
-    "AttributeEntity": ["layer", "tag", "value", "insertion_point", "alignment_point", "height", "rotation", "width_factor", "oblique_angle", "text_style", "text_generation_flags", "horizontal_alignment", "vertical_alignment", "flags", "field_length", "normal", "mtext_flag", "is_multiline", "line_count", "lock_position"]
+    "AttributeEntity": ["layer", "tag", "value", "insertion_point", "alignment_point", "height", "rotation", "width_factor", "oblique_angle", "text_style", "text_generation_flags", "horizontal_alignment", "vertical_alignment", "flags", "field_length", "normal", "mtext_flag", "is_multiline", "line_count", "lock_position"],
+    "Hatch": ["layer", "elevation", "normal", "is_solid", "pattern", "pattern_angle", "pattern_scale", "pattern_type", "is_double", "style", "is_associative", "pixel_size", "paths", "seed_points"]
   },
   "readable": {
     "Insert": ["block_name"],

@@ -740,6 +740,22 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                             | "line_count"
                             | "lock_position"
                     )
+                    | (
+                        "Hatch",
+                        "elevation"
+                            | "normal"
+                            | "is_solid"
+                            | "pattern"
+                            | "pattern_angle"
+                            | "pattern_scale"
+                            | "pattern_type"
+                            | "is_double"
+                            | "style"
+                            | "is_associative"
+                            | "pixel_size"
+                            | "paths"
+                            | "seed_points"
+                    )
             ) {
                     "transaction_geometry"
             } else {

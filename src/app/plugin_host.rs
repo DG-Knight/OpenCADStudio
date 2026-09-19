@@ -2010,6 +2010,149 @@ mod tests {
     }
 
     #[test]
+    fn staged_python_hatch_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let script = std::env::temp_dir().join(format!("ocs_hatch_create_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "def p(x, y): return {'x': x, 'y': y}\n",
+            "def boundary(size):\n",
+            "    pairs = [(0.0,0.0,size,0.0),(size,0.0,size,size),(size,size,0.0,size),(0.0,size,0.0,0.0)]\n",
+            "    edges = [{'kind':'Line','value':{'start':p(a,b),'end':p(c,d)}} for a,b,c,d in pairs]\n",
+            "    return {'flags':1,'edges':edges,'boundary_handles':[]}\n",
+            "doc = ocs.active_document\n",
+            "hatch = doc.create_entity('Hatch', paths=[boundary(10.0)])\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let hatch_handle = host.document().entities().find_map(|entity| match entity {
+            EntityType::Hatch(hatch) => Some(hatch.common.handle),
+            _ => None,
+        }).unwrap_or_else(|| panic!("Python did not create Hatch: {:?}",
+            host.app.command_line.history.last().map(|entry| &entry.text)));
+        let created = host.document().get_entity(hatch_handle).unwrap().clone();
+        assert!(host.app.tabs[0].scene.hatches.get(&hatch_handle)
+            .is_some_and(|model| model.boundary.len() >= 4 && model.name == "SOLID"));
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.active_document.entities[{}].pattern['name']", hatch_handle.value()));
+        assert!(host.app.command_line.history.last().unwrap().text.contains("SOLID"));
+
+        let script = std::env::temp_dir().join(format!("ocs_hatch_edit_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "def p(x, y): return {{'x': x, 'y': y}}\n",
+            "def boundary(size):\n",
+            "    pairs = [(0.0,0.0,size,0.0),(size,0.0,size,size),(size,size,0.0,size),(0.0,size,0.0,0.0)]\n",
+            "    edges = [{{'kind':'Line','value':{{'start':p(a,b),'end':p(c,d)}}}} for a,b,c,d in pairs]\n",
+            "    return {{'flags':1,'edges':edges,'boundary_handles':[]}}\n",
+            "doc = ocs.active_document\n",
+            "hatch = doc.entities[{}]\n",
+            "with doc.transaction('Edit hatch'):\n",
+            "    hatch.paths = [boundary(12.0)]\n",
+            "    hatch.is_solid = False\n",
+            "    hatch.pattern = {{'name':'TEST','description':'test pattern','lines':[",
+            "{{'angle':0.0,'base_point':p(0.0,0.0),'offset':p(0.0,2.0),'dash_lengths':[1.0,-1.0]}}]}}\n",
+            "    hatch.pattern_scale = 2.0\n",
+            "    hatch.pattern_angle = 0.25\n",
+            "doc.selection = [hatch]\n"
+        ), hatch_handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let expected = host.document().get_entity(hatch_handle).unwrap().clone();
+        let EntityType::Hatch(edited) = &expected else { unreachable!() };
+        assert!(!edited.is_solid);
+        assert_eq!(edited.pattern.name, "TEST");
+        assert_eq!(edited.pattern.lines.len(), 1);
+        assert_eq!(edited.paths[0].edges.len(), 4);
+        assert!((edited.pattern_scale - 2.0).abs() < 1e-12);
+        assert_eq!(edited.gradient_color, match &created { EntityType::Hatch(value) => value.gradient_color.clone(), _ => unreachable!() });
+        assert_eq!(host.selection(), vec![hatch_handle]);
+        assert!(host.app.tabs[0].scene.hatches.get(&hatch_handle).is_some_and(|model|
+            model.boundary.len() >= 4 && model.name == "TEST"
+                && matches!(&model.pattern,
+                    crate::scene::model::hatch_model::HatchPattern::Pattern(lines)
+                        if !lines.is_empty())));
+
+        for (patch, message) in [
+            ("'pattern_scale':0.0", "greater than zero"),
+            ("'is_associative':True", "requires boundary handles"),
+            ("'gradient_color':{}", "outside the editable schema"),
+            ("'paths':[{'flags':1,'edges':[{'kind':'Line','value':{'start':{'x':0.0,'y':0.0},'end':{'x':1.0,'y':0.0}}}],'boundary_handles':[]}]", "not closed"),
+        ] {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many('Reject hatch', [{{'handle':{}, {patch}}}])",
+                hatch_handle.value()));
+            assert_eq!(host.document().get_entity(hatch_handle), Some(&expected));
+            assert!(host.app.command_line.history.last().unwrap().text.contains(message));
+        }
+
+        let assert_saved = |document: &CadDocument| {
+            assert!(matches!(document.get_entity(hatch_handle), Some(EntityType::Hatch(hatch))
+                if !hatch.is_solid && hatch.pattern.name == "TEST"
+                    && hatch.pattern.lines.len() == 1 && hatch.paths[0].edges.len() == 4
+                    && (hatch.pattern_scale - 2.0).abs() < 1e-12));
+        };
+        let reopened_dwg = crate::io::load_bytes("hatch.dwg",
+            acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let reopened_dxf = crate::io::load_bytes("hatch.dxf",
+            acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        assert_saved(&reopened_dwg);
+        assert_saved(&reopened_dxf);
+        for (name, mut document) in [("hatch-reedit.dwg", reopened_dwg),
+            ("hatch-reedit.dxf", reopened_dxf)] {
+            let before = document.get_entity(hatch_handle).unwrap().clone();
+            let mut after = before.clone();
+            let EntityType::Hatch(hatch) = &mut after else { unreachable!() };
+            hatch.elevation = 3.0;
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
+            *document.get_entity_mut(hatch_handle).unwrap() = after;
+            let bytes = if name.ends_with("dwg") {
+                acadrust::DwgWriter::write_to_vec(&document).unwrap()
+            } else {
+                acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
+            };
+            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(hatch_handle),
+                Some(EntityType::Hatch(hatch)) if (hatch.elevation - 3.0).abs() < 1e-12));
+        }
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.active_document.delete_entity({})", hatch_handle.value()));
+        assert!(host.document().get_entity(hatch_handle).is_none());
+        for (name, bytes) in [
+            ("hatch-deleted.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()),
+            ("hatch-deleted.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+        ] {
+            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(hatch_handle).is_none());
+        }
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(hatch_handle), Some(&expected));
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(hatch_handle), Some(&created));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(hatch_handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(hatch_handle).is_none());
+    }
+
+    #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
             return;
@@ -2380,7 +2523,7 @@ mod tests {
         let handle;
         {
             let mut host = HostSession::new(&mut app, 0);
-            handle = host.add_entity(EntityType::Hatch(acadrust::entities::Hatch::default()));
+            handle = host.add_entity(EntityType::MLine(acadrust::entities::MLine::default()));
             let original = host.document().get_entity(handle).unwrap();
             let changed =
                 ocs_plugin_api::entity_coverage::patch_canvas_layer(original, "HATCHES").unwrap();

@@ -61,6 +61,176 @@ fn insert_scale(name: &str, value: f64) -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "host")]
+fn validate_hatch_paths(paths: &[crate::host::acadrust::entities::BoundaryPath]) -> Result<(), String> {
+    use crate::host::acadrust::entities::BoundaryEdge;
+    use crate::host::acadrust::types::Vector2;
+    let close = |a: Vector2, b: Vector2| (a.x - b.x).hypot(a.y - b.y) <= 1e-8;
+    let ellipse_point = |center: Vector2, major: Vector2, ratio: f64, angle: f64| {
+        Vector2::new(
+            center.x + major.x * angle.cos() - major.y * ratio * angle.sin(),
+            center.y + major.y * angle.cos() + major.x * ratio * angle.sin(),
+        )
+    };
+    if paths.is_empty() {
+        return Err("Hatch requires at least one boundary path".into());
+    }
+    for (pi, path) in paths.iter().enumerate() {
+        if path.edges.is_empty() {
+            return Err(format!("Hatch boundary path {pi} has no edges"));
+        }
+        if path.flags.is_not_closed() {
+            return Err(format!("Hatch boundary path {pi} is marked open"));
+        }
+        if path.flags.bits() & !0x1ff != 0 {
+            return Err(format!("Hatch boundary path {pi} has unknown flag bits"));
+        }
+        let mut endpoints = Vec::with_capacity(path.edges.len());
+        for (ei, edge) in path.edges.iter().enumerate() {
+            let pair = match edge {
+                BoundaryEdge::Line(line) => {
+                    if !line.start.x.is_finite() || !line.start.y.is_finite() || !line.end.x.is_finite() || !line.end.y.is_finite() {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} line has non-finite coordinates"));
+                    }
+                    if (line.start.x - line.end.x).hypot(line.start.y - line.end.y) < 1e-12 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} line has zero length"));
+                    }
+                    (line.start, line.end)
+                }
+                BoundaryEdge::CircularArc(arc) => {
+                    if !arc.center.x.is_finite() || !arc.center.y.is_finite() {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} arc center has non-finite coordinates"));
+                    }
+                    if !arc.radius.is_finite() || arc.radius <= 0.0 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} arc radius must be finite and positive"));
+                    }
+                    if !arc.start_angle.is_finite() || !arc.end_angle.is_finite() {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} arc angles must be finite"));
+                    }
+                    let point = |angle: f64| Vector2::new(
+                        arc.center.x + arc.radius * angle.cos(),
+                        arc.center.y + arc.radius * angle.sin(),
+                    );
+                    let (start, end) = (point(arc.start_angle), point(arc.end_angle));
+                    if arc.counter_clockwise { (start, end) } else { (end, start) }
+                }
+                BoundaryEdge::EllipticArc(arc) => {
+                    if !arc.center.x.is_finite() || !arc.center.y.is_finite() {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} ellipse center has non-finite coordinates"));
+                    }
+                    if !arc.major_axis_endpoint.x.is_finite() || !arc.major_axis_endpoint.y.is_finite() {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} ellipse major axis has non-finite coordinates"));
+                    }
+                    if arc.major_axis_endpoint.x.hypot(arc.major_axis_endpoint.y) < 1e-12 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} ellipse major axis has zero length"));
+                    }
+                    if !arc.minor_axis_ratio.is_finite() || !(0.0..=1.0).contains(&arc.minor_axis_ratio) || arc.minor_axis_ratio == 0.0 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} ellipse ratio must be within (0, 1]"));
+                    }
+                    if !arc.start_angle.is_finite() || !arc.end_angle.is_finite() {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} ellipse angles must be finite"));
+                    }
+                    let start = ellipse_point(arc.center, arc.major_axis_endpoint, arc.minor_axis_ratio, arc.start_angle);
+                    let end = ellipse_point(arc.center, arc.major_axis_endpoint, arc.minor_axis_ratio, arc.end_angle);
+                    if arc.counter_clockwise { (start, end) } else { (end, start) }
+                }
+                BoundaryEdge::Polyline(poly) => {
+                    if poly.vertices.len() < 3 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} polyline must have at least 3 vertices"));
+                    }
+                    for (vi, v) in poly.vertices.iter().enumerate() {
+                        if !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite() {
+                            return Err(format!("Hatch boundary path {pi} edge {ei} vertex {vi} has non-finite coordinates"));
+                        }
+                    }
+                    if !poly.is_closed {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} polyline is open"));
+                    }
+                    let first = poly.vertices.first().unwrap();
+                    (Vector2::new(first.x, first.y), Vector2::new(first.x, first.y))
+                }
+                BoundaryEdge::Spline(spline) => {
+                    if spline.degree < 1 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} spline degree must be at least 1"));
+                    }
+                    if spline.control_points.len() < spline.degree as usize + 1 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} spline has too few control points for its degree"));
+                    }
+                    if spline.knots.iter().any(|knot| !knot.is_finite())
+                        || spline.knots.windows(2).any(|pair| pair[0] > pair[1])
+                    {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} spline knots must be finite and nondecreasing"));
+                    }
+                    for (ci, cp) in spline.control_points.iter().enumerate() {
+                        if !cp.x.is_finite() || !cp.y.is_finite() || !cp.z.is_finite() {
+                            return Err(format!("Hatch boundary path {pi} edge {ei} control point {ci} has non-finite coordinates"));
+                        }
+                    }
+                    for (fi, fp) in spline.fit_points.iter().enumerate() {
+                        if !fp.x.is_finite() || !fp.y.is_finite() {
+                            return Err(format!("Hatch boundary path {pi} edge {ei} fit point {fi} has non-finite coordinates"));
+                        }
+                    }
+                    for (name, tangent) in [("start", spline.start_tangent), ("end", spline.end_tangent)] {
+                        if !tangent.x.is_finite() || !tangent.y.is_finite() {
+                            return Err(format!("Hatch boundary path {pi} edge {ei} spline {name} tangent is non-finite"));
+                        }
+                    }
+                    let points = if spline.fit_points.len() >= 2 {
+                        spline.fit_points.clone()
+                    } else {
+                        spline.control_points.iter().map(|p| Vector2::new(p.x, p.y)).collect()
+                    };
+                    if points.len() < 2 {
+                        return Err(format!("Hatch boundary path {pi} edge {ei} spline has too few points"));
+                    }
+                    (*points.first().unwrap(), *points.last().unwrap())
+                }
+            };
+            endpoints.push(pair);
+        }
+        for ei in 0..endpoints.len() {
+            let next = (ei + 1) % endpoints.len();
+            if !close(endpoints[ei].1, endpoints[next].0) {
+                return Err(format!("Hatch boundary path {pi} is not closed between edges {ei} and {next}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "host")]
+fn validate_hatch_pattern(value: &crate::host::acadrust::entities::Hatch) -> Result<(), String> {
+    if value.pattern.name.trim().is_empty() {
+        return Err("Hatch.pattern.name is empty".into());
+    }
+    if value.is_solid {
+        if !value.pattern.name.eq_ignore_ascii_case("SOLID") || !value.pattern.lines.is_empty() {
+            return Err("solid Hatch requires the SOLID pattern without pattern lines".into());
+        }
+        return Ok(());
+    }
+    if !value.pattern_scale.is_finite() || value.pattern_scale <= 0.0 {
+        return Err("Hatch.pattern_scale must be finite and greater than zero".into());
+    }
+    if value.pattern.lines.is_empty() {
+        return Err("patterned Hatch requires at least one pattern line".into());
+    }
+    for (index, line) in value.pattern.lines.iter().enumerate() {
+        if !line.angle.is_finite()
+            || !line.base_point.x.is_finite() || !line.base_point.y.is_finite()
+            || !line.offset.x.is_finite() || !line.offset.y.is_finite()
+            || line.dash_lengths.iter().any(|dash| !dash.is_finite())
+        {
+            return Err(format!("Hatch.pattern.lines[{index}] contains non-finite values"));
+        }
+        if line.offset.x.hypot(line.offset.y) < 1e-12 {
+            return Err(format!("Hatch.pattern.lines[{index}].offset must be nonzero"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -231,6 +401,25 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             if value.line_count < 1 {
                 return Err("AttributeEntity.line_count must be greater than zero".into());
             }
+        }
+        EntityType::Hatch(value) => {
+            solid_normal("Hatch.normal", &value.normal)?;
+            if !value.elevation.is_finite() {
+                return Err("Hatch.elevation must be finite".into());
+            }
+            validate_hatch_pattern(value)?;
+            if !value.pattern_angle.is_finite() {
+                return Err("Hatch.pattern_angle must be finite".into());
+            }
+            if !value.pixel_size.is_finite() || value.pixel_size < 0.0 {
+                return Err("Hatch.pixel_size must be finite and non-negative".into());
+            }
+            for (si, sp) in value.seed_points.iter().enumerate() {
+                if !sp.x.is_finite() || !sp.y.is_finite() {
+                    return Err(format!("Hatch.seed_points[{si}] has non-finite coordinates"));
+                }
+            }
+            validate_hatch_paths(&value.paths)?;
         }
         _ => {}
     }
@@ -610,6 +799,50 @@ pub fn validate_entity_mutation(
                 return Err("AttributeEntity.attdef_handle is read-only".into());
             }
         }
+        (EntityType::Hatch(old), EntityType::Hatch(new)) => {
+            if !same3(&old.normal, &new.normal) {
+                solid_normal("Hatch.normal", &new.normal)?;
+            }
+            if old.elevation.to_bits() != new.elevation.to_bits() && !new.elevation.is_finite() {
+                return Err("Hatch.elevation must be finite".into());
+            }
+            if old.pattern != new.pattern
+                || old.is_solid != new.is_solid
+                || old.pattern_scale.to_bits() != new.pattern_scale.to_bits()
+            {
+                validate_hatch_pattern(new)?;
+            }
+            if old.pattern_angle.to_bits() != new.pattern_angle.to_bits()
+                && !new.pattern_angle.is_finite()
+            {
+                return Err("Hatch.pattern_angle must be finite".into());
+            }
+            if old.pixel_size.to_bits() != new.pixel_size.to_bits()
+                && (!new.pixel_size.is_finite() || new.pixel_size < 0.0)
+            {
+                return Err("Hatch.pixel_size must be finite and non-negative".into());
+            }
+            if old.paths != new.paths {
+                validate_hatch_paths(&new.paths)?;
+            }
+            if old.seed_points != new.seed_points {
+                for (si, sp) in new.seed_points.iter().enumerate() {
+                    if !sp.x.is_finite() || !sp.y.is_finite() {
+                        return Err(format!("Hatch.seed_points[{si}] has non-finite coordinates"));
+                    }
+                }
+            }
+            if old.gradient_color != new.gradient_color {
+                return Err("Hatch.gradient_color is unmapped and read-only".into());
+            }
+            if old.is_mpolygon != new.is_mpolygon
+                || old.mpolygon_hatch_color != new.mpolygon_hatch_color
+                || old.mpolygon_x_direction != new.mpolygon_x_direction
+                || old.mpolygon_boundary_handle_count != new.mpolygon_boundary_handle_count
+            {
+                return Err("Hatch MPOLYGON fields are unmapped and read-only".into());
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -633,6 +866,22 @@ pub fn validate_canvas_entity_references(
             && matches!(document.get_entity(owner), Some(EntityType::Insert(_)));
         if !block_owner && !insert_owner {
             return Err(format!("entity owner {owner:?} does not exist"));
+        }
+    }
+    if let EntityType::Hatch(value) = entity {
+        let handles = value.paths.iter().flat_map(|path| &path.boundary_handles);
+        let mut count = 0usize;
+        for handle in handles {
+            count += 1;
+            if handle.is_null() || document.get_entity(*handle).is_none() {
+                return Err(format!("Hatch boundary handle {handle:?} does not exist"));
+            }
+        }
+        if value.is_associative && count == 0 {
+            return Err("associative Hatch requires boundary handles".into());
+        }
+        if !value.is_associative && count != 0 {
+            return Err("non-associative Hatch cannot carry boundary handles".into());
         }
     }
     if let EntityType::Tolerance(value) = entity {
@@ -952,6 +1201,7 @@ mod tests {
                         | "Shape"
                         | "AttributeDefinition"
                         | "AttributeEntity"
+                        | "Hatch"
                 )
             {
                 assert!(
@@ -1073,6 +1323,19 @@ mod tests {
                 "AttributeEntity.is_multiline".to_owned(),
                 "AttributeEntity.line_count".to_owned(),
                 "AttributeEntity.lock_position".to_owned(),
+                "Hatch.elevation".to_owned(),
+                "Hatch.normal".to_owned(),
+                "Hatch.is_solid".to_owned(),
+                "Hatch.pattern".to_owned(),
+                "Hatch.pattern_angle".to_owned(),
+                "Hatch.pattern_scale".to_owned(),
+                "Hatch.pattern_type".to_owned(),
+                "Hatch.is_double".to_owned(),
+                "Hatch.style".to_owned(),
+                "Hatch.is_associative".to_owned(),
+                "Hatch.pixel_size".to_owned(),
+                "Hatch.paths".to_owned(),
+                "Hatch.seed_points".to_owned(),
             ])
         );
     }
@@ -1414,5 +1677,58 @@ mod tests {
                 .unwrap_err()
                 .contains("no whitespace")
         );
+    }
+    #[test]
+    fn hatch_geometry_and_boundaries_are_validated() {
+        use acadrust::entities::hatch::{BoundaryEdge, BoundaryPath, LineEdge};
+        let mut hatch = acadrust::entities::Hatch::new();
+        let mut path = BoundaryPath::new();
+        for (start, end) in [
+            ((0.0, 0.0), (10.0, 0.0)),
+            ((10.0, 0.0), (10.0, 10.0)),
+            ((10.0, 10.0), (0.0, 10.0)),
+            ((0.0, 10.0), (0.0, 0.0)),
+        ] {
+            path.edges.push(BoundaryEdge::Line(LineEdge {
+                start: acadrust::types::Vector2::new(start.0, start.1),
+                end: acadrust::types::Vector2::new(end.0, end.1),
+            }));
+        }
+        hatch.paths.push(path);
+        let entity = acadrust::EntityType::Hatch(hatch.clone());
+        validate_new_canvas_entity(&entity).unwrap();
+
+        let mut invalid = hatch.clone();
+        invalid.paths.clear();
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::Hatch(invalid))
+            .unwrap_err()
+            .contains("at least one boundary path"));
+
+        let mut invalid = hatch.clone();
+        invalid.is_solid = false;
+        invalid.pattern_scale = 0.0;
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::Hatch(invalid))
+            .unwrap_err()
+            .contains("greater than zero"));
+
+        let mut document = acadrust::CadDocument::new();
+        let boundary = document.add_entity(acadrust::EntityType::Line(
+            acadrust::entities::Line::from_points(
+                acadrust::types::Vector3::ZERO,
+                acadrust::types::Vector3::UNIT_X,
+            ),
+        )).unwrap();
+        let mut associative = hatch.clone();
+        associative.is_associative = true;
+        associative.paths[0].boundary_handles.push(boundary);
+        validate_canvas_entity_references(
+            &document,
+            &acadrust::EntityType::Hatch(associative.clone()),
+        ).unwrap();
+        associative.paths[0].boundary_handles[0] = acadrust::Handle::new(u64::MAX);
+        assert!(validate_canvas_entity_references(
+            &document,
+            &acadrust::EntityType::Hatch(associative),
+        ).unwrap_err().contains("does not exist"));
     }
 }
