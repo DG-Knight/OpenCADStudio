@@ -39,11 +39,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
             return
         }
 
-        // The embedded DWG preview bitmap is often much smaller than the
-        // requested icon size. Scale it up (or down) to fit request.maximumSize
-        // and center it — otherwise QuickLook draws it at its native pixel size
-        // anchored at the CGContext origin (bottom-left), producing a small
-        // thumbnail stuck in the corner instead of filling the icon (#365).
+        // Fit and center the embedded bitmap in the requested thumbnail.
         let maxSize = request.maximumSize
         let nativeSize = CGSize(width: cg.width, height: cg.height)
         let scale = min(maxSize.width / nativeSize.width, maxSize.height / nativeSize.height)

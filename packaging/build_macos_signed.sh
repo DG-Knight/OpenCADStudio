@@ -95,15 +95,8 @@ sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
 
 echo "==> codesign"
 if [ "$DEVELOPER_ID" = "-" ]; then
-    # CI-parity ad-hoc signature; cannot be notarized. Still sign nested
-    # code individually, in the same order as the Developer ID path below,
-    # rather than one `--deep` pass over the outer bundle: `--deep` re-signs
-    # every nested binary with the *outer* invocation's own arguments, which
-    # here carried no --entitlements at all — so the appex ended up ad-hoc
-    # signed but missing its sandbox entitlement, and PlugInKit silently
-    # dropped it ("rejecting ... plug-ins must be sandboxed" in the system
-    # log, no error surfaced anywhere else) (#365). Ad-hoc signing itself is
-    # not the blocker here — carrying the entitlements through is.
+    # Sign inside out so the extension retains its sandbox entitlement.
+    # Ad-hoc signing cannot be notarized.
     codesign --force --sign - --timestamp=none \
         "$APP/Contents/MacOS/OpenCADStudio-App"
     codesign --force --sign - --timestamp=none \
@@ -127,7 +120,9 @@ else
     codesign --force --timestamp --options runtime \
         -s "$DEVELOPER_ID" "$APP"
 fi
-codesign --verify --strict --verbose=2 "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+codesign -d --entitlements - "$APP/Contents/PlugIns/DWGThumbnail.appex" \
+    | python3 -c 'import plistlib, sys; assert plistlib.load(sys.stdin.buffer).get("com.apple.security.app-sandbox") is True'
 
 echo "==> dmg"
 DMG="$DIST/OpenCADStudio-v$VERSION-macos-arm64.dmg"

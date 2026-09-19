@@ -4,6 +4,7 @@ use crate::app::Message;
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Background, Border, Element, Theme};
 use crate::ui::style::common::muted_style;
+use crate::ui::style::form::{hdivider, vsep};
 use crate::t;
 use std::borrow::Cow;
 use std::fmt;
@@ -81,32 +82,6 @@ fn field_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
         value: palette.background.base.text,
         selection: palette.primary.base.color.scale_alpha(0.5),
     }
-}
-
-fn hdivider<'a>(width: iced::Length) -> Element<'a, Message> {
-    container(Space::new().width(width).height(1))
-        .width(width)
-        .height(1)
-        .style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(
-                theme.palette().background.neutral.color
-            )),
-            ..Default::default()
-        })
-        .into()
-}
-
-fn vsep<'a>(height: iced::Length) -> Element<'a, Message> {
-    container(Space::new().width(1).height(height))
-        .width(1)
-        .height(height)
-        .style(|theme: &Theme| container::Style {
-            background: Some(Background::Color(
-                theme.palette().background.neutral.color
-            )),
-            ..Default::default()
-        })
-        .into()
 }
 
 pub fn view_window<'a>(

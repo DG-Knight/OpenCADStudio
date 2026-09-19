@@ -1136,7 +1136,7 @@ fn apply_updates(
             .pointer_mut(path)
             .ok_or_else(|| format!("property does not exist: {path}"))?;
         if let Some(expected) = update.get("expected") {
-            if target != expected {
+            if !json_values_match(target, expected) {
                 return Err(format!("property changed before update: {path}"));
             }
         }
@@ -1149,6 +1149,27 @@ fn apply_updates(
         return Err("record identity is read-only".into());
     }
     Ok(paths)
+}
+
+/// Structural equality in which numbers compare by value. serde_json keeps
+/// `10` and `10.0` as different `Number`s, and a JavaScript client cannot send
+/// `10.0` at all (`JSON.stringify(10.0) === "10"`), so a stored whole-number
+/// float would otherwise never match its `expected` value.
+fn json_values_match(actual: &Value, expected: &Value) -> bool {
+    match (actual, expected) {
+        (Value::Number(a), Value::Number(b)) if a.is_f64() || b.is_f64() => {
+            a.as_f64() == b.as_f64()
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_values_match(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, a)| b.get(key).is_some_and(|b| json_values_match(a, b)))
+        }
+        _ => actual == expected,
+    }
 }
 
 fn patched_table_entry<T>(
@@ -1727,6 +1748,67 @@ mod tests {
         let undo = execute(&mut app, json!({"op":"undo"}), "undo-summary");
         assert_eq!(undo["status"], "completed", "{undo}");
         assert!(app.tabs[i].scene.document.summary_info.author.is_empty());
+    }
+
+    #[test]
+    fn set_properties_expected_matches_whole_number_floats_by_value() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        let insert = Insert::new("A_CPT", Vector3::new(12.0, 34.0, 5.0));
+        let entity = app.tabs[i].scene.add_entity(EntityType::Insert(insert));
+        let handle = format!("{:X}", entity.value());
+
+        // `12` is how every JSON client sends the stored `12.0`.
+        let scalar = execute(
+            &mut app,
+            json!({
+                "op":"set_properties",
+                "collection":"entities",
+                "handle":handle,
+                "updates":[{"path":"/insert_point/x","expected":12,"value":20.0}]
+            }),
+            "whole-number-scalar",
+        );
+        assert_eq!(scalar["status"], "completed", "{scalar}");
+
+        let nested = execute(
+            &mut app,
+            json!({
+                "op":"set_properties",
+                "collection":"entities",
+                "handle":handle,
+                "updates":[{
+                    "path":"/insert_point",
+                    "expected":{"x":20,"y":34,"z":5},
+                    "value":{"x":1.5,"y":2.0,"z":3.0}
+                }]
+            }),
+            "whole-number-nested",
+        );
+        assert_eq!(nested["status"], "completed", "{nested}");
+        let EntityType::Insert(insert) = app.tabs[i].scene.document.get_entity(entity).unwrap()
+        else {
+            panic!("expected insert")
+        };
+        assert_eq!(insert.insert_point.x, 1.5);
+
+        let stale = execute(
+            &mut app,
+            json!({
+                "op":"set_properties",
+                "collection":"entities",
+                "handle":handle,
+                "updates":[{"path":"/insert_point/x","expected":2,"value":9.0}]
+            }),
+            "stale-number",
+        );
+        assert_ne!(stale["status"], "completed", "{stale}");
+        let EntityType::Insert(insert) = app.tabs[i].scene.document.get_entity(entity).unwrap()
+        else {
+            panic!("expected insert")
+        };
+        assert_eq!(insert.insert_point.x, 1.5);
     }
 
     #[test]
