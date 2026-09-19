@@ -4,7 +4,7 @@
 
 Build a general Python document model over the OCS host API for all **43 canvas kinds**. A kind is **complete** only after the per-kind gate below passes. Merely appearing in a converter or allowing a `layer` edit is partial coverage. Keep a property-level record of read/write, read-only, snapshot-only, and unsupported fields in the [43-kind coverage ledger](plugin-host-model-coverage-ledger.md). Do not resume the separate Lisp-to-Python conversion work.
 
-As of 19 September 2026, the current AttributeDefinition increment is OCS commit `5b854bd1` on `plugin/host-model-api` and PandoraBox commit `bb259ff` on `main`. Host API is v7. The Python feature has explicit writes for **20 of 43** canvas kinds: 19 are creatable and `Insert` remains update-only. This is **not** 20 completed kinds: only Tolerance and Shape pass every completion gate. AttributeDefinition passes its host and real IPC lifecycle but remains short of `Complete` because the pinned acadrust DXF reader drops optional ATTDEF fields. The other 23 canvas kinds have only `layer` writes through the document model. All 43 have raw typed snapshots. There are three internal records and two opaque fallbacks outside the 43 canvas kinds.
+As of 19 September 2026, the current AttributeEntity increment is OCS commit `cf2a9235` on `plugin/host-model-api` and PandoraBox commit `9c6b5c3` on `main`. Host API is v7. The Python feature has explicit writes for **21 of 43** canvas kinds: 20 are creatable and `Insert` remains update-only. This is **not** 21 completed kinds: Tolerance, Shape and AttributeEntity pass every completion gate. AttributeDefinition passes its host and real IPC lifecycle but remains short of `Complete` because the pinned acadrust DXF reader drops optional ATTDEF fields. The other 22 canvas kinds have only `layer` writes through the document model. All 43 have raw typed snapshots. There are three internal records and two opaque fallbacks outside the 43 canvas kinds.
 
 Repositories:
 
@@ -48,7 +48,7 @@ If OCS/acadrust cannot create or serialize a kind reliably, mark it **blocked**,
 
 Audit these against the same gate: `Point`, `Line`, `Circle`, `Arc`, `Ellipse`, `Polyline`, `Polyline2D`, `Polyline3D`, `LwPolyline`, `Spline`, `Text`, `MText`, `Ray`, `XLine`, `Solid`, `Face3D`, `Insert`. `Insert` currently has transform edits but **no Python creation**; its block name is read-only and attached attributes are snapshot-only. Earlier tests include some direct DWG round trips, but there is no evidence that every mapped kind passes real IPC, GUI, deletion, undo/redo, and both file formats. Mark each independently after testing.
 
-## Order for the 26 canvas kinds without mapped geometry writes
+## Ordered 26-kind expansion queue
 
 The order below groups shared implementation work. Complete a kind only through the gate above. Within a group, move past a blocked kind after recording the exact dependency. “Minimum exercise” identifies a real entity-specific create/edit/delete case; it does not make other fields automatically writable.
 
@@ -93,7 +93,7 @@ The last five may require new engine capabilities rather than only Python conver
 
 ## Handoff start point
 
-Continue with **AttributeEntity**, using the existing block fixture and new creation-time `owner_handle` support. Its owner must be a real linked `Insert`, and the test must preserve sequence/attribute references through edit, deletion, undo/redo and both file formats. AttributeDefinition is mapped and integration-tested but remains open at W: pinned acadrust `568a12c` loses optional ATTDEF fields such as width factor on DXF read. Do not mark it complete until that dependency is fixed and the full property state passes DXF save/reopen. Keep the exact remaining-kind table above as the queue and update statuses with evidence after each increment.
+Continue with **Hatch**. Build structurally valid solid and patterned hatch fixtures with closed boundaries, expose only fields whose mutations OCS can validate, and verify fill rendering, boundary integrity, deletion, undo/redo and both file formats through real IPC. AttributeDefinition remains mapped and integration-tested but open at W: pinned acadrust `568a12c` loses optional ATTDEF fields such as width factor on DXF read. Do not mark it complete until that dependency is fixed and the full property state passes DXF save/reopen. Keep the exact queue above and update statuses with evidence after each increment.
 
 ## Phase 8 progress log
 
@@ -113,3 +113,5 @@ Continue with **AttributeEntity**, using the existing block fixture and new crea
 - Mapped stable AttributeDefinition fields and validated tag, placement, normal, height, width, angles, text style, line count and block ownership. `embedded_mtext` stays snapshot-readable but unmapped so partial Python edits preserve its linked R2018+ layout payload.
 - `staged_python_attribute_definition_lifecycle_over_real_ipc` passes the real create/read/edit/delete/undo/selection/render/validation/portable-build path using a structurally valid block and linked Insert. Full DWG state and core DXF geometry survive reopen; deletion stays absent after both formats. OCS also stopped double-converting ATTDEF/ATTRIB DXF rotation already converted by acadrust.
 - AttributeDefinition remains **Integration-tested / DXF blocked**, not Complete: acadrust `568a12c`'s ATTDEF DXF reader does not restore optional AcDbText fields including width factor. The real test and ledger record that exact W-gate gap. The queue now continues with `AttributeEntity`.
+- Closed `AttributeEntity` without flattening canonical drawing storage. V4 views and IPC snapshots expose each nested child by handle, while host create/update/delete and transactions rewrite the owning Insert so rendering, serialization and undo remain consistent.
+- `staged_python_attribute_entity_lifecycle_over_real_ipc` passes C/R/E/D/U/I/W/V/P with the actual v7 adapter. It creates a linked attribute from its block's ATTDEF, reads and edits value/placement/rotation, selects the parent Insert, renders text, rejects invalid tag/height/owner edits atomically, reopens edited and deleted state in DWG and DXF, and proves three-step undo/redo. AttributeEntity is **Complete**; the queue now continues with `Hatch`.
