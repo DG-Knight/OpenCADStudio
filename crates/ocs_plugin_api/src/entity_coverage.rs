@@ -16,35 +16,49 @@ pub fn get_embedded_entity_coverage_json() -> &'static str {
 /// JSON does not preserve non-finite floating-point values, so this is an
 /// inspection format and must remain separate from the typed entity write path.
 #[cfg(feature = "host")]
-pub fn entity_snapshot(entity: &crate::host::EntityType) -> Result<serde_json::Value, serde_json::Error> {
+pub fn entity_snapshot(
+    entity: &crate::host::EntityType,
+) -> Result<serde_json::Value, serde_json::Error> {
     serde_json::to_value(entity)
 }
 
 #[cfg(feature = "host")]
 fn finite_vector(name: &str, value: &crate::host::acadrust::types::Vector3) -> Result<(), String> {
-    if value.x.is_finite() && value.y.is_finite() && value.z.is_finite() { Ok(()) }
-    else { Err(format!("{name} must contain finite coordinates")) }
+    if value.x.is_finite() && value.y.is_finite() && value.z.is_finite() {
+        Ok(())
+    } else {
+        Err(format!("{name} must contain finite coordinates"))
+    }
 }
 
 #[cfg(feature = "host")]
 fn unit_direction(name: &str, value: &crate::host::acadrust::types::Vector3) -> Result<(), String> {
     finite_vector(name, value)?;
     let length = value.x.hypot(value.y).hypot(value.z);
-    if (length - 1.0).abs() <= 1e-6 { Ok(()) }
-    else { Err(format!("{name} must be a unit vector")) }
+    if (length - 1.0).abs() <= 1e-6 {
+        Ok(())
+    } else {
+        Err(format!("{name} must be a unit vector"))
+    }
 }
 
 #[cfg(feature = "host")]
 fn solid_normal(name: &str, value: &crate::host::acadrust::types::Vector3) -> Result<(), String> {
     finite_vector(name, value)?;
-    if value.x.hypot(value.y).hypot(value.z) > 0.0 { Ok(()) }
-    else { Err(format!("{name} must be nonzero")) }
+    if value.x.hypot(value.y).hypot(value.z) > 0.0 {
+        Ok(())
+    } else {
+        Err(format!("{name} must be nonzero"))
+    }
 }
 
 #[cfg(feature = "host")]
 fn insert_scale(name: &str, value: f64) -> Result<(), String> {
-    if value.is_finite() && value.abs() >= 1e-12 { Ok(()) }
-    else { Err(format!("{name} must be finite and nonzero")) }
+    if value.is_finite() && value.abs() >= 1e-12 {
+        Ok(())
+    } else {
+        Err(format!("{name} must be finite and nonzero"))
+    }
 }
 
 /// Validate newly created geometry for the kinds whose mapped fields have
@@ -52,7 +66,9 @@ fn insert_scale(name: &str, value: f64) -> Result<(), String> {
 #[cfg(feature = "host")]
 pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<(), String> {
     use crate::host::EntityType;
-    if entity.common().layer.trim().is_empty() { return Err("layer name is empty".into()); }
+    if entity.common().layer.trim().is_empty() {
+        return Err("layer name is empty".into());
+    }
     match entity {
         EntityType::Ray(value) => {
             finite_vector("Ray.base_point", &value.base_point)?;
@@ -64,17 +80,27 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         }
         EntityType::Solid(value) => {
             for (name, corner) in [
-                ("first_corner", &value.first_corner), ("second_corner", &value.second_corner),
-                ("third_corner", &value.third_corner), ("fourth_corner", &value.fourth_corner),
-            ] { finite_vector(&format!("Solid.{name}"), corner)?; }
+                ("first_corner", &value.first_corner),
+                ("second_corner", &value.second_corner),
+                ("third_corner", &value.third_corner),
+                ("fourth_corner", &value.fourth_corner),
+            ] {
+                finite_vector(&format!("Solid.{name}"), corner)?;
+            }
             solid_normal("Solid.normal", &value.normal)?;
-            if !value.thickness.is_finite() { return Err("Solid.thickness must be finite".into()); }
+            if !value.thickness.is_finite() {
+                return Err("Solid.thickness must be finite".into());
+            }
         }
         EntityType::Face3D(value) => {
             for (name, corner) in [
-                ("first_corner", &value.first_corner), ("second_corner", &value.second_corner),
-                ("third_corner", &value.third_corner), ("fourth_corner", &value.fourth_corner),
-            ] { finite_vector(&format!("Face3D.{name}"), corner)?; }
+                ("first_corner", &value.first_corner),
+                ("second_corner", &value.second_corner),
+                ("third_corner", &value.third_corner),
+                ("fourth_corner", &value.fourth_corner),
+            ] {
+                finite_vector(&format!("Face3D.{name}"), corner)?;
+            }
             if value.invisible_edges.bits() & !0x0f != 0 {
                 return Err("Face3D.invisible_edges has unknown bits".into());
             }
@@ -83,47 +109,128 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             finite_vector("Tolerance.insertion_point", &value.insertion_point)?;
             unit_direction("Tolerance.direction", &value.direction)?;
             solid_normal("Tolerance.normal", &value.normal)?;
-            if value.text.trim().is_empty() { return Err("Tolerance.text is empty".into()); }
-            if value.dimension_style_name.trim().is_empty() { return Err("Tolerance.dimension_style_name is empty".into()); }
+            if value.text.trim().is_empty() {
+                return Err("Tolerance.text is empty".into());
+            }
+            if value.dimension_style_name.trim().is_empty() {
+                return Err("Tolerance.dimension_style_name is empty".into());
+            }
             if !value.text_height.is_finite() || value.text_height <= 0.0 {
                 return Err("Tolerance.text_height must be finite and greater than zero".into());
             }
-            if !value.dimension_gap.is_finite() { return Err("Tolerance.dimension_gap must be finite".into()); }
+            if !value.dimension_gap.is_finite() {
+                return Err("Tolerance.dimension_gap must be finite".into());
+            }
         }
         EntityType::Shape(value) => {
             finite_vector("Shape.insertion_point", &value.insertion_point)?;
             solid_normal("Shape.normal", &value.normal)?;
-            if !value.size.is_finite() || value.size <= 0.0 { return Err("Shape.size must be finite and greater than zero".into()); }
-            if value.shape_name.trim().is_empty() { return Err("Shape.shape_name is empty".into()); }
-            if !(1..=i16::MAX as i32).contains(&value.shape_number) { return Err("Shape.shape_number must be between 1 and 32767".into()); }
-            if !value.rotation.is_finite() { return Err("Shape.rotation must be finite".into()); }
+            if !value.size.is_finite() || value.size <= 0.0 {
+                return Err("Shape.size must be finite and greater than zero".into());
+            }
+            if value.shape_name.trim().is_empty() {
+                return Err("Shape.shape_name is empty".into());
+            }
+            if !(1..=i16::MAX as i32).contains(&value.shape_number) {
+                return Err("Shape.shape_number must be between 1 and 32767".into());
+            }
+            if !value.rotation.is_finite() {
+                return Err("Shape.rotation must be finite".into());
+            }
             if !value.relative_x_scale.is_finite() || value.relative_x_scale.abs() < 1e-12 {
                 return Err("Shape.relative_x_scale must be finite and nonzero".into());
             }
-            if !value.oblique_angle.is_finite() || value.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2 {
+            if !value.oblique_angle.is_finite()
+                || value.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2
+            {
                 return Err("Shape.oblique_angle must be finite and between -PI/2 and PI/2".into());
             }
-            if !value.thickness.is_finite() { return Err("Shape.thickness must be finite".into()); }
-            if value.style_name.trim().is_empty() { return Err("Shape.style_name is empty".into()); }
+            if !value.thickness.is_finite() {
+                return Err("Shape.thickness must be finite".into());
+            }
+            if value.style_name.trim().is_empty() {
+                return Err("Shape.style_name is empty".into());
+            }
         }
         EntityType::AttributeDefinition(value) => {
-            finite_vector("AttributeDefinition.insertion_point", &value.insertion_point)?;
-            finite_vector("AttributeDefinition.alignment_point", &value.alignment_point)?;
+            finite_vector(
+                "AttributeDefinition.insertion_point",
+                &value.insertion_point,
+            )?;
+            finite_vector(
+                "AttributeDefinition.alignment_point",
+                &value.alignment_point,
+            )?;
             solid_normal("AttributeDefinition.normal", &value.normal)?;
             if value.tag.trim().is_empty() || value.tag.chars().any(char::is_whitespace) {
-                return Err("AttributeDefinition.tag must be nonempty and contain no whitespace".into());
+                return Err(
+                    "AttributeDefinition.tag must be nonempty and contain no whitespace".into(),
+                );
             }
-            if !value.height.is_finite() || value.height <= 0.0 { return Err("AttributeDefinition.height must be finite and greater than zero".into()); }
-            if !value.rotation.is_finite() { return Err("AttributeDefinition.rotation must be finite".into()); }
+            if !value.height.is_finite() || value.height <= 0.0 {
+                return Err(
+                    "AttributeDefinition.height must be finite and greater than zero".into(),
+                );
+            }
+            if !value.rotation.is_finite() {
+                return Err("AttributeDefinition.rotation must be finite".into());
+            }
             if !value.width_factor.is_finite() || value.width_factor.abs() < 1e-12 {
                 return Err("AttributeDefinition.width_factor must be finite and nonzero".into());
             }
-            if !value.oblique_angle.is_finite() || value.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2 {
-                return Err("AttributeDefinition.oblique_angle must be finite and between -PI/2 and PI/2".into());
+            if !value.oblique_angle.is_finite()
+                || value.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2
+            {
+                return Err(
+                    "AttributeDefinition.oblique_angle must be finite and between -PI/2 and PI/2"
+                        .into(),
+                );
             }
-            if value.text_style.trim().is_empty() { return Err("AttributeDefinition.text_style is empty".into()); }
-            if value.field_length < 0 { return Err("AttributeDefinition.field_length must be nonnegative".into()); }
-            if value.line_count < 1 { return Err("AttributeDefinition.line_count must be greater than zero".into()); }
+            if value.text_style.trim().is_empty() {
+                return Err("AttributeDefinition.text_style is empty".into());
+            }
+            if value.field_length < 0 {
+                return Err("AttributeDefinition.field_length must be nonnegative".into());
+            }
+            if value.line_count < 1 {
+                return Err("AttributeDefinition.line_count must be greater than zero".into());
+            }
+        }
+        EntityType::AttributeEntity(value) => {
+            finite_vector("AttributeEntity.insertion_point", &value.insertion_point)?;
+            finite_vector("AttributeEntity.alignment_point", &value.alignment_point)?;
+            solid_normal("AttributeEntity.normal", &value.normal)?;
+            if value.tag.trim().is_empty() || value.tag.chars().any(char::is_whitespace) {
+                return Err(
+                    "AttributeEntity.tag must be nonempty and contain no whitespace".into(),
+                );
+            }
+            if !value.height.is_finite() || value.height <= 0.0 {
+                return Err("AttributeEntity.height must be finite and greater than zero".into());
+            }
+            if !value.rotation.is_finite() {
+                return Err("AttributeEntity.rotation must be finite".into());
+            }
+            if !value.width_factor.is_finite() || value.width_factor.abs() < 1e-12 {
+                return Err("AttributeEntity.width_factor must be finite and nonzero".into());
+            }
+            if !value.oblique_angle.is_finite()
+                || value.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2
+            {
+                return Err(
+                    "AttributeEntity.oblique_angle must be finite and between -PI/2 and PI/2"
+                        .into(),
+                );
+            }
+            if value.text_style.trim().is_empty() {
+                return Err("AttributeEntity.text_style is empty".into());
+            }
+            if value.field_length < 0 {
+                return Err("AttributeEntity.field_length must be nonnegative".into());
+            }
+            if value.line_count < 1 {
+                return Err("AttributeEntity.line_count must be greater than zero".into());
+            }
         }
         _ => {}
     }
@@ -140,32 +247,58 @@ pub fn validate_entity_mutation(
 ) -> Result<(), String> {
     use crate::host::EntityType;
     if before.common().layer != after.common().layer {
-        if after.common().layer.trim().is_empty() { return Err("layer name is empty".into()); }
-        if matches!(after, EntityType::Block(_) | EntityType::BlockEnd(_) | EntityType::Seqend(_)
-            | EntityType::Extended(_) | EntityType::Unknown(_)) {
+        if after.common().layer.trim().is_empty() {
+            return Err("layer name is empty".into());
+        }
+        if matches!(
+            after,
+            EntityType::Block(_)
+                | EntityType::BlockEnd(_)
+                | EntityType::Seqend(_)
+                | EntityType::Extended(_)
+                | EntityType::Unknown(_)
+        ) {
             return Err("entity kind does not support canvas layer edits".into());
         }
     }
     let finite3 = |name: &str, x: f64, y: f64, z: f64| {
-        if x.is_finite() && y.is_finite() && z.is_finite() { Ok(()) }
-        else { Err(format!("{name} must contain finite coordinates")) }
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            Ok(())
+        } else {
+            Err(format!("{name} must contain finite coordinates"))
+        }
     };
     let same3 = |a: &crate::host::acadrust::types::Vector3,
                  b: &crate::host::acadrust::types::Vector3| {
-        a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits() && a.z.to_bits() == b.z.to_bits()
+        a.x.to_bits() == b.x.to_bits()
+            && a.y.to_bits() == b.y.to_bits()
+            && a.z.to_bits() == b.z.to_bits()
     };
     let radius = |name: &str, value: f64| {
-        if value.is_finite() && value > 0.0 { Ok(()) }
-        else { Err(format!("{name} must be finite and greater than zero")) }
+        if value.is_finite() && value > 0.0 {
+            Ok(())
+        } else {
+            Err(format!("{name} must be finite and greater than zero"))
+        }
     };
-    let changed3 = |name: &str, old: &crate::host::acadrust::types::Vector3,
+    let changed3 = |name: &str,
+                    old: &crate::host::acadrust::types::Vector3,
                     new: &crate::host::acadrust::types::Vector3| {
-        if !same3(old, new) { finite_vector(name, new) } else { Ok(()) }
+        if !same3(old, new) {
+            finite_vector(name, new)
+        } else {
+            Ok(())
+        }
     };
     match (before, after) {
         (EntityType::Point(old), EntityType::Point(new)) => {
             if !same3(&old.location, &new.location) {
-                finite3("Point.location", new.location.x, new.location.y, new.location.z)?;
+                finite3(
+                    "Point.location",
+                    new.location.x,
+                    new.location.y,
+                    new.location.z,
+                )?;
             }
         }
         (EntityType::Line(old), EntityType::Line(new)) => {
@@ -180,21 +313,29 @@ pub fn validate_entity_mutation(
             if !same3(&old.center, &new.center) {
                 finite3("Circle.center", new.center.x, new.center.y, new.center.z)?;
             }
-            if old.radius.to_bits() != new.radius.to_bits() { radius("Circle.radius", new.radius)?; }
+            if old.radius.to_bits() != new.radius.to_bits() {
+                radius("Circle.radius", new.radius)?;
+            }
         }
         (EntityType::Arc(old), EntityType::Arc(new)) => {
             if !same3(&old.center, &new.center) {
                 finite3("Arc.center", new.center.x, new.center.y, new.center.z)?;
             }
-            if old.radius.to_bits() != new.radius.to_bits() { radius("Arc.radius", new.radius)?; }
+            if old.radius.to_bits() != new.radius.to_bits() {
+                radius("Arc.radius", new.radius)?;
+            }
         }
         (EntityType::Ray(old), EntityType::Ray(new)) => {
             changed3("Ray.base_point", &old.base_point, &new.base_point)?;
-            if !same3(&old.direction, &new.direction) { unit_direction("Ray.direction", &new.direction)?; }
+            if !same3(&old.direction, &new.direction) {
+                unit_direction("Ray.direction", &new.direction)?;
+            }
         }
         (EntityType::XLine(old), EntityType::XLine(new)) => {
             changed3("XLine.base_point", &old.base_point, &new.base_point)?;
-            if !same3(&old.direction, &new.direction) { unit_direction("XLine.direction", &new.direction)?; }
+            if !same3(&old.direction, &new.direction) {
+                unit_direction("XLine.direction", &new.direction)?;
+            }
         }
         (EntityType::Solid(old), EntityType::Solid(new)) => {
             for (name, old_corner, new_corner) in [
@@ -202,8 +343,12 @@ pub fn validate_entity_mutation(
                 ("second_corner", &old.second_corner, &new.second_corner),
                 ("third_corner", &old.third_corner, &new.third_corner),
                 ("fourth_corner", &old.fourth_corner, &new.fourth_corner),
-            ] { changed3(&format!("Solid.{name}"), old_corner, new_corner)?; }
-            if !same3(&old.normal, &new.normal) { solid_normal("Solid.normal", &new.normal)?; }
+            ] {
+                changed3(&format!("Solid.{name}"), old_corner, new_corner)?;
+            }
+            if !same3(&old.normal, &new.normal) {
+                solid_normal("Solid.normal", &new.normal)?;
+            }
             if old.thickness.to_bits() != new.thickness.to_bits() && !new.thickness.is_finite() {
                 return Err("Solid.thickness must be finite".into());
             }
@@ -214,24 +359,34 @@ pub fn validate_entity_mutation(
                 ("second_corner", &old.second_corner, &new.second_corner),
                 ("third_corner", &old.third_corner, &new.third_corner),
                 ("fourth_corner", &old.fourth_corner, &new.fourth_corner),
-            ] { changed3(&format!("Face3D.{name}"), old_corner, new_corner)?; }
-            if old.invisible_edges != new.invisible_edges && new.invisible_edges.bits() & !0x0f != 0 {
+            ] {
+                changed3(&format!("Face3D.{name}"), old_corner, new_corner)?;
+            }
+            if old.invisible_edges != new.invisible_edges && new.invisible_edges.bits() & !0x0f != 0
+            {
                 return Err("Face3D.invisible_edges has unknown bits".into());
             }
         }
         (EntityType::Insert(old), EntityType::Insert(new)) => {
-            if old.block_name != new.block_name || old.attributes != new.attributes ||
-                old.view_rep_handle != new.view_rep_handle || old.seqend_handle != new.seqend_handle {
+            if old.block_name != new.block_name
+                || old.attributes != new.attributes
+                || old.view_rep_handle != new.view_rep_handle
+                || old.seqend_handle != new.seqend_handle
+            {
                 return Err("Insert block identity and attached records cannot change in a geometry transaction".into());
             }
             changed3("Insert.insert_point", &old.insert_point, &new.insert_point)?;
-            if !same3(&old.normal, &new.normal) { solid_normal("Insert.normal", &new.normal)?; }
+            if !same3(&old.normal, &new.normal) {
+                solid_normal("Insert.normal", &new.normal)?;
+            }
             for (name, before, after) in [
                 ("x_scale", old.x_scale(), new.x_scale()),
                 ("y_scale", old.y_scale(), new.y_scale()),
                 ("z_scale", old.z_scale(), new.z_scale()),
             ] {
-                if before.to_bits() != after.to_bits() { insert_scale(&format!("Insert.{name}"), after)?; }
+                if before.to_bits() != after.to_bits() {
+                    insert_scale(&format!("Insert.{name}"), after)?;
+                }
             }
             for (name, before, after) in [
                 ("rotation", old.rotation, new.rotation),
@@ -242,68 +397,123 @@ pub fn validate_entity_mutation(
                     return Err(format!("Insert.{name} must be finite"));
                 }
             }
-            if (old.column_count != new.column_count && new.column_count == 0) ||
-                (old.row_count != new.row_count && new.row_count == 0) {
+            if (old.column_count != new.column_count && new.column_count == 0)
+                || (old.row_count != new.row_count && new.row_count == 0)
+            {
                 return Err("Insert array counts must be greater than zero".into());
             }
         }
         (EntityType::Tolerance(old), EntityType::Tolerance(new)) => {
-            changed3("Tolerance.insertion_point", &old.insertion_point, &new.insertion_point)?;
-            if !same3(&old.direction, &new.direction) { unit_direction("Tolerance.direction", &new.direction)?; }
-            if !same3(&old.normal, &new.normal) { solid_normal("Tolerance.normal", &new.normal)?; }
-            if old.text != new.text && new.text.trim().is_empty() { return Err("Tolerance.text is empty".into()); }
-            if old.dimension_style_name != new.dimension_style_name && new.dimension_style_name.trim().is_empty() {
+            changed3(
+                "Tolerance.insertion_point",
+                &old.insertion_point,
+                &new.insertion_point,
+            )?;
+            if !same3(&old.direction, &new.direction) {
+                unit_direction("Tolerance.direction", &new.direction)?;
+            }
+            if !same3(&old.normal, &new.normal) {
+                solid_normal("Tolerance.normal", &new.normal)?;
+            }
+            if old.text != new.text && new.text.trim().is_empty() {
+                return Err("Tolerance.text is empty".into());
+            }
+            if old.dimension_style_name != new.dimension_style_name
+                && new.dimension_style_name.trim().is_empty()
+            {
                 return Err("Tolerance.dimension_style_name is empty".into());
             }
             if old.text_height.to_bits() != new.text_height.to_bits()
-                && (!new.text_height.is_finite() || new.text_height <= 0.0) {
+                && (!new.text_height.is_finite() || new.text_height <= 0.0)
+            {
                 return Err("Tolerance.text_height must be finite and greater than zero".into());
             }
-            if old.dimension_gap.to_bits() != new.dimension_gap.to_bits() && !new.dimension_gap.is_finite() {
+            if old.dimension_gap.to_bits() != new.dimension_gap.to_bits()
+                && !new.dimension_gap.is_finite()
+            {
                 return Err("Tolerance.dimension_gap must be finite".into());
             }
             if old.dimension_style_handle != new.dimension_style_handle
-                && old.dimension_style_name == new.dimension_style_name {
+                && old.dimension_style_name == new.dimension_style_name
+            {
                 return Err("Tolerance.dimension_style_handle is read-only".into());
             }
         }
         (EntityType::Shape(old), EntityType::Shape(new)) => {
-            changed3("Shape.insertion_point", &old.insertion_point, &new.insertion_point)?;
-            if !same3(&old.normal, &new.normal) { solid_normal("Shape.normal", &new.normal)?; }
-            if old.size.to_bits() != new.size.to_bits() && (!new.size.is_finite() || new.size <= 0.0) {
+            changed3(
+                "Shape.insertion_point",
+                &old.insertion_point,
+                &new.insertion_point,
+            )?;
+            if !same3(&old.normal, &new.normal) {
+                solid_normal("Shape.normal", &new.normal)?;
+            }
+            if old.size.to_bits() != new.size.to_bits()
+                && (!new.size.is_finite() || new.size <= 0.0)
+            {
                 return Err("Shape.size must be finite and greater than zero".into());
             }
-            if old.shape_name != new.shape_name && new.shape_name.trim().is_empty() { return Err("Shape.shape_name is empty".into()); }
-            if old.shape_number != new.shape_number && !(1..=i16::MAX as i32).contains(&new.shape_number) {
+            if old.shape_name != new.shape_name && new.shape_name.trim().is_empty() {
+                return Err("Shape.shape_name is empty".into());
+            }
+            if old.shape_number != new.shape_number
+                && !(1..=i16::MAX as i32).contains(&new.shape_number)
+            {
                 return Err("Shape.shape_number must be between 1 and 32767".into());
             }
-            if old.rotation.to_bits() != new.rotation.to_bits() && !new.rotation.is_finite() { return Err("Shape.rotation must be finite".into()); }
+            if old.rotation.to_bits() != new.rotation.to_bits() && !new.rotation.is_finite() {
+                return Err("Shape.rotation must be finite".into());
+            }
             if old.relative_x_scale.to_bits() != new.relative_x_scale.to_bits()
-                && (!new.relative_x_scale.is_finite() || new.relative_x_scale.abs() < 1e-12) {
+                && (!new.relative_x_scale.is_finite() || new.relative_x_scale.abs() < 1e-12)
+            {
                 return Err("Shape.relative_x_scale must be finite and nonzero".into());
             }
             if old.oblique_angle.to_bits() != new.oblique_angle.to_bits()
-                && (!new.oblique_angle.is_finite() || new.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2) {
+                && (!new.oblique_angle.is_finite()
+                    || new.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2)
+            {
                 return Err("Shape.oblique_angle must be finite and between -PI/2 and PI/2".into());
             }
             if old.thickness.to_bits() != new.thickness.to_bits() && !new.thickness.is_finite() {
                 return Err("Shape.thickness must be finite".into());
             }
-            if old.style_name != new.style_name && new.style_name.trim().is_empty() { return Err("Shape.style_name is empty".into()); }
+            if old.style_name != new.style_name && new.style_name.trim().is_empty() {
+                return Err("Shape.style_name is empty".into());
+            }
             if old.style_handle != new.style_handle
-                && !(old.style_name != new.style_name && new.style_handle.is_some()) {
+                && !(old.style_name != new.style_name && new.style_handle.is_some())
+            {
                 return Err("Shape.style_handle is read-only".into());
             }
         }
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
-            changed3("AttributeDefinition.insertion_point", &old.insertion_point, &new.insertion_point)?;
-            changed3("AttributeDefinition.alignment_point", &old.alignment_point, &new.alignment_point)?;
-            if !same3(&old.normal, &new.normal) { solid_normal("AttributeDefinition.normal", &new.normal)?; }
-            if old.tag != new.tag && (new.tag.trim().is_empty() || new.tag.chars().any(char::is_whitespace)) {
-                return Err("AttributeDefinition.tag must be nonempty and contain no whitespace".into());
+            changed3(
+                "AttributeDefinition.insertion_point",
+                &old.insertion_point,
+                &new.insertion_point,
+            )?;
+            changed3(
+                "AttributeDefinition.alignment_point",
+                &old.alignment_point,
+                &new.alignment_point,
+            )?;
+            if !same3(&old.normal, &new.normal) {
+                solid_normal("AttributeDefinition.normal", &new.normal)?;
             }
-            if old.height.to_bits() != new.height.to_bits() && (!new.height.is_finite() || new.height <= 0.0) {
-                return Err("AttributeDefinition.height must be finite and greater than zero".into());
+            if old.tag != new.tag
+                && (new.tag.trim().is_empty() || new.tag.chars().any(char::is_whitespace))
+            {
+                return Err(
+                    "AttributeDefinition.tag must be nonempty and contain no whitespace".into(),
+                );
+            }
+            if old.height.to_bits() != new.height.to_bits()
+                && (!new.height.is_finite() || new.height <= 0.0)
+            {
+                return Err(
+                    "AttributeDefinition.height must be finite and greater than zero".into(),
+                );
             }
             for (name, before, after) in [
                 ("rotation", old.rotation, new.rotation),
@@ -314,12 +524,16 @@ pub fn validate_entity_mutation(
                 }
             }
             if old.width_factor.to_bits() != new.width_factor.to_bits()
-                && (!new.width_factor.is_finite() || new.width_factor.abs() < 1e-12) {
+                && (!new.width_factor.is_finite() || new.width_factor.abs() < 1e-12)
+            {
                 return Err("AttributeDefinition.width_factor must be finite and nonzero".into());
             }
             if old.oblique_angle.to_bits() != new.oblique_angle.to_bits()
-                && new.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2 {
-                return Err("AttributeDefinition.oblique_angle must be between -PI/2 and PI/2".into());
+                && new.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2
+            {
+                return Err(
+                    "AttributeDefinition.oblique_angle must be between -PI/2 and PI/2".into(),
+                );
             }
             if old.text_style != new.text_style && new.text_style.trim().is_empty() {
                 return Err("AttributeDefinition.text_style is empty".into());
@@ -332,6 +546,68 @@ pub fn validate_entity_mutation(
             }
             if old.embedded_mtext != new.embedded_mtext {
                 return Err("AttributeDefinition.embedded_mtext is unmapped and read-only".into());
+            }
+        }
+        (EntityType::AttributeEntity(old), EntityType::AttributeEntity(new)) => {
+            changed3(
+                "AttributeEntity.insertion_point",
+                &old.insertion_point,
+                &new.insertion_point,
+            )?;
+            changed3(
+                "AttributeEntity.alignment_point",
+                &old.alignment_point,
+                &new.alignment_point,
+            )?;
+            if !same3(&old.normal, &new.normal) {
+                solid_normal("AttributeEntity.normal", &new.normal)?;
+            }
+            if old.tag != new.tag
+                && (new.tag.trim().is_empty() || new.tag.chars().any(char::is_whitespace))
+            {
+                return Err(
+                    "AttributeEntity.tag must be nonempty and contain no whitespace".into(),
+                );
+            }
+            if old.height.to_bits() != new.height.to_bits()
+                && (!new.height.is_finite() || new.height <= 0.0)
+            {
+                return Err("AttributeEntity.height must be finite and greater than zero".into());
+            }
+            for (name, before, after) in [
+                ("rotation", old.rotation, new.rotation),
+                ("oblique_angle", old.oblique_angle, new.oblique_angle),
+            ] {
+                if before.to_bits() != after.to_bits() && !after.is_finite() {
+                    return Err(format!("AttributeEntity.{name} must be finite"));
+                }
+            }
+            if old.width_factor.to_bits() != new.width_factor.to_bits()
+                && (!new.width_factor.is_finite() || new.width_factor.abs() < 1e-12)
+            {
+                return Err("AttributeEntity.width_factor must be finite and nonzero".into());
+            }
+            if old.oblique_angle.to_bits() != new.oblique_angle.to_bits()
+                && new.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2
+            {
+                return Err("AttributeEntity.oblique_angle must be between -PI/2 and PI/2".into());
+            }
+            if old.text_style != new.text_style && new.text_style.trim().is_empty() {
+                return Err("AttributeEntity.text_style is empty".into());
+            }
+            if old.field_length != new.field_length && new.field_length < 0 {
+                return Err("AttributeEntity.field_length must be nonnegative".into());
+            }
+            if old.line_count != new.line_count && new.line_count < 1 {
+                return Err("AttributeEntity.line_count must be greater than zero".into());
+            }
+            if old.embedded_mtext != new.embedded_mtext {
+                return Err("AttributeEntity.embedded_mtext is unmapped and read-only".into());
+            }
+            if old.attdef_handle != new.attdef_handle
+                && !(old.tag != new.tag && !new.attdef_handle.is_null())
+            {
+                return Err("AttributeEntity.attdef_handle is read-only".into());
             }
         }
         _ => {}
@@ -349,7 +625,10 @@ pub fn validate_canvas_entity_references(
     use crate::host::EntityType;
     let owner = entity.common().owner_handle;
     if !owner.is_null() {
-        let block_owner = document.block_records.iter().any(|record| record.handle == owner);
+        let block_owner = document
+            .block_records
+            .iter()
+            .any(|record| record.handle == owner);
         let insert_owner = matches!(entity, EntityType::AttributeEntity(_))
             && matches!(document.get_entity(owner), Some(EntityType::Insert(_)));
         if !block_owner && !insert_owner {
@@ -357,31 +636,132 @@ pub fn validate_canvas_entity_references(
         }
     }
     if let EntityType::Tolerance(value) = entity {
-        let found = value.dimension_style_handle.filter(|handle| !handle.is_null()).map_or_else(
-            || document.dim_styles.iter().any(|style| style.name.eq_ignore_ascii_case(value.dimension_style_name.trim())),
-            |handle| document.dim_styles.iter().any(|style| style.handle == handle),
+        let found = value
+            .dimension_style_handle
+            .filter(|handle| !handle.is_null())
+            .map_or_else(
+                || {
+                    document.dim_styles.iter().any(|style| {
+                        style
+                            .name
+                            .eq_ignore_ascii_case(value.dimension_style_name.trim())
+                    })
+                },
+                |handle| {
+                    document
+                        .dim_styles
+                        .iter()
+                        .any(|style| style.handle == handle)
+                },
         );
-        if !found { return Err(format!("Tolerance dimension style {:?} does not exist", value.dimension_style_name)); }
+        if !found {
+            return Err(format!(
+                "Tolerance dimension style {:?} does not exist",
+                value.dimension_style_name
+            ));
+        }
     }
     if let EntityType::Shape(value) = entity {
-        let style = value.style_handle.filter(|handle| !handle.is_null())
-            .and_then(|handle| document.text_styles.iter().find(|style| style.handle == handle))
-            .or_else(|| document.text_styles.iter().find(|style| style.name.eq_ignore_ascii_case(value.style_name.trim())))
+        let style = value
+            .style_handle
+            .filter(|handle| !handle.is_null())
+            .and_then(|handle| {
+                document
+                    .text_styles
+                    .iter()
+                    .find(|style| style.handle == handle)
+            })
+            .or_else(|| {
+                document
+                    .text_styles
+                    .iter()
+                    .find(|style| style.name.eq_ignore_ascii_case(value.style_name.trim()))
+            })
             .ok_or_else(|| format!("Shape text style {:?} does not exist", value.style_name))?;
-        if !style.is_shape_file { return Err(format!("Shape text style {:?} is not a shape-file style", style.name)); }
-        if style.font_file.trim().is_empty() { return Err(format!("Shape text style {:?} has no SHX file", style.name)); }
+        if !style.is_shape_file {
+            return Err(format!(
+                "Shape text style {:?} is not a shape-file style",
+                style.name
+            ));
+        }
+        if style.font_file.trim().is_empty() {
+            return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
     }
     if let EntityType::AttributeDefinition(value) = entity {
         let owner = entity.common().owner_handle;
-        let block = document.block_records.iter().find(|record| record.handle == owner)
-            .ok_or_else(|| "AttributeDefinition requires an existing block-record owner".to_owned())?;
+        let block = document
+            .block_records
+            .iter()
+            .find(|record| record.handle == owner)
+            .ok_or_else(|| {
+                "AttributeDefinition requires an existing block-record owner".to_owned()
+            })?;
         if block.is_model_space() || block.is_paper_space() {
             return Err("AttributeDefinition owner must be a block definition".into());
         }
-        let style = document.text_styles.get(value.text_style.trim())
-            .ok_or_else(|| format!("AttributeDefinition text style {:?} does not exist", value.text_style))?;
+        let style = document
+            .text_styles
+            .get(value.text_style.trim())
+            .ok_or_else(|| {
+                format!(
+                    "AttributeDefinition text style {:?} does not exist",
+                    value.text_style
+                )
+            })?;
         if style.is_shape_file {
-            return Err(format!("AttributeDefinition text style {:?} is a shape-file style", style.name));
+            return Err(format!(
+                "AttributeDefinition text style {:?} is a shape-file style",
+                style.name
+            ));
+        }
+    }
+    if let EntityType::AttributeEntity(value) = entity {
+        let owner = entity.common().owner_handle;
+        let insert = match document.get_entity(owner) {
+            Some(EntityType::Insert(insert)) => insert,
+            _ => return Err("AttributeEntity requires an existing Insert owner".into()),
+        };
+        let block = document
+            .block_records
+            .get(insert.block_name.trim())
+            .ok_or_else(|| {
+                format!(
+                    "AttributeEntity owner references missing block {:?}",
+                    insert.block_name
+                )
+            })?;
+        let definition = block
+            .entity_handles
+            .iter()
+            .find_map(|handle| match document.get_entity(*handle) {
+                Some(EntityType::AttributeDefinition(definition))
+                    if definition.common.handle == value.attdef_handle =>
+                {
+                    Some(definition)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                "AttributeEntity attdef_handle does not belong to the owner's block".to_owned()
+            })?;
+        if !definition.tag.eq_ignore_ascii_case(value.tag.trim()) {
+            return Err("AttributeEntity tag does not match its attribute definition".into());
+        }
+        let style = document
+            .text_styles
+            .get(value.text_style.trim())
+            .ok_or_else(|| {
+                format!(
+                    "AttributeEntity text style {:?} does not exist",
+                    value.text_style
+                )
+            })?;
+        if style.is_shape_file {
+            return Err(format!(
+                "AttributeEntity text style {:?} is a shape-file style",
+                style.name
+            ));
         }
     }
     Ok(())
@@ -397,15 +777,68 @@ pub fn bind_canvas_entity_references(
 ) -> Result<(), String> {
     use crate::host::EntityType;
     match entity {
-        EntityType::Tolerance(value) if value.dimension_style_handle.filter(|h| !h.is_null()).is_none() => {
-            value.dimension_style_handle = document.dim_styles.iter()
-                .find(|style| style.name.eq_ignore_ascii_case(value.dimension_style_name.trim()))
+        EntityType::Tolerance(value)
+            if value
+                .dimension_style_handle
+                .filter(|h| !h.is_null())
+                .is_none() =>
+        {
+            value.dimension_style_handle = document
+                .dim_styles
+                .iter()
+                .find(|style| {
+                    style
+                        .name
+                        .eq_ignore_ascii_case(value.dimension_style_name.trim())
+                })
                 .map(|style| style.handle);
         }
         EntityType::Shape(value) if value.style_handle.filter(|h| !h.is_null()).is_none() => {
-            value.style_handle = document.text_styles.iter()
+            value.style_handle = document
+                .text_styles
+                .iter()
                 .find(|style| style.name.eq_ignore_ascii_case(value.style_name.trim()))
                 .map(|style| style.handle);
+        }
+        EntityType::AttributeEntity(value) => {
+            let insert = match document.get_entity(value.common.owner_handle) {
+                Some(EntityType::Insert(insert)) => insert,
+                _ => return Err("AttributeEntity requires an existing Insert owner".into()),
+            };
+            let block = document
+                .block_records
+                .get(insert.block_name.trim())
+                .ok_or_else(|| {
+                    format!(
+                        "AttributeEntity owner references missing block {:?}",
+                        insert.block_name
+                    )
+                })?;
+            let current_matches = block.entity_handles.iter().any(|handle| {
+                *handle == value.attdef_handle
+                    && matches!(document.get_entity(*handle),
+                    Some(EntityType::AttributeDefinition(definition))
+                        if definition.tag.eq_ignore_ascii_case(value.tag.trim()))
+            });
+            if !current_matches {
+                value.attdef_handle = block
+                    .entity_handles
+                    .iter()
+                    .find_map(|handle| match document.get_entity(*handle) {
+                        Some(EntityType::AttributeDefinition(definition))
+                            if definition.tag.eq_ignore_ascii_case(value.tag.trim()) =>
+                        {
+                            Some(*handle)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "AttributeEntity tag {:?} has no definition in block {:?}",
+                            value.tag, insert.block_name
+                        )
+                    })?;
+            }
         }
         _ => {}
     }
@@ -415,11 +848,22 @@ pub fn bind_canvas_entity_references(
 /// Clone a canvas entity with a new layer, preserving its other snapshot
 /// fields. Internal records and opaque fallbacks are excluded.
 #[cfg(feature = "host")]
-pub fn patch_canvas_layer(entity: &crate::host::EntityType, layer: &str) -> Result<crate::host::EntityType, String> {
+pub fn patch_canvas_layer(
+    entity: &crate::host::EntityType,
+    layer: &str,
+) -> Result<crate::host::EntityType, String> {
     use crate::host::EntityType;
-    if layer.trim().is_empty() { return Err("layer name is empty".into()); }
-    if matches!(entity, EntityType::Block(_) | EntityType::BlockEnd(_) | EntityType::Seqend(_)
-        | EntityType::Extended(_) | EntityType::Unknown(_)) {
+    if layer.trim().is_empty() {
+        return Err("layer name is empty".into());
+    }
+    if matches!(
+        entity,
+        EntityType::Block(_)
+            | EntityType::BlockEnd(_)
+            | EntityType::Seqend(_)
+            | EntityType::Extended(_)
+            | EntityType::Unknown(_)
+    ) {
         return Err("entity kind does not support canvas layer edits".into());
     }
     let mut changed = entity.clone();
@@ -434,23 +878,46 @@ mod tests {
 
     #[test]
     fn every_entity_variant_has_exactly_one_classification() {
-        let catalog: EntityCoverageCatalog = serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
-        let registry: TypeRegistry = serde_json::from_str(get_embedded_type_registry_json()).unwrap();
+        let catalog: EntityCoverageCatalog =
+            serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
+        let registry: TypeRegistry =
+            serde_json::from_str(get_embedded_type_registry_json()).unwrap();
         let variants = &registry.types[&TypeId::new("EntityType")].variants;
         assert_eq!(catalog.entity_kinds.len(), variants.len());
         let mut names = std::collections::HashSet::new();
         for entry in &catalog.entity_kinds {
             assert!(names.insert(&entry.kind), "duplicate kind {}", entry.kind);
             assert!(variants.iter().any(|v| v.name == entry.kind));
-            assert!(entry.properties.iter().any(|p| p.name == "handle" && p.model_access == ModelAccess::ReadOnly));
-            assert!(entry.properties.iter().any(|p| p.name == "kind" && p.model_access == ModelAccess::ReadOnly));
-            assert!(entry.properties.iter().any(|p| p.name == "owner_handle" && p.model_access == ModelAccess::ReadOnly));
+            assert!(entry
+                .properties
+                .iter()
+                .any(|p| p.name == "handle" && p.model_access == ModelAccess::ReadOnly));
+            assert!(entry
+                .properties
+                .iter()
+                .any(|p| p.name == "kind" && p.model_access == ModelAccess::ReadOnly));
+            assert!(entry
+                .properties
+                .iter()
+                .any(|p| p.name == "owner_handle" && p.model_access == ModelAccess::ReadOnly));
             let mut source_paths = std::collections::HashSet::new();
             for property in &entry.properties {
-                assert!(source_paths.insert(&property.source_path), "duplicate source path in {}: {}", entry.kind, property.source_path);
-                assert!(property.snapshot_readable, "unreadable traced property in {}: {}", entry.kind, property.name);
+                assert!(
+                    source_paths.insert(&property.source_path),
+                    "duplicate source path in {}: {}",
+                    entry.kind,
+                    property.source_path
+                );
+                assert!(
+                    property.snapshot_readable,
+                    "unreadable traced property in {}: {}",
+                    entry.kind, property.name
+                );
                 if property.model_access == ModelAccess::ReadWrite {
-                    assert!(matches!(property.validation.as_str(), "type_conversion_only" | "transaction_geometry" | "transaction_nonempty"));
+                    assert!(matches!(
+                        property.validation.as_str(),
+                        "type_conversion_only" | "transaction_geometry" | "transaction_nonempty"
+                    ));
                 }
             }
         }
@@ -458,69 +925,156 @@ mod tests {
 
     #[test]
     fn unsupported_kinds_have_no_editable_properties() {
-        let catalog: EntityCoverageCatalog = serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
+        let catalog: EntityCoverageCatalog =
+            serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
         for entry in &catalog.entity_kinds {
-            if entry.scope != EntityScope::Canvas || !matches!(entry.kind.as_str(),
-                "Point" | "Line" | "Circle" | "Arc" | "Ellipse" | "Polyline" |
-                "Polyline2D" | "Polyline3D" | "LwPolyline" | "Spline" | "Text" | "MText" |
-                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert" | "Tolerance" | "Shape" |
-                "AttributeDefinition") {
-                assert!(entry.properties.iter().all(|p| p.model_access != ModelAccess::ReadWrite
-                    || (entry.scope == EntityScope::Canvas && p.name == "layer")), "{}", entry.kind);
+            if entry.scope != EntityScope::Canvas
+                || !matches!(
+                    entry.kind.as_str(),
+                    "Point"
+                        | "Line"
+                        | "Circle"
+                        | "Arc"
+                        | "Ellipse"
+                        | "Polyline"
+                        | "Polyline2D"
+                        | "Polyline3D"
+                        | "LwPolyline"
+                        | "Spline"
+                        | "Text"
+                        | "MText"
+                        | "Ray"
+                        | "XLine"
+                        | "Solid"
+                        | "Face3D"
+                        | "Insert"
+                        | "Tolerance"
+                        | "Shape"
+                        | "AttributeDefinition"
+                        | "AttributeEntity"
+                )
+            {
+                assert!(
+                    entry
+                        .properties
+                        .iter()
+                        .all(|p| p.model_access != ModelAccess::ReadWrite
+                            || (entry.scope == EntityScope::Canvas && p.name == "layer")),
+                    "{}",
+                    entry.kind
+                );
             }
         }
     }
 
     #[test]
     fn catalog_names_the_fields_with_transaction_geometry_checks() {
-        let catalog: EntityCoverageCatalog = serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
-        let checked: std::collections::HashSet<_> = catalog.entity_kinds.iter()
-            .flat_map(|entry| entry.properties.iter()
+        let catalog: EntityCoverageCatalog =
+            serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
+        let checked: std::collections::HashSet<_> = catalog
+            .entity_kinds
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .properties
+                    .iter()
                 .filter(|property| property.validation == "transaction_geometry")
-                .map(|property| format!("{}.{}", entry.kind, property.name)))
+                    .map(|property| format!("{}.{}", entry.kind, property.name))
+            })
             .collect();
-        assert_eq!(checked, std::collections::HashSet::from([
-            "Point.location".to_owned(), "Line.start".to_owned(), "Line.end".to_owned(),
-            "Circle.center".to_owned(), "Circle.radius".to_owned(),
-            "Arc.center".to_owned(), "Arc.radius".to_owned(),
-            "Ray.base_point".to_owned(), "Ray.direction".to_owned(),
-            "XLine.base_point".to_owned(), "XLine.direction".to_owned(),
-            "Solid.first_corner".to_owned(), "Solid.second_corner".to_owned(),
-            "Solid.third_corner".to_owned(), "Solid.fourth_corner".to_owned(),
-            "Solid.normal".to_owned(), "Solid.thickness".to_owned(),
-            "Face3D.first_corner".to_owned(), "Face3D.second_corner".to_owned(),
-            "Face3D.third_corner".to_owned(), "Face3D.fourth_corner".to_owned(),
+        assert_eq!(
+            checked,
+            std::collections::HashSet::from([
+                "Point.location".to_owned(),
+                "Line.start".to_owned(),
+                "Line.end".to_owned(),
+                "Circle.center".to_owned(),
+                "Circle.radius".to_owned(),
+                "Arc.center".to_owned(),
+                "Arc.radius".to_owned(),
+                "Ray.base_point".to_owned(),
+                "Ray.direction".to_owned(),
+                "XLine.base_point".to_owned(),
+                "XLine.direction".to_owned(),
+                "Solid.first_corner".to_owned(),
+                "Solid.second_corner".to_owned(),
+                "Solid.third_corner".to_owned(),
+                "Solid.fourth_corner".to_owned(),
+                "Solid.normal".to_owned(),
+                "Solid.thickness".to_owned(),
+                "Face3D.first_corner".to_owned(),
+                "Face3D.second_corner".to_owned(),
+                "Face3D.third_corner".to_owned(),
+                "Face3D.fourth_corner".to_owned(),
             "Face3D.invisible_edges".to_owned(),
-            "Insert.insert_point".to_owned(), "Insert.x_scale".to_owned(),
-            "Insert.y_scale".to_owned(), "Insert.z_scale".to_owned(),
-            "Insert.rotation".to_owned(), "Insert.normal".to_owned(),
-            "Insert.column_count".to_owned(), "Insert.row_count".to_owned(),
-            "Insert.column_spacing".to_owned(), "Insert.row_spacing".to_owned(),
-            "Tolerance.insertion_point".to_owned(), "Tolerance.direction".to_owned(),
-            "Tolerance.normal".to_owned(), "Tolerance.text".to_owned(),
-            "Tolerance.dimension_style_name".to_owned(), "Tolerance.text_height".to_owned(),
+                "Insert.insert_point".to_owned(),
+                "Insert.x_scale".to_owned(),
+                "Insert.y_scale".to_owned(),
+                "Insert.z_scale".to_owned(),
+                "Insert.rotation".to_owned(),
+                "Insert.normal".to_owned(),
+                "Insert.column_count".to_owned(),
+                "Insert.row_count".to_owned(),
+                "Insert.column_spacing".to_owned(),
+                "Insert.row_spacing".to_owned(),
+                "Tolerance.insertion_point".to_owned(),
+                "Tolerance.direction".to_owned(),
+                "Tolerance.normal".to_owned(),
+                "Tolerance.text".to_owned(),
+                "Tolerance.dimension_style_name".to_owned(),
+                "Tolerance.text_height".to_owned(),
             "Tolerance.dimension_gap".to_owned(),
-            "Shape.insertion_point".to_owned(), "Shape.size".to_owned(),
-            "Shape.shape_name".to_owned(), "Shape.shape_number".to_owned(),
-            "Shape.rotation".to_owned(), "Shape.relative_x_scale".to_owned(),
-            "Shape.oblique_angle".to_owned(), "Shape.normal".to_owned(),
-            "Shape.thickness".to_owned(), "Shape.style_name".to_owned(),
-            "AttributeDefinition.tag".to_owned(), "AttributeDefinition.prompt".to_owned(),
+                "Shape.insertion_point".to_owned(),
+                "Shape.size".to_owned(),
+                "Shape.shape_name".to_owned(),
+                "Shape.shape_number".to_owned(),
+                "Shape.rotation".to_owned(),
+                "Shape.relative_x_scale".to_owned(),
+                "Shape.oblique_angle".to_owned(),
+                "Shape.normal".to_owned(),
+                "Shape.thickness".to_owned(),
+                "Shape.style_name".to_owned(),
+                "AttributeDefinition.tag".to_owned(),
+                "AttributeDefinition.prompt".to_owned(),
             "AttributeDefinition.default_value".to_owned(),
             "AttributeDefinition.insertion_point".to_owned(),
             "AttributeDefinition.alignment_point".to_owned(),
-            "AttributeDefinition.height".to_owned(), "AttributeDefinition.rotation".to_owned(),
+                "AttributeDefinition.height".to_owned(),
+                "AttributeDefinition.rotation".to_owned(),
             "AttributeDefinition.width_factor".to_owned(),
             "AttributeDefinition.oblique_angle".to_owned(),
             "AttributeDefinition.text_style".to_owned(),
             "AttributeDefinition.text_generation_flags".to_owned(),
             "AttributeDefinition.horizontal_alignment".to_owned(),
             "AttributeDefinition.vertical_alignment".to_owned(),
-            "AttributeDefinition.flags".to_owned(), "AttributeDefinition.field_length".to_owned(),
-            "AttributeDefinition.normal".to_owned(), "AttributeDefinition.mtext_flag".to_owned(),
-            "AttributeDefinition.is_multiline".to_owned(), "AttributeDefinition.line_count".to_owned(),
+                "AttributeDefinition.flags".to_owned(),
+                "AttributeDefinition.field_length".to_owned(),
+                "AttributeDefinition.normal".to_owned(),
+                "AttributeDefinition.mtext_flag".to_owned(),
+                "AttributeDefinition.is_multiline".to_owned(),
+                "AttributeDefinition.line_count".to_owned(),
             "AttributeDefinition.lock_position".to_owned(),
-        ]));
+                "AttributeEntity.tag".to_owned(),
+                "AttributeEntity.value".to_owned(),
+                "AttributeEntity.insertion_point".to_owned(),
+                "AttributeEntity.alignment_point".to_owned(),
+                "AttributeEntity.height".to_owned(),
+                "AttributeEntity.rotation".to_owned(),
+                "AttributeEntity.width_factor".to_owned(),
+                "AttributeEntity.oblique_angle".to_owned(),
+                "AttributeEntity.text_style".to_owned(),
+                "AttributeEntity.text_generation_flags".to_owned(),
+                "AttributeEntity.horizontal_alignment".to_owned(),
+                "AttributeEntity.vertical_alignment".to_owned(),
+                "AttributeEntity.flags".to_owned(),
+                "AttributeEntity.field_length".to_owned(),
+                "AttributeEntity.normal".to_owned(),
+                "AttributeEntity.mtext_flag".to_owned(),
+                "AttributeEntity.is_multiline".to_owned(),
+                "AttributeEntity.line_count".to_owned(),
+                "AttributeEntity.lock_position".to_owned(),
+            ])
+        );
     }
 
     #[cfg(feature = "host")]
@@ -529,18 +1083,26 @@ mod tests {
         use crate::host::acadrust::{self, types::Vector3};
         let document = acadrust::CadDocument::new();
         let mut tolerance = acadrust::entities::Tolerance::with_text(
-            Vector3::new(1.0, 2.0, 0.0), "{\\Fgdt;p}%%v0.1");
+            Vector3::new(1.0, 2.0, 0.0),
+            "{\\Fgdt;p}%%v0.1",
+        );
         let entity = acadrust::EntityType::Tolerance(tolerance.clone());
         validate_new_canvas_entity(&entity).unwrap();
         validate_canvas_entity_references(&document, &entity).unwrap();
         tolerance.direction = Vector3::new(2.0, 0.0, 0.0);
-        assert!(validate_new_canvas_entity(&acadrust::EntityType::Tolerance(tolerance.clone()))
-            .unwrap_err().contains("unit vector"));
+        assert!(
+            validate_new_canvas_entity(&acadrust::EntityType::Tolerance(tolerance.clone()))
+                .unwrap_err()
+                .contains("unit vector")
+        );
         tolerance.direction = Vector3::UNIT_X;
         tolerance.dimension_style_name = "Missing".into();
         assert!(validate_canvas_entity_references(
-            &document, &acadrust::EntityType::Tolerance(tolerance))
-            .unwrap_err().contains("does not exist"));
+            &document,
+            &acadrust::EntityType::Tolerance(tolerance)
+        )
+        .unwrap_err()
+        .contains("does not exist"));
     }
 
     #[cfg(feature = "host")]
@@ -555,26 +1117,51 @@ mod tests {
         let style_handle = style.handle;
         document.text_styles.add(style).unwrap();
         let mut shape = acadrust::entities::Shape::with_style(
-            Vector3::new(1.0, 2.0, 0.0), "ARROW", "Symbols", 2.0, 0.5);
+            Vector3::new(1.0, 2.0, 0.0),
+            "ARROW",
+            "Symbols",
+            2.0,
+            0.5,
+        );
         shape.shape_number = 1;
         let mut entity = acadrust::EntityType::Shape(shape);
         validate_new_canvas_entity(&entity).unwrap();
         bind_canvas_entity_references(&document, &mut entity).unwrap();
         assert!(matches!(entity, acadrust::EntityType::Shape(ref value)
             if value.style_handle == Some(style_handle)));
-        let acadrust::EntityType::Shape(mut bad) = entity else { unreachable!() };
+        let acadrust::EntityType::Shape(mut bad) = entity else {
+            unreachable!()
+        };
         bad.size = 0.0;
-        assert!(validate_new_canvas_entity(&acadrust::EntityType::Shape(bad))
-            .unwrap_err().contains("greater than zero"));
+        assert!(
+            validate_new_canvas_entity(&acadrust::EntityType::Shape(bad))
+                .unwrap_err()
+                .contains("greater than zero")
+        );
     }
 
     #[test]
     fn layer_write_coverage_matches_canvas_scope() {
-        let catalog: EntityCoverageCatalog = serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
-        assert_eq!(catalog.entity_kinds.iter().filter(|entry| entry.scope == EntityScope::Canvas).count(), 43);
+        let catalog: EntityCoverageCatalog =
+            serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
+        assert_eq!(
+            catalog
+                .entity_kinds
+                .iter()
+                .filter(|entry| entry.scope == EntityScope::Canvas)
+                .count(),
+            43
+        );
         for entry in &catalog.entity_kinds {
-            let layer = entry.properties.iter().find(|property| property.name == "layer").unwrap();
-            assert_eq!(layer.model_access == ModelAccess::ReadWrite, entry.scope == EntityScope::Canvas);
+            let layer = entry
+                .properties
+                .iter()
+                .find(|property| property.name == "layer")
+                .unwrap();
+            assert_eq!(
+                layer.model_access == ModelAccess::ReadWrite,
+                entry.scope == EntityScope::Canvas
+            );
             if entry.scope == EntityScope::Canvas {
                 assert_eq!(layer.validation, "transaction_nonempty");
             }
@@ -583,13 +1170,38 @@ mod tests {
 
     #[test]
     fn insert_catalog_separates_transform_writes_from_block_identity() {
-        let catalog: EntityCoverageCatalog = serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
-        let insert = catalog.entity_kinds.iter().find(|entry| entry.kind == "Insert").unwrap();
-        let block_name = insert.properties.iter().find(|property| property.name == "block_name").unwrap();
+        let catalog: EntityCoverageCatalog =
+            serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
+        let insert = catalog
+            .entity_kinds
+            .iter()
+            .find(|entry| entry.kind == "Insert")
+            .unwrap();
+        let block_name = insert
+            .properties
+            .iter()
+            .find(|property| property.name == "block_name")
+            .unwrap();
         assert_eq!(block_name.model_access, ModelAccess::ReadOnly);
         assert_eq!(block_name.validation, "none");
-        assert!(insert.properties.iter().find(|property| property.name == "attributes").unwrap().model_access == ModelAccess::Unmapped);
-        assert!(insert.properties.iter().find(|property| property.name == "insert_point").unwrap().model_access == ModelAccess::ReadWrite);
+        assert!(
+            insert
+                .properties
+                .iter()
+                .find(|property| property.name == "attributes")
+                .unwrap()
+                .model_access
+                == ModelAccess::Unmapped
+        );
+        assert!(
+            insert
+                .properties
+                .iter()
+                .find(|property| property.name == "insert_point")
+                .unwrap()
+                .model_access
+                == ModelAccess::ReadWrite
+        );
     }
 
     #[cfg(feature = "host")]
@@ -598,7 +1210,10 @@ mod tests {
         use crate::host::acadrust;
         let hatch = acadrust::EntityType::Hatch(acadrust::entities::Hatch::default());
         let snapshot = entity_snapshot(&hatch).unwrap();
-        let fields = snapshot.get("Hatch").and_then(|value| value.as_object()).unwrap();
+        let fields = snapshot
+            .get("Hatch")
+            .and_then(|value| value.as_object())
+            .unwrap();
         assert!(fields.contains_key("common"));
         assert!(fields.len() > 1);
     }
@@ -614,13 +1229,16 @@ mod tests {
         assert!(validate_entity_mutation(
             &acadrust::EntityType::Circle(before.clone()),
             &acadrust::EntityType::Circle(layer_only),
-        ).is_ok());
+        )
+        .is_ok());
         let mut bad_radius = before.clone();
         bad_radius.radius = -1.0;
         assert!(validate_entity_mutation(
             &acadrust::EntityType::Circle(before),
             &acadrust::EntityType::Circle(bad_radius),
-        ).unwrap_err().contains("Circle.radius"));
+        )
+        .unwrap_err()
+        .contains("Circle.radius"));
     }
 
     #[cfg(feature = "host")]
@@ -629,7 +1247,11 @@ mod tests {
         use crate::host::acadrust::{self, types::Vector3};
         let mut ray = acadrust::entities::Ray::default();
         ray.direction = Vector3::new(2.0, 0.0, 0.0);
-        assert!(validate_new_canvas_entity(&acadrust::EntityType::Ray(ray.clone())).unwrap_err().contains("Ray.direction"));
+        assert!(
+            validate_new_canvas_entity(&acadrust::EntityType::Ray(ray.clone()))
+                .unwrap_err()
+                .contains("Ray.direction")
+        );
         let before = acadrust::EntityType::Ray(ray.clone());
         ray.common.layer = "CONSTRUCTION".into();
         assert!(validate_entity_mutation(&before, &acadrust::EntityType::Ray(ray.clone())).is_ok());
@@ -638,19 +1260,41 @@ mod tests {
 
         let mut xline = acadrust::entities::XLine::default();
         xline.base_point.x = f64::NAN;
-        assert!(validate_new_canvas_entity(&acadrust::EntityType::XLine(xline)).unwrap_err().contains("XLine.base_point"));
+        assert!(
+            validate_new_canvas_entity(&acadrust::EntityType::XLine(xline))
+                .unwrap_err()
+                .contains("XLine.base_point")
+        );
 
-        let solid = acadrust::entities::Solid::new(Vector3::ZERO, Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::ZERO);
+        let solid = acadrust::entities::Solid::new(
+            Vector3::ZERO,
+            Vector3::UNIT_X,
+            Vector3::UNIT_Y,
+            Vector3::ZERO,
+        );
         let mut changed = solid.clone();
         changed.thickness = f64::INFINITY;
-        assert!(validate_entity_mutation(&acadrust::EntityType::Solid(solid), &acadrust::EntityType::Solid(changed))
-            .unwrap_err().contains("Solid.thickness"));
+        assert!(validate_entity_mutation(
+            &acadrust::EntityType::Solid(solid),
+            &acadrust::EntityType::Solid(changed)
+        )
+        .unwrap_err()
+        .contains("Solid.thickness"));
 
-        let face = acadrust::entities::Face3D::new(Vector3::ZERO, Vector3::UNIT_X, Vector3::UNIT_Y, Vector3::ZERO);
+        let face = acadrust::entities::Face3D::new(
+            Vector3::ZERO,
+            Vector3::UNIT_X,
+            Vector3::UNIT_Y,
+            Vector3::ZERO,
+        );
         let mut changed = face.clone();
         changed.invisible_edges = acadrust::entities::InvisibleEdgeFlags::from_bits(0x10);
-        assert!(validate_entity_mutation(&acadrust::EntityType::Face3D(face), &acadrust::EntityType::Face3D(changed))
-            .unwrap_err().contains("Face3D.invisible_edges"));
+        assert!(validate_entity_mutation(
+            &acadrust::EntityType::Face3D(face),
+            &acadrust::EntityType::Face3D(changed)
+        )
+        .unwrap_err()
+        .contains("Face3D.invisible_edges"));
     }
 
     #[cfg(feature = "host")]
@@ -661,20 +1305,35 @@ mod tests {
         let mut moved = before.clone();
         moved.insert_point = Vector3::new(5.0, 6.0, 0.0);
         moved.set_x_scale(2.0);
-        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before.clone()),
-            &acadrust::EntityType::Insert(moved)).is_ok());
+        assert!(validate_entity_mutation(
+            &acadrust::EntityType::Insert(before.clone()),
+            &acadrust::EntityType::Insert(moved)
+        )
+        .is_ok());
         let mut bad = before.clone();
         bad.set_y_scale(f64::NAN);
-        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before.clone()),
-            &acadrust::EntityType::Insert(bad)).unwrap_err().contains("Insert.y_scale"));
+        assert!(validate_entity_mutation(
+            &acadrust::EntityType::Insert(before.clone()),
+            &acadrust::EntityType::Insert(bad)
+        )
+        .unwrap_err()
+        .contains("Insert.y_scale"));
         let mut bad = before.clone();
         bad.column_count = 0;
-        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before.clone()),
-            &acadrust::EntityType::Insert(bad)).unwrap_err().contains("array counts"));
+        assert!(validate_entity_mutation(
+            &acadrust::EntityType::Insert(before.clone()),
+            &acadrust::EntityType::Insert(bad)
+        )
+        .unwrap_err()
+        .contains("array counts"));
         let mut bad = before.clone();
         bad.block_name = "OTHER".into();
-        assert!(validate_entity_mutation(&acadrust::EntityType::Insert(before),
-            &acadrust::EntityType::Insert(bad)).unwrap_err().contains("block identity"));
+        assert!(validate_entity_mutation(
+            &acadrust::EntityType::Insert(before),
+            &acadrust::EntityType::Insert(bad)
+        )
+        .unwrap_err()
+        .contains("block identity"));
     }
 
     #[cfg(feature = "host")]
@@ -694,7 +1353,11 @@ mod tests {
     #[cfg(feature = "host")]
     #[test]
     fn attribute_definition_requires_a_block_owner_and_text_style() {
-        use crate::host::acadrust::{self, entities::{Block, BlockEnd}, types::{Handle, Vector3}};
+        use crate::host::acadrust::{
+            self,
+            entities::{Block, BlockEnd},
+            types::{Handle, Vector3},
+        };
         let mut document = acadrust::CadDocument::new();
         let next = document.next_handle();
         let record_handle = Handle::new(next);
@@ -708,14 +1371,21 @@ mod tests {
         let mut block = Block::new("TAGBLOCK", Vector3::ZERO);
         block.common.handle = block_handle;
         block.common.owner_handle = record_handle;
-        document.add_entity(acadrust::EntityType::Block(block)).unwrap();
+        document
+            .add_entity(acadrust::EntityType::Block(block))
+            .unwrap();
         let mut end = BlockEnd::new();
         end.common.handle = end_handle;
         end.common.owner_handle = record_handle;
-        document.add_entity(acadrust::EntityType::BlockEnd(end)).unwrap();
+        document
+            .add_entity(acadrust::EntityType::BlockEnd(end))
+            .unwrap();
 
         let mut definition = acadrust::entities::AttributeDefinition::new(
-            "PART_NO".into(), "Part number".into(), "PN-001".into());
+            "PART_NO".into(),
+            "Part number".into(),
+            "PN-001".into(),
+        );
         definition.common.owner_handle = record_handle;
         definition.insertion_point = Vector3::new(1.0, 2.0, 0.0);
         let entity = acadrust::EntityType::AttributeDefinition(definition.clone());
@@ -724,16 +1394,25 @@ mod tests {
 
         definition.common.owner_handle = Handle::NULL;
         assert!(validate_canvas_entity_references(
-            &document, &acadrust::EntityType::AttributeDefinition(definition.clone()))
-            .unwrap_err().contains("block-record owner"));
+            &document,
+            &acadrust::EntityType::AttributeDefinition(definition.clone())
+        )
+        .unwrap_err()
+        .contains("block-record owner"));
         definition.common.owner_handle = record_handle;
         definition.text_style = "Missing".into();
         assert!(validate_canvas_entity_references(
-            &document, &acadrust::EntityType::AttributeDefinition(definition.clone()))
-            .unwrap_err().contains("does not exist"));
+            &document,
+            &acadrust::EntityType::AttributeDefinition(definition.clone())
+        )
+        .unwrap_err()
+        .contains("does not exist"));
         definition.text_style = "Standard".into();
         definition.tag = "BAD TAG".into();
-        assert!(validate_new_canvas_entity(&acadrust::EntityType::AttributeDefinition(definition))
-            .unwrap_err().contains("no whitespace"));
+        assert!(
+            validate_new_canvas_entity(&acadrust::EntityType::AttributeDefinition(definition))
+                .unwrap_err()
+                .contains("no whitespace")
+        );
     }
 }

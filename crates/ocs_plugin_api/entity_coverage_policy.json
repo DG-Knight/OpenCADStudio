@@ -21,12 +21,14 @@
     "Insert": ["layer", "insert_point", "x_scale", "y_scale", "z_scale", "rotation", "normal", "column_count", "row_count", "column_spacing", "row_spacing"],
     "Tolerance": ["layer", "insertion_point", "direction", "normal", "text", "dimension_style_name", "text_height", "dimension_gap"],
     "Shape": ["layer", "insertion_point", "size", "shape_name", "shape_number", "rotation", "relative_x_scale", "oblique_angle", "normal", "thickness", "style_name"],
-    "AttributeDefinition": ["layer", "tag", "prompt", "default_value", "insertion_point", "alignment_point", "height", "rotation", "width_factor", "oblique_angle", "text_style", "text_generation_flags", "horizontal_alignment", "vertical_alignment", "flags", "field_length", "normal", "mtext_flag", "is_multiline", "line_count", "lock_position"]
+    "AttributeDefinition": ["layer", "tag", "prompt", "default_value", "insertion_point", "alignment_point", "height", "rotation", "width_factor", "oblique_angle", "text_style", "text_generation_flags", "horizontal_alignment", "vertical_alignment", "flags", "field_length", "normal", "mtext_flag", "is_multiline", "line_count", "lock_position"],
+    "AttributeEntity": ["layer", "tag", "value", "insertion_point", "alignment_point", "height", "rotation", "width_factor", "oblique_angle", "text_style", "text_generation_flags", "horizontal_alignment", "vertical_alignment", "flags", "field_length", "normal", "mtext_flag", "is_multiline", "line_count", "lock_position"]
   },
   "readable": {
     "Insert": ["block_name"],
     "Tolerance": ["dimension_style_handle"],
-    "Shape": ["style_handle"]
+    "Shape": ["style_handle"],
+    "AttributeEntity": ["attdef_handle"]
   },
   "aliases": {
     "Polyline": {"closed": "flags"},

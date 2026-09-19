@@ -3,6 +3,27 @@
 use crate::host::HostApi;
 use crate::ipc::protocol::{PluginRequest, PluginResponse};
 
+fn addressable_document_snapshot(host: &dyn HostApi) -> acadrust::CadDocument {
+    let mut snapshot = host.document().clone();
+    let attributes = host
+        .document()
+        .entities()
+        .filter_map(|entity| match entity {
+            acadrust::EntityType::Insert(insert) => Some(insert.attributes.clone()),
+            _ => None,
+        })
+        .flatten()
+        .map(acadrust::EntityType::AttributeEntity)
+        .collect::<Vec<_>>();
+    for attribute in attributes {
+        // Attribute entities remain canonical children of INSERT in the host
+        // document.  The IPC snapshot also indexes them by handle so plugin
+        // document models can address a child exactly like any other entity.
+        let _ = snapshot.add_entity(attribute);
+    }
+    snapshot
+}
+
 /// Apply one plugin request to the host's `HostApi` implementation.
 ///
 /// `on_start_interactive` is called when the plugin starts an interactive
@@ -54,7 +75,7 @@ pub fn handle_plugin_request(
             on_start_interactive(command_id);
             PluginResponse::Ok
         }
-        DocumentSnapshot => PluginResponse::Document(Box::new(host.document().clone())),
+        DocumentSnapshot => PluginResponse::Document(Box::new(addressable_document_snapshot(host))),
         OpenDocumentView => match host.document_view() {
             Some(info) => PluginResponse::DocumentView {
                 path: info.path,
@@ -77,9 +98,7 @@ pub fn handle_plugin_request(
         DocumentPath { tab_id } => PluginResponse::DocumentPath(
             host.document_path(tab_id).map(|path| path.into_os_string()),
         ),
-        GetSystemVariable { name } => {
-            PluginResponse::SystemVariable(host.system_variable(&name))
-        }
+        GetSystemVariable { name } => PluginResponse::SystemVariable(host.system_variable(&name)),
         SetSystemVariable { name, value } => {
             PluginResponse::SystemVariableResult(host.set_system_variable(&name, value))
         }
