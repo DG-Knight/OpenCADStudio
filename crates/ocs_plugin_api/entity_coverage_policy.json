@@ -18,10 +18,12 @@
     "XLine": ["layer", "base_point", "direction"],
     "Solid": ["layer", "first_corner", "second_corner", "third_corner", "fourth_corner", "normal", "thickness", "is_trace"],
     "Face3D": ["layer", "first_corner", "second_corner", "third_corner", "fourth_corner", "invisible_edges"],
-    "Insert": ["layer", "insert_point", "x_scale", "y_scale", "z_scale", "rotation", "normal", "column_count", "row_count", "column_spacing", "row_spacing"]
+    "Insert": ["layer", "insert_point", "x_scale", "y_scale", "z_scale", "rotation", "normal", "column_count", "row_count", "column_spacing", "row_spacing"],
+    "Tolerance": ["layer", "insertion_point", "direction", "normal", "text", "dimension_style_name", "text_height", "dimension_gap"]
   },
   "readable": {
-    "Insert": ["block_name"]
+    "Insert": ["block_name"],
+    "Tolerance": ["dimension_style_handle"]
   },
   "aliases": {
     "Polyline": {"closed": "flags"},

@@ -1,13 +1,13 @@
 # OCS canvas kind coverage ledger
 
-Use with [the completion plan](plugin-host-model-completion-plan.md). The baseline below is conservative as of 19 September 2026. `Mapped` means at least one non-layer field is exposed for Python writes; it does **not** mean the kind passes the completion gate. `Update-only` means Python creation is unavailable. `Layer-only` means raw inspection and canvas layer edits exist, but geometry is not mapped. Record actual evidence or a blocking issue before changing any status to `Complete`.
+Use with [the completion plan](plugin-host-model-completion-plan.md). This ledger is current as of 19 September 2026: **18 of 43 canvas kinds have explicit geometry writes** (17 creatable, plus update-only `Insert`), **1 kind is complete**, and 25 remain layer-only. `Mapped` means at least one non-layer field is exposed for Python writes; it does **not** mean the kind passes the completion gate. `Update-only` means Python creation is unavailable. `Layer-only` means raw inspection and canvas layer edits exist, but geometry is not mapped. Record actual evidence or a blocking issue before changing any status to `Complete`.
 
 Completion gate codes: **C** = create through Python document model; **R** = read; **E** = edit defining geometry and another property; **D** = delete; **U** = undo/redo and atomic failure; **I** = real IPC plus GUI/canvas pick or observable behavior; **W** = DWG and DXF save/reopen; **V** = invalid-input checks and untouched-field/reference preservation; **P** = portable H7 v5 build. A kind is `Complete` only when **C/R/E/D/U/I/W/V/P** all pass and its property catalog matches implementation. `Blocked` requires a specific dependency or failing fixture.
 
 | Kind | Baseline | Gate evidence / blocker |
 |---|---|---|
 | Point | Mapped | Host transaction test now checks invalid batch rollback, grouped edit undo, and redo; creation/deletion history, real plugin execution, GUI, and DWG/DXF gates remain pending. |
-| Line | Integration-tested | High-level document-model create/delete and transaction edit pass through the actual staged-plugin IPC runner; three undo entries, undo/redo, duplicate-handle atomic rejection, and edited DWG/DXF reopen pass in `staged_python_plugin_line_lifecycle_over_real_ipc`. GUI pick/visible-geometry observation and broader invalid-value/unmapped-field preservation checks remain pending; not complete. |
+| Line | Integration-tested | High-level document-model create/delete and transaction edit pass through the actual staged-plugin IPC runner; three undo entries, undo/redo, duplicate-handle and nonfinite-coordinate rejection, full typed-entity preservation, Line object-pick routing, and edited DWG/DXF reopen pass. A second editable property outside defining endpoint geometry still needs integration coverage before this row is complete. |
 | Circle | Mapped | Full gate pending. |
 | Arc | Mapped | Full gate pending. |
 | Ellipse | Mapped | Existing focused DWG conversion test; full gate pending. |
@@ -23,7 +23,7 @@ Completion gate codes: **C** = create through Python document model; **R** = rea
 | Solid | Mapped | Focused DWG round trip; full gate pending. |
 | Face3D | Mapped | Focused DWG round trip; full gate pending. |
 | Insert | Update-only | Transform transaction and undo tested; Python creation, deletion, real IPC/GUI and DWG/DXF gates pending. |
-| Tolerance | Layer-only | Next new kind after integration harness. |
+| Tolerance | **Complete** | `staged_python_tolerance_lifecycle_over_real_ipc` passes C/R/E/D/U/I/W/V/P with the staged API v7 plugin: high-level create/read/transaction edit/delete; insertion, direction, and text edits; live canvas selection; grouped undo/redo; invalid direction and missing style atomic rollback; exact untouched common/style/private-field preservation; and edited DWG plus DXF reopen. Host-owned coverage exposes placement, direction, normal, text, style name, height and gap; style handle is read-only and the undocumented DWG short remains unmapped. `tolerance_geometry_and_style_references_are_validated` and the existing Tolerance tessellation tests cover reference and rendered-frame behavior. |
 | Shape | Layer-only | Requires valid shape/style fixture. |
 | AttributeDefinition | Layer-only | Requires block-definition fixture. |
 | AttributeEntity | Layer-only | Requires linked Insert and attribute-sequence fixture. |

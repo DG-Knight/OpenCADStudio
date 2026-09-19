@@ -583,7 +583,9 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                     ("Solid", "first_corner" | "second_corner" | "third_corner" | "fourth_corner" | "normal" | "thickness") |
                     ("Face3D", "first_corner" | "second_corner" | "third_corner" | "fourth_corner" | "invisible_edges") |
                     ("Insert", "insert_point" | "x_scale" | "y_scale" | "z_scale" | "rotation" | "normal" |
-                        "column_count" | "row_count" | "column_spacing" | "row_spacing")) {
+                        "column_count" | "row_count" | "column_spacing" | "row_spacing") |
+                    ("Tolerance", "insertion_point" | "direction" | "normal" | "text" |
+                        "dimension_style_name" | "text_height" | "dimension_gap")) {
                     "transaction_geometry"
                 } else { "type_conversion_only" };
             properties.push(PropertyCoverage {

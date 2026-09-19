@@ -79,6 +79,17 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
                 return Err("Face3D.invisible_edges has unknown bits".into());
             }
         }
+        EntityType::Tolerance(value) => {
+            finite_vector("Tolerance.insertion_point", &value.insertion_point)?;
+            unit_direction("Tolerance.direction", &value.direction)?;
+            solid_normal("Tolerance.normal", &value.normal)?;
+            if value.text.trim().is_empty() { return Err("Tolerance.text is empty".into()); }
+            if value.dimension_style_name.trim().is_empty() { return Err("Tolerance.dimension_style_name is empty".into()); }
+            if !value.text_height.is_finite() || value.text_height <= 0.0 {
+                return Err("Tolerance.text_height must be finite and greater than zero".into());
+            }
+            if !value.dimension_gap.is_finite() { return Err("Tolerance.dimension_gap must be finite".into()); }
+        }
         _ => {}
     }
     Ok(())
@@ -201,7 +212,45 @@ pub fn validate_entity_mutation(
                 return Err("Insert array counts must be greater than zero".into());
             }
         }
+        (EntityType::Tolerance(old), EntityType::Tolerance(new)) => {
+            changed3("Tolerance.insertion_point", &old.insertion_point, &new.insertion_point)?;
+            if !same3(&old.direction, &new.direction) { unit_direction("Tolerance.direction", &new.direction)?; }
+            if !same3(&old.normal, &new.normal) { solid_normal("Tolerance.normal", &new.normal)?; }
+            if old.text != new.text && new.text.trim().is_empty() { return Err("Tolerance.text is empty".into()); }
+            if old.dimension_style_name != new.dimension_style_name && new.dimension_style_name.trim().is_empty() {
+                return Err("Tolerance.dimension_style_name is empty".into());
+            }
+            if old.text_height.to_bits() != new.text_height.to_bits()
+                && (!new.text_height.is_finite() || new.text_height <= 0.0) {
+                return Err("Tolerance.text_height must be finite and greater than zero".into());
+            }
+            if old.dimension_gap.to_bits() != new.dimension_gap.to_bits() && !new.dimension_gap.is_finite() {
+                return Err("Tolerance.dimension_gap must be finite".into());
+            }
+            if old.dimension_style_handle != new.dimension_style_handle
+                && !(old.dimension_style_name != new.dimension_style_name && new.dimension_style_handle.is_none()) {
+                return Err("Tolerance.dimension_style_handle is read-only".into());
+            }
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Validate references which require the surrounding document. Keeping this
+/// in the host API gives every scripting adapter the same reference rules.
+#[cfg(feature = "host")]
+pub fn validate_canvas_entity_references(
+    document: &crate::host::CadDocument,
+    entity: &crate::host::EntityType,
+) -> Result<(), String> {
+    use crate::host::EntityType;
+    if let EntityType::Tolerance(value) = entity {
+        let found = value.dimension_style_handle.filter(|handle| !handle.is_null()).map_or_else(
+            || document.dim_styles.iter().any(|style| style.name.eq_ignore_ascii_case(value.dimension_style_name.trim())),
+            |handle| document.dim_styles.iter().any(|style| style.handle == handle),
+        );
+        if !found { return Err(format!("Tolerance dimension style {:?} does not exist", value.dimension_style_name)); }
     }
     Ok(())
 }
@@ -256,7 +305,7 @@ mod tests {
             if entry.scope != EntityScope::Canvas || !matches!(entry.kind.as_str(),
                 "Point" | "Line" | "Circle" | "Arc" | "Ellipse" | "Polyline" |
                 "Polyline2D" | "Polyline3D" | "LwPolyline" | "Spline" | "Text" | "MText" |
-                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert") {
+                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert" | "Tolerance") {
                 assert!(entry.properties.iter().all(|p| p.model_access != ModelAccess::ReadWrite
                     || (entry.scope == EntityScope::Canvas && p.name == "layer")), "{}", entry.kind);
             }
@@ -288,7 +337,31 @@ mod tests {
             "Insert.rotation".to_owned(), "Insert.normal".to_owned(),
             "Insert.column_count".to_owned(), "Insert.row_count".to_owned(),
             "Insert.column_spacing".to_owned(), "Insert.row_spacing".to_owned(),
+            "Tolerance.insertion_point".to_owned(), "Tolerance.direction".to_owned(),
+            "Tolerance.normal".to_owned(), "Tolerance.text".to_owned(),
+            "Tolerance.dimension_style_name".to_owned(), "Tolerance.text_height".to_owned(),
+            "Tolerance.dimension_gap".to_owned(),
         ]));
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn tolerance_geometry_and_style_references_are_validated() {
+        use crate::host::acadrust::{self, types::Vector3};
+        let document = acadrust::CadDocument::new();
+        let mut tolerance = acadrust::entities::Tolerance::with_text(
+            Vector3::new(1.0, 2.0, 0.0), "{\\Fgdt;p}%%v0.1");
+        let entity = acadrust::EntityType::Tolerance(tolerance.clone());
+        validate_new_canvas_entity(&entity).unwrap();
+        validate_canvas_entity_references(&document, &entity).unwrap();
+        tolerance.direction = Vector3::new(2.0, 0.0, 0.0);
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::Tolerance(tolerance.clone()))
+            .unwrap_err().contains("unit vector"));
+        tolerance.direction = Vector3::UNIT_X;
+        tolerance.dimension_style_name = "Missing".into();
+        assert!(validate_canvas_entity_references(
+            &document, &acadrust::EntityType::Tolerance(tolerance))
+            .unwrap_err().contains("does not exist"));
     }
 
     #[test]

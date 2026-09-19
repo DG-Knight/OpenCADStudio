@@ -154,6 +154,9 @@ impl<'a> HostSession<'a> {
             }
             ocs_plugin_api::entity_coverage::validate_entity_mutation(existing, entity)
                 .map_err(|error| format!("entity {handle:?}: {error}"))?;
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(
+                self.document(), entity,
+            ).map_err(|error| format!("entity {handle:?}: {error}"))?;
             if self.app.tabs[self.tab].scene.is_layer_locked(handle) {
                 return Err(format!("entity {handle:?} is on a locked layer"));
             }
@@ -641,7 +644,7 @@ fn plugin_step_to_result(step: ocs_plugin_api::host::CommandStep) -> crate::comm
 mod tests {
     use super::*;
     use crate::app::OpenCADStudio;
-    use acadrust::entities::Point;
+    use acadrust::entities::{Line, Point};
     use acadrust::xdata::XDataValue;
     use ocs_plugin_api::host::DocumentReader;
 
@@ -742,11 +745,23 @@ mod tests {
         assert_eq!(handles.len(), 1, "Python add did not reach the host");
         let handle = handles[0];
         assert!(matches!(host.document().get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 1.0));
+        let before_edit = host.document().get_entity(handle).unwrap().clone();
         dispatch(&mut host, &format!(
             "PY_EVAL ocs.update_many('Move line', [{{'handle':{},'end':{{'x':5.0,'y':0.0,'z':0.0}}}}])",
             handle.value()
         ));
-        assert!(matches!(host.document().get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0));
+        let mut expected_after_edit = before_edit;
+        let EntityType::Line(expected_line) = &mut expected_after_edit else { unreachable!() };
+        expected_line.end.x = 5.0;
+        assert_eq!(host.document().get_entity(handle), Some(&expected_after_edit),
+            "partial Python edit must preserve every unmentioned common and geometry field");
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Reject NaN', [{{'handle':{},'start':{{'x':float('nan'),'y':0.0,'z':0.0}}}}])",
+            handle.value()
+        ));
+        assert_eq!(host.document().get_entity(handle), Some(&expected_after_edit),
+            "invalid geometry changed the line");
+        assert!(host.app.command_line.history.last().unwrap().text.contains("finite coordinates"));
         dispatch(&mut host, &format!(
             "PY_EVAL ocs.update_many('Reject duplicate', [{{'handle':{},'end':{{'x':8.0,'y':0.0,'z':0.0}}}},{{'handle':{},'end':{{'x':9.0,'y':0.0,'z':0.0}}}}])",
             handle.value(), handle.value()
@@ -772,6 +787,104 @@ mod tests {
         assert!(matches!(app.tabs[0].scene.document.get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 5.0));
         app.undo_steps(1);
         assert!(matches!(app.tabs[0].scene.document.get_entity(handle), Some(EntityType::Line(line)) if line.end.x == 1.0));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
+    fn staged_python_tolerance_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        ).expect("spawn staged Python plugin");
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        dispatch(&mut host, concat!(
+            "PY_EVAL ocs.active_document.create_entity('Tolerance',",
+            "insertion_point={'x':1.0,'y':2.0,'z':0.0},",
+            "text='POSITION%%v0.1').handle"
+        ));
+        let handle = host.document().entities().next().expect("Python created a Tolerance")
+            .common().handle;
+        let Some(EntityType::Tolerance(created)) = host.document().get_entity(handle) else {
+            panic!("expected Tolerance");
+        };
+        assert_eq!(created.insertion_point, acadrust::types::Vector3::new(1.0, 2.0, 0.0));
+        assert_eq!(created.dimension_style_name, "Standard");
+        let created = created.clone();
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.active_document.entities[{}].text", handle.value()));
+        assert!(host.app.command_line.history.last().unwrap().text.contains("POSITION%%v0.1"));
+
+        let script_path = std::env::temp_dir().join(format!(
+            "ocs_tolerance_document_model_{}.py", std::process::id()));
+        std::fs::write(&script_path, format!(concat!(
+            "doc = ocs.active_document\n",
+            "tolerance = doc.entities[{}]\n",
+            "with doc.transaction('Edit tolerance'):\n",
+            "    tolerance.insertion_point = (4.0, 5.0, 0.0)\n",
+            "    tolerance.direction = (0.0, 1.0, 0.0)\n",
+            "    tolerance.text = 'POSITION%%v0.2'\n",
+            "doc.selection = [tolerance]\n"
+        ), handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script_path.display()));
+        let _ = std::fs::remove_file(&script_path);
+        let expected = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::Tolerance(edited) = &expected else { unreachable!() };
+        assert_eq!(edited.insertion_point, acadrust::types::Vector3::new(4.0, 5.0, 0.0));
+        assert_eq!(edited.direction, acadrust::types::Vector3::UNIT_Y);
+        assert_eq!(edited.text, "POSITION%%v0.2");
+        assert_eq!(edited.common, created.common);
+        assert_eq!(edited.normal, created.normal);
+        assert_eq!(edited.dimension_style_name, created.dimension_style_name);
+        assert_eq!(edited.dimension_style_handle, created.dimension_style_handle);
+        assert_eq!(edited.text_height, created.text_height);
+        assert_eq!(edited.dimension_gap, created.dimension_gap);
+        assert_eq!(edited.dwg_unknown_short, created.dwg_unknown_short);
+        assert_eq!(host.selection(), vec![handle], "Python selection did not reach the canvas");
+
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Reject direction', [{{'handle':{},'direction':{{'x':2.0,'y':0.0,'z':0.0}}}}])",
+            handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+        assert!(host.app.command_line.history.last().unwrap().text.contains("unit vector"));
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Reject style', [{{'handle':{},'dimension_style_name':'Missing'}}])",
+            handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+        assert!(host.app.command_line.history.last().unwrap().text.contains("does not exist"));
+
+        let dwg_bytes = acadrust::DwgWriter::write_to_vec(host.document()).unwrap();
+        let dwg_doc = acadrust::DwgReader::from_stream(std::io::Cursor::new(dwg_bytes)).read().unwrap();
+        assert!(matches!(dwg_doc.get_entity(handle), Some(EntityType::Tolerance(value))
+            if value.insertion_point.x == 4.0 && value.text == "POSITION%%v0.2"));
+        let dxf_bytes = acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap();
+        let dxf_doc = acadrust::DxfReader::from_reader(std::io::Cursor::new(dxf_bytes))
+            .unwrap().read().unwrap();
+        assert!(matches!(dxf_doc.get_entity(handle), Some(EntityType::Tolerance(value))
+            if value.insertion_point.x == 4.0 && value.text == "POSITION%%v0.2"));
+
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none());
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        app.undo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(handle), Some(EntityType::Tolerance(value))
+            if value.insertion_point.x == 1.0 && value.text == "POSITION%%v0.1"));
         app.undo_steps(1);
         assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
         app.redo_steps(3);
@@ -823,7 +936,10 @@ mod tests {
 
         let target = {
             let mut host = HostSession::new(&mut app, 0);
-            host.add_entity(EntityType::Point(Point::at(acadrust::types::Vector3::new(6.0, 7.0, 0.0))))
+            host.add_entity(EntityType::Line(Line::from_points(
+                acadrust::types::Vector3::new(6.0, 7.0, 0.0),
+                acadrust::types::Vector3::new(9.0, 7.0, 0.0),
+            )))
         };
         let entity_token = request(&mut app, "Pick an entity", true);
         assert!(app.tabs[0].active_cmd.as_ref().unwrap().needs_entity_pick());
