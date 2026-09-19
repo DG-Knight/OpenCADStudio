@@ -566,6 +566,7 @@ impl OpenCADStudio {
     /// the headless automation feeder so both behave identically.
     pub(super) fn run_command_line(&mut self, cmd: &str) -> Task<Message> {
         let i = self.active_tab;
+        self.command_line.unconsumed.clear();
         let tokens: Vec<&str> = cmd.split_whitespace().collect();
         if tokens.len() <= 1 {
             return self.dispatch_command(cmd);
@@ -597,18 +598,64 @@ impl OpenCADStudio {
     /// Feed `tokens[1..]` to the active interactive command as points / option
     /// keywords, then terminate it as if Enter were pressed. No-op when no
     /// command is active.
+    ///
+    /// Two things happen when the tokens run out mid-way, both needed so a
+    /// headless caller can tell what actually happened:
+    ///
+    /// * If the in-place text editor took over (the `TEXT` content step — the
+    ///   command itself has already ended by then, `active_cmd` is `None`), the
+    ///   remaining tokens are that text: they are typed into the editor and
+    ///   committed, the same messages the control surface's `text_input` /
+    ///   `text_commit` actions dispatch. Without this the tail of the line was
+    ///   silently dropped and `TEXT 0,0 5 0 hi` created nothing at all.
+    /// * Anything still left over was never claimed by any prompt; it is
+    ///   recorded in [`CommandLine::unconsumed`] instead of vanishing.
     pub(super) fn finish_active_command(&mut self, tokens: &[String]) -> Task<Message> {
         let i = self.active_tab;
         if self.tabs[i].active_cmd.is_none() {
             return Task::none();
         }
         self.last_point = None;
+        // An editor that is *already* open belongs to someone else (an earlier
+        // line that stopped at the content step). Only the editor this line
+        // opens by feeding its own tokens may be handed the tail.
+        let editor_was_open = self.text_inline.is_some();
         let mut tasks = Vec::new();
+        // First token is the command verb itself; prompts start consuming after it.
+        let mut consumed = 1;
         for tok in &tokens[1..] {
             if self.tabs[i].active_cmd.is_none() {
                 break;
             }
             tasks.push(self.feed_active_cmd(tok));
+            consumed += 1;
+        }
+        if !editor_was_open && self.text_inline.is_some() && consumed < tokens.len() {
+            // Fill the editor the same way `Message::TextInlineInput` does, then
+            // commit *synchronously* so the outcome is observable: dispatching
+            // `TextInlineOk` as a task would hide whether the entity was really
+            // created, and the tail token would be counted as consumed either
+            // way — the caller would have no way to tell "text created" from
+            // "text silently dropped".
+            if let Some(editor) = self.text_inline.as_mut() {
+                editor.value = tokens[consumed..].join(" ");
+            }
+            let committed = self.text_inline_commit();
+            tasks.push(self.post_editor_closed(committed));
+            if committed {
+                consumed = tokens.len();
+                // `TEXT` repeats by design: on a committed string it re-arms for
+                // the next line (`open_next_line`), which re-opens the editor. A
+                // batch line is a complete unit, and leaving that repeat armed
+                // would make the *next* line get eaten as the next text position,
+                // so end the command here, exactly as Esc does in the GUI.
+                tasks.push(Task::done(Message::CommandEscape));
+            }
+            // On a failed commit the tokens stay unconsumed (assigned below), so
+            // the caller still sees the text it passed in.
+        }
+        if consumed < tokens.len() {
+            self.command_line.unconsumed = tokens[consumed..].to_vec();
         }
         tasks.push(self.feed_command(StepInput::Enter));
         Task::batch(tasks)
