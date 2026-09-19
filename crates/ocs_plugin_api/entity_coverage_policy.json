@@ -19,11 +19,13 @@
     "Solid": ["layer", "first_corner", "second_corner", "third_corner", "fourth_corner", "normal", "thickness", "is_trace"],
     "Face3D": ["layer", "first_corner", "second_corner", "third_corner", "fourth_corner", "invisible_edges"],
     "Insert": ["layer", "insert_point", "x_scale", "y_scale", "z_scale", "rotation", "normal", "column_count", "row_count", "column_spacing", "row_spacing"],
-    "Tolerance": ["layer", "insertion_point", "direction", "normal", "text", "dimension_style_name", "text_height", "dimension_gap"]
+    "Tolerance": ["layer", "insertion_point", "direction", "normal", "text", "dimension_style_name", "text_height", "dimension_gap"],
+    "Shape": ["layer", "insertion_point", "size", "shape_name", "shape_number", "rotation", "relative_x_scale", "oblique_angle", "normal", "thickness", "style_name"]
   },
   "readable": {
     "Insert": ["block_name"],
-    "Tolerance": ["dimension_style_handle"]
+    "Tolerance": ["dimension_style_handle"],
+    "Shape": ["style_handle"]
   },
   "aliases": {
     "Polyline": {"closed": "flags"},

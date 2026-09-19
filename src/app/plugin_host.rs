@@ -132,13 +132,13 @@ impl<'a> HostSession<'a> {
     pub fn update_entities_transaction(
         &mut self,
         label: &str,
-        entities: Vec<EntityType>,
+        mut entities: Vec<EntityType>,
     ) -> Result<(), String> {
         use std::collections::HashSet;
         if label.trim().is_empty() { return Err("transaction label is empty".into()); }
         if entities.is_empty() { return Ok(()); }
         let mut seen = HashSet::new();
-        for entity in &entities {
+        for entity in &mut entities {
             let handle = entity.common().handle;
             if handle.is_null() || !seen.insert(handle) {
                 return Err(format!("null or duplicate entity handle: {handle:?}"));
@@ -152,11 +152,11 @@ impl<'a> HostSession<'a> {
             if existing.common().owner_handle != entity.common().owner_handle {
                 return Err(format!("entity {handle:?} changes owner"));
             }
-            ocs_plugin_api::entity_coverage::validate_entity_mutation(existing, entity)
-                .map_err(|error| format!("entity {handle:?}: {error}"))?;
-            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(
+            ocs_plugin_api::entity_coverage::bind_canvas_entity_references(
                 self.document(), entity,
             ).map_err(|error| format!("entity {handle:?}: {error}"))?;
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(existing, entity)
+                .map_err(|error| format!("entity {handle:?}: {error}"))?;
             if self.app.tabs[self.tab].scene.is_layer_locked(handle) {
                 return Err(format!("entity {handle:?} is on a locked layer"));
             }
@@ -644,6 +644,7 @@ fn plugin_step_to_result(step: ocs_plugin_api::host::CommandStep) -> crate::comm
 mod tests {
     use super::*;
     use crate::app::OpenCADStudio;
+    use crate::entities::traits::RenderConvertible;
     use acadrust::entities::{Line, Point};
     use acadrust::xdata::XDataValue;
     use ocs_plugin_api::host::DocumentReader;
@@ -892,6 +893,133 @@ mod tests {
     }
 
     #[test]
+    fn staged_python_shape_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+
+        let shx_path = std::env::temp_dir().join(format!("ocs_host_shape_{}.shx", std::process::id()));
+        let mut shx = b"AutoCAD-86 shapes 1.0\r\n\x1A".to_vec();
+        for value in [1_u16, 1, 1, 1, 9] { shx.extend_from_slice(&value.to_le_bytes()); }
+        shx.extend_from_slice(b"ARROW\0\x10\x14\0");
+        std::fs::write(&shx_path, shx).unwrap();
+
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let style_handle = host.document_mut().allocate_handle();
+        let mut style = acadrust::tables::TextStyle::new("TestShapes");
+        style.handle = style_handle;
+        style.is_shape_file = true;
+        style.font_file = shx_path.to_string_lossy().into_owned();
+        host.document_mut().text_styles.add(style).unwrap();
+
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        ).expect("spawn staged Python plugin");
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        dispatch(&mut host, concat!(
+            "PY_EVAL ocs.active_document.create_entity('Shape',",
+            "insertion_point={'x':1.0,'y':2.0,'z':0.0},size=2.0,",
+            "shape_name='ARROW',shape_number=1,style_name='TestShapes').handle"
+        ));
+        let handle = host.document().entities().next().expect("Python created a Shape")
+            .common().handle;
+        let Some(EntityType::Shape(created)) = host.document().get_entity(handle) else {
+            panic!("expected Shape");
+        };
+        assert_eq!(created.style_handle, Some(style_handle));
+        let created = created.clone();
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.active_document.entities[{}].shape_name", handle.value()));
+        assert!(host.app.command_line.history.last().unwrap().text.contains("ARROW"));
+
+        let script_path = std::env::temp_dir().join(format!(
+            "ocs_shape_document_model_{}.py", std::process::id()));
+        std::fs::write(&script_path, format!(concat!(
+            "doc = ocs.active_document\n",
+            "shape = doc.entities[{}]\n",
+            "with doc.transaction('Edit shape'):\n",
+            "    shape.insertion_point = (4.0, 5.0, 0.0)\n",
+            "    shape.size = 3.0\n",
+            "    shape.rotation = 0.5\n",
+            "    shape.relative_x_scale = 1.5\n",
+            "doc.selection = [shape]\n"
+        ), handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script_path.display()));
+        let _ = std::fs::remove_file(&script_path);
+        let expected = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::Shape(edited) = &expected else { unreachable!() };
+        assert_eq!(edited.insertion_point, acadrust::types::Vector3::new(4.0, 5.0, 0.0));
+        assert_eq!(edited.size, 3.0);
+        assert_eq!(edited.rotation, 0.5);
+        assert_eq!(edited.relative_x_scale, 1.5);
+        assert_eq!(edited.common, created.common);
+        assert_eq!(edited.shape_name, created.shape_name);
+        assert_eq!(edited.shape_number, created.shape_number);
+        assert_eq!(edited.style_name, created.style_name);
+        assert_eq!(edited.style_handle, created.style_handle);
+        assert_eq!(edited.normal, created.normal);
+        assert_eq!(edited.thickness, created.thickness);
+        assert_eq!(host.selection(), vec![handle]);
+
+        let assert_real_glyph = |entity: &EntityType, document: &CadDocument| {
+            let EntityType::Shape(shape) = entity else { panic!("expected Shape"); };
+            let render = shape.to_render(document).expect("shape render");
+            let crate::scene::convert::acad_to_render::RenderObject::Lines(points) = render.object else {
+                panic!("expected shape linework");
+            };
+            assert_eq!(points.len(), 3, "expected SHX glyph rather than diamond placeholder");
+            assert!(points.iter().flatten().all(|value| value.is_finite()));
+        };
+        assert_real_glyph(&expected, host.document());
+
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Reject size', [{{'handle':{},'size':0.0}}])",
+            handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Reject style', [{{'handle':{},'style_name':'Missing'}}])",
+            handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+        assert!(host.app.command_line.history.last().unwrap().text.contains("does not exist"));
+
+        let dwg_bytes = acadrust::DwgWriter::write_to_vec(host.document()).unwrap();
+        let dwg_doc = crate::io::load_bytes("shape.dwg", dwg_bytes).unwrap();
+        let dwg_entity = dwg_doc.get_entity(handle).expect("Shape survives DWG");
+        assert!(matches!(dwg_entity, EntityType::Shape(value)
+            if value.shape_number == 1 && value.size == 3.0 && value.rotation == 0.5));
+        assert_real_glyph(dwg_entity, &dwg_doc);
+        let dxf_bytes = acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap();
+        let dxf_doc = crate::io::load_bytes("shape.dxf", dxf_bytes).unwrap();
+        let dxf_entity = dxf_doc.get_entity(handle).expect("Shape survives DXF");
+        assert!(matches!(dxf_entity, EntityType::Shape(value)
+            if value.shape_name == "ARROW" && value.size == 3.0 && (value.rotation - 0.5).abs() < 1e-12));
+        assert_real_glyph(dxf_entity, &dxf_doc);
+
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none());
+        drop(process);
+        drop(host);
+        let _ = std::fs::remove_file(&shx_path);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        app.undo_steps(1);
+        assert!(matches!(app.tabs[0].scene.document.get_entity(handle), Some(EntityType::Shape(value))
+            if value.insertion_point.x == 1.0 && value.size == 2.0));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else { return; };
         let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
@@ -1019,17 +1147,23 @@ mod tests {
         // Notifications are best-effort and consumed by the runner's reader
         // thread before its next Dispatch. Give that thread a bounded handoff.
         std::thread::sleep(std::time::Duration::from_millis(50));
-        {
-            let mut host = HostSession::new(&mut app, 1);
-            assert!(process.dispatch(&mut host, "PY_EVAL ocs.active_document.poll_events()", &mut |_| {}).unwrap());
-        }
-        let other_events = &app.command_line.history.last().unwrap().text;
+        let poll_events_until = |app: &mut OpenCADStudio, tab: usize, epoch: &str| {
+            let mut output = String::new();
+            for _ in 0..10 {
+                {
+                    let mut host = HostSession::new(app, tab);
+                    assert!(process.dispatch(&mut host,
+                        "PY_EVAL ocs.active_document.poll_events()", &mut |_| {}).unwrap());
+                }
+                output = app.command_line.history.last().unwrap().text.clone();
+                if output.contains(epoch) { break; }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            output
+        };
+        let other_events = poll_events_until(&mut app, 1, "202");
         assert!(other_events.contains("202") && !other_events.contains("101"), "{other_events}");
-        {
-            let mut host = HostSession::new(&mut app, 0);
-            assert!(process.dispatch(&mut host, "PY_EVAL ocs.active_document.poll_events()", &mut |_| {}).unwrap());
-        }
-        let first_events = &app.command_line.history.last().unwrap().text;
+        let first_events = poll_events_until(&mut app, 0, "101");
         assert!(first_events.contains("101") && !first_events.contains("202"), "{first_events}");
 
         for epoch in 0..257 {

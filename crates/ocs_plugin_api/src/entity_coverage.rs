@@ -90,6 +90,22 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             }
             if !value.dimension_gap.is_finite() { return Err("Tolerance.dimension_gap must be finite".into()); }
         }
+        EntityType::Shape(value) => {
+            finite_vector("Shape.insertion_point", &value.insertion_point)?;
+            solid_normal("Shape.normal", &value.normal)?;
+            if !value.size.is_finite() || value.size <= 0.0 { return Err("Shape.size must be finite and greater than zero".into()); }
+            if value.shape_name.trim().is_empty() { return Err("Shape.shape_name is empty".into()); }
+            if !(1..=i16::MAX as i32).contains(&value.shape_number) { return Err("Shape.shape_number must be between 1 and 32767".into()); }
+            if !value.rotation.is_finite() { return Err("Shape.rotation must be finite".into()); }
+            if !value.relative_x_scale.is_finite() || value.relative_x_scale.abs() < 1e-12 {
+                return Err("Shape.relative_x_scale must be finite and nonzero".into());
+            }
+            if !value.oblique_angle.is_finite() || value.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2 {
+                return Err("Shape.oblique_angle must be finite and between -PI/2 and PI/2".into());
+            }
+            if !value.thickness.is_finite() { return Err("Shape.thickness must be finite".into()); }
+            if value.style_name.trim().is_empty() { return Err("Shape.style_name is empty".into()); }
+        }
         _ => {}
     }
     Ok(())
@@ -228,8 +244,36 @@ pub fn validate_entity_mutation(
                 return Err("Tolerance.dimension_gap must be finite".into());
             }
             if old.dimension_style_handle != new.dimension_style_handle
-                && !(old.dimension_style_name != new.dimension_style_name && new.dimension_style_handle.is_none()) {
+                && old.dimension_style_name == new.dimension_style_name {
                 return Err("Tolerance.dimension_style_handle is read-only".into());
+            }
+        }
+        (EntityType::Shape(old), EntityType::Shape(new)) => {
+            changed3("Shape.insertion_point", &old.insertion_point, &new.insertion_point)?;
+            if !same3(&old.normal, &new.normal) { solid_normal("Shape.normal", &new.normal)?; }
+            if old.size.to_bits() != new.size.to_bits() && (!new.size.is_finite() || new.size <= 0.0) {
+                return Err("Shape.size must be finite and greater than zero".into());
+            }
+            if old.shape_name != new.shape_name && new.shape_name.trim().is_empty() { return Err("Shape.shape_name is empty".into()); }
+            if old.shape_number != new.shape_number && !(1..=i16::MAX as i32).contains(&new.shape_number) {
+                return Err("Shape.shape_number must be between 1 and 32767".into());
+            }
+            if old.rotation.to_bits() != new.rotation.to_bits() && !new.rotation.is_finite() { return Err("Shape.rotation must be finite".into()); }
+            if old.relative_x_scale.to_bits() != new.relative_x_scale.to_bits()
+                && (!new.relative_x_scale.is_finite() || new.relative_x_scale.abs() < 1e-12) {
+                return Err("Shape.relative_x_scale must be finite and nonzero".into());
+            }
+            if old.oblique_angle.to_bits() != new.oblique_angle.to_bits()
+                && (!new.oblique_angle.is_finite() || new.oblique_angle.abs() >= std::f64::consts::FRAC_PI_2) {
+                return Err("Shape.oblique_angle must be finite and between -PI/2 and PI/2".into());
+            }
+            if old.thickness.to_bits() != new.thickness.to_bits() && !new.thickness.is_finite() {
+                return Err("Shape.thickness must be finite".into());
+            }
+            if old.style_name != new.style_name && new.style_name.trim().is_empty() { return Err("Shape.style_name is empty".into()); }
+            if old.style_handle != new.style_handle
+                && !(old.style_name != new.style_name && new.style_handle.is_some()) {
+                return Err("Shape.style_handle is read-only".into());
             }
         }
         _ => {}
@@ -252,7 +296,40 @@ pub fn validate_canvas_entity_references(
         );
         if !found { return Err(format!("Tolerance dimension style {:?} does not exist", value.dimension_style_name)); }
     }
+    if let EntityType::Shape(value) = entity {
+        let style = value.style_handle.filter(|handle| !handle.is_null())
+            .and_then(|handle| document.text_styles.iter().find(|style| style.handle == handle))
+            .or_else(|| document.text_styles.iter().find(|style| style.name.eq_ignore_ascii_case(value.style_name.trim())))
+            .ok_or_else(|| format!("Shape text style {:?} does not exist", value.style_name))?;
+        if !style.is_shape_file { return Err(format!("Shape text style {:?} is not a shape-file style", style.name)); }
+        if style.font_file.trim().is_empty() { return Err(format!("Shape text style {:?} has no SHX file", style.name)); }
+    }
     Ok(())
+}
+
+/// Fill name-based table references with stable handles before a new entity or
+/// replacement is committed. Existing non-null handles remain authoritative
+/// for legacy DWG entities whose fallback name can be stale.
+#[cfg(feature = "host")]
+pub fn bind_canvas_entity_references(
+    document: &crate::host::CadDocument,
+    entity: &mut crate::host::EntityType,
+) -> Result<(), String> {
+    use crate::host::EntityType;
+    match entity {
+        EntityType::Tolerance(value) if value.dimension_style_handle.filter(|h| !h.is_null()).is_none() => {
+            value.dimension_style_handle = document.dim_styles.iter()
+                .find(|style| style.name.eq_ignore_ascii_case(value.dimension_style_name.trim()))
+                .map(|style| style.handle);
+        }
+        EntityType::Shape(value) if value.style_handle.filter(|h| !h.is_null()).is_none() => {
+            value.style_handle = document.text_styles.iter()
+                .find(|style| style.name.eq_ignore_ascii_case(value.style_name.trim()))
+                .map(|style| style.handle);
+        }
+        _ => {}
+    }
+    validate_canvas_entity_references(document, entity)
 }
 
 /// Clone a canvas entity with a new layer, preserving its other snapshot
@@ -305,7 +382,7 @@ mod tests {
             if entry.scope != EntityScope::Canvas || !matches!(entry.kind.as_str(),
                 "Point" | "Line" | "Circle" | "Arc" | "Ellipse" | "Polyline" |
                 "Polyline2D" | "Polyline3D" | "LwPolyline" | "Spline" | "Text" | "MText" |
-                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert" | "Tolerance") {
+                "Ray" | "XLine" | "Solid" | "Face3D" | "Insert" | "Tolerance" | "Shape") {
                 assert!(entry.properties.iter().all(|p| p.model_access != ModelAccess::ReadWrite
                     || (entry.scope == EntityScope::Canvas && p.name == "layer")), "{}", entry.kind);
             }
@@ -341,6 +418,11 @@ mod tests {
             "Tolerance.normal".to_owned(), "Tolerance.text".to_owned(),
             "Tolerance.dimension_style_name".to_owned(), "Tolerance.text_height".to_owned(),
             "Tolerance.dimension_gap".to_owned(),
+            "Shape.insertion_point".to_owned(), "Shape.size".to_owned(),
+            "Shape.shape_name".to_owned(), "Shape.shape_number".to_owned(),
+            "Shape.rotation".to_owned(), "Shape.relative_x_scale".to_owned(),
+            "Shape.oblique_angle".to_owned(), "Shape.normal".to_owned(),
+            "Shape.thickness".to_owned(), "Shape.style_name".to_owned(),
         ]));
     }
 
@@ -362,6 +444,31 @@ mod tests {
         assert!(validate_canvas_entity_references(
             &document, &acadrust::EntityType::Tolerance(tolerance))
             .unwrap_err().contains("does not exist"));
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn shape_geometry_and_shape_file_style_are_validated_and_bound() {
+        use crate::host::acadrust::{self, tables::TableEntry, types::Vector3};
+        let mut document = acadrust::CadDocument::new();
+        let mut style = acadrust::tables::TextStyle::new("Symbols");
+        style.set_handle(document.allocate_handle());
+        style.is_shape_file = true;
+        style.font_file = "symbols.shx".into();
+        let style_handle = style.handle;
+        document.text_styles.add(style).unwrap();
+        let mut shape = acadrust::entities::Shape::with_style(
+            Vector3::new(1.0, 2.0, 0.0), "ARROW", "Symbols", 2.0, 0.5);
+        shape.shape_number = 1;
+        let mut entity = acadrust::EntityType::Shape(shape);
+        validate_new_canvas_entity(&entity).unwrap();
+        bind_canvas_entity_references(&document, &mut entity).unwrap();
+        assert!(matches!(entity, acadrust::EntityType::Shape(ref value)
+            if value.style_handle == Some(style_handle)));
+        let acadrust::EntityType::Shape(mut bad) = entity else { unreachable!() };
+        bad.size = 0.0;
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::Shape(bad))
+            .unwrap_err().contains("greater than zero"));
     }
 
     #[test]
