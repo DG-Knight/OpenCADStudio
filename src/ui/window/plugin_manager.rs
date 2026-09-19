@@ -314,11 +314,19 @@ fn external_card<'a>(
         actions = actions.push(toggle_button(&p.id, disabled));
         actions = actions.push(Space::new().width(6));
     }
-    actions = actions.push(pill_button(
-        t!("Uninstall"),
-        Message::PluginUninstall(p.id.clone()),
-        button::danger,
-    ));
+    if p.bundled {
+        actions = actions.push(
+            text(t!("Bundled with Open CAD Studio"))
+                .size(11)
+                .style(muted_style),
+        );
+    } else {
+        actions = actions.push(pill_button(
+            t!("Uninstall"),
+            Message::PluginUninstall(p.id.clone()),
+            button::danger,
+        ));
+    }
 
     container(column![info, actions].spacing(8).padding([10, 12]))
         .width(Fill)

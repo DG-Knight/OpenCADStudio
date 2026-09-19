@@ -416,6 +416,11 @@ jobs:
           chmod +x "$APP/Contents/MacOS/OpenCADStudio" "$APP/Contents/MacOS/OpenCADStudio-App"
           cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
           cp DWG.icns DXF.icns "$APP/Contents/Resources/"
+          # First-party Python scripting plugin. It remains out of process and
+          # uses the same API/toolchain as this host build.
+          bash plugins/opencad-python/tools/stage-bundled.sh \
+            "$APP/Contents/Resources/plugins/opencad.python" \
+            --target aarch64-apple-darwin
           # QuickLook thumbnail extension.
           cp -R DWGThumbnail.appex "$APP/Contents/PlugIns/"
           # Substitute version into Info.plist.

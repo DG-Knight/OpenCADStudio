@@ -1,0 +1,386 @@
+# Python Scripting (`opencad.python`)
+
+## Sandboxing (Phase 1.5)
+
+**Audited, not assumed — and the assumption was wrong.** Earlier phases
+claimed "no stdlib is loaded, so `import os`/`socket`/`subprocess` is
+already impossible." True for those three names, but incomplete: RustPython
+0.5.0's `host_env` Cargo feature — **on by default**, and `rustpython-vm =
+"0.5"` in this crate's `Cargo.toml` used to pull in the full default set —
+bakes `posix`/`_ctypes` (and `os`/`nt` on other platforms) into every
+interpreter's *core* module registry, entirely independent of ever adding
+the separate `rustpython-stdlib` crate. Confirmed by actually running it,
+not by reading feature flags: with `host_env` on, `PY_EVAL
+__import__('posix').getcwd()` and `PY_EVAL open('/etc/passwd').read()` both
+worked — full filesystem read (and write) access from any script.
+
+**Fixed**: `Cargo.toml` now depends on `rustpython-vm` with
+`default-features = false, features = ["compiler", "gc"]` — no `host_env`.
+Re-verified the full matrix after the fix, all blocked
+(`ModuleNotFoundError` or, for `open()`, `UnsupportedOperation`):
+`os`, `posix`, `nt`, `subprocess`, `socket`, `ctypes`, `_ctypes`, `_socket`,
+`_subprocess`, `_signal`, `pwd`, and both read and write through the
+built-in `open()` — its `FileIO` backing turned out to depend on
+`host_env`-gated code internally too, even though the `_io` module itself
+is always registered. Confirmed no functional regression: `ocs.add_line`
+and the full `examples/example.py` (including both real constraints) still
+run correctly with `host_env` off.
+
+What's left in `sys.modules` after that fix, for a fresh interpreter —
+audited exhaustively, not just "fewer than before": `_ast`, `_codecs`,
+`_frozen_importlib`, `_imp`, `_io`, `_thread`, `_typing`, `_warnings`,
+`_weakref`, `builtins`, `codecs`, `encodings_ascii`, `encodings_utf_8`,
+`ocs`, `sys` — core language/import/codec plumbing needed to run Python at
+all, plus `ocs`. None of it reaches the filesystem, network, or another
+process.
+
+**One known, accepted residual gap, not silently ignored: `_thread` is
+real and functional** (`_thread.start_new_thread` exists and is callable,
+verified — not a stub). It's registered unconditionally in `rustpython-vm`
+0.5.0's `stdlib/mod.rs` with no feature guard at all — not `host_env`, not
+even its own `threading` Cargo feature — so there is no dependency-level
+way to remove it short of patching RustPython itself, which is out of
+scope here. It grants no filesystem/network/process access (everything
+that would matter for *that* is confirmed blocked above); the realistic
+risk is a script spawning a thread that busy-loops or otherwise misbehaves
+inside the plugin's own process — a resource/stability concern local to
+the already crash-isolated plugin process (per `plugin-architecture.md`'s
+out-of-process design), not a host compromise or data exfiltration path.
+Deleting `_thread` from `sys.modules` after interpreter setup was
+considered and rejected as a fix: the module stays *registered* at the VM
+level regardless, so a script could just re-import it — the deletion would
+be security theater, not a real control.
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `PY_EVAL <expr>` | Evaluate one Python expression and print the result (or error) to the command line. Example: `PY_EVAL 1 + 1`. |
+| `PY_RUN <path.py>` | Run a `.py` file as a script (statements, not just one expression). Reports an error the same way as `PY_EVAL` (missing file, syntax error, exception) — never a silent no-op. |
+
+## The `ocs` module
+
+Pre-bound as `ocs` in both commands — no `import` needed (and for `PY_EVAL`,
+none is possible: it compiles in `Mode::Eval`, which only accepts a single
+expression, not statements). Phases 1.2 (read), 1.3 (2D write) and part of
+1.4 (`Run Script…`) of this plugin's `ROADMAP.md`.
+
+| Function | Returns |
+|----------|---------|
+| `ocs.selection()` | List of the selected entities' handles (`int`), as of the last selection change — see note below. |
+| `ocs.get(handle)` | Dict of `{handle, kind, layer, point}` for that entity, or `None` if it doesn't exist. `point` is `{x, y, z}` or `None` for non-point entities. |
+| `ocs.get_text(handle)` | For single-line TEXT, returns its active alignment point, OCS normal, rotation, direction, and height; otherwise `None`. Reads the host's full document snapshot. |
+| `ocs.text_entities()` | Lists top-level TEXT/MTEXT entities as `{handle, kind, value}` dictionaries from the active document. |
+| `ocs.block_references()` | Lists top-level INSERT entities as `{handle, name, effective_name, count, is_xref, is_dynamic, visibility}` dictionaries; `count` includes MINSERT row × column multiplicity and unresolved visibility is `None`. |
+| `ocs.layers()` | Lists active-document layer names, off/frozen/locked flags, and top-level entity counts. |
+| `ocs.set_entity_layer(handle, layer_name)` | Moves an existing top-level entity to an existing layer, preserving its handle and layout ownership. |
+| `ocs.export_layer_dwg(layer_name, output_path)` | Writes a new DWG containing one layer's top-level entities plus needed block definitions; requires an existing directory and refuses overwrite. |
+| `ocs.current_layer()` | Returns the active document's current layer name (`CLAYER`). |
+| `ocs.layout_for_entity(handle)` | Returns an entity's owning layout name, tab order, and paperspace sheet count; `None` when unresolved. |
+| `ocs.viewport_model_outline(handle)` | Returns four XY modelspace corners and elevation for a rectangular, unclipped +Z paperspace viewport; otherwise `None`. |
+| `ocs.add_closed_polyline(vertices, elevation)` | Adds a closed lightweight polyline from at least three finite `[x, y]` vertices. |
+| `ocs.text_box_vertices(handle, padding)` | Returns an approximate rotated XY box for left/baseline +Z TEXT; otherwise `None`. |
+| `ocs.update_closed_polyline(handle, vertices, elevation)` | Replaces a closed lightweight polyline's vertices/elevation, preserving its handle and common properties. |
+| `ocs.copy_model_to_paper(handles, viewport_handle)` | Copies planar modelspace LINE/ARC/CIRCLE/LWPolyline geometry through a rectangular +Z viewport to its paperspace layout. |
+| `ocs.mirror_xy_entities(handles, axis_handle, erase_source)` | Mirrors planar LINE/ARC/CIRCLE/LWPolyline entities across an existing XY LINE; optionally removes sources in the same undo group. |
+| `ocs.mirror_xy_about_line(handles, point, tangent, erase_source)` | Mirrors planar curves across the XY line through a point in a tangent direction; supports curved-axis midpoint workflows. |
+| `ocs.break_xy_line(handle, first, second)` | Removes the span between two interior XY points on a LINE, preserving its first fragment's handle and properties. |
+| `ocs.break_xy_arc(handle, first, second)` | Removes the angular span between two interior XY ARC points, retaining the first fragment's handle. |
+| `ocs.break_xy_circle(handle, first, second)` | Replaces an XY CIRCLE with the complementary ARC after removing the counterclockwise span from first to second. |
+| `ocs.break_xy_polyline(handle, first, second)` | Removes a path interval from an open, straight, zero-width XY LWPolyline, keeping the first fragment's handle. |
+| `ocs.align_xy_entities(handles, source, destination, source_direction, target_direction, copy_mode)` | Rigidly moves and rotates planar LINE/ARC/CIRCLE/LWPolyline entities in XY; `copy_mode=True` adds transformed copies instead of changing originals. |
+| `ocs.block_insert_point(handle)` | Returns `[x, y, z]` for an INSERT, or `None`. |
+| `ocs.block_bounds_xy(handle)` | Returns `[xmin, ymin, xmax, ymax]` for a simple unrotated single INSERT whose definition contains only LINE/ARC/CIRCLE/LWPolyline geometry; otherwise `None`. |
+| `ocs.block_attributes(handle)` | Lists `{tag, value}` pairs for one INSERT, or `None` for another entity. |
+| `ocs.set_block_attribute(handle, tag, value)` | Updates one INSERT attribute by case-insensitive tag, preserving the block's other data. |
+| `ocs.set_text_value(handle, value)` | Replaces one TEXT/MTEXT entity's content, preserving other properties. Raises if the entity cannot be updated. |
+| `ocs.set_mtext_mask(handle, mode, scale)` | Sets one MTEXT background mode (`off`, `mask`, or `fill`) and border scale; raises if invalid or not MTEXT. |
+| `ocs.move_text(handle, x, y, z)` | Moves only a TEXT entity's active alignment point, preserving its other properties. Raises if it cannot update the entity. |
+| `ocs.set_text_pose(handle, x, y, z, rotation)` | Moves and rotates one XY TEXT entity while preserving its other properties. |
+| `ocs.get_area(handle)` | Returns `{area, point}` for a circle or straight, closed lightweight polyline in the world XY plane; otherwise `None`. `point` is suitable for an area-number label. |
+| `ocs.get_curve_measure(handle)` | Returns `{length, point, rotation, tangent}` at half length for an XY line, circle, arc, or straight lightweight polyline; `tangent` is an XY unit vector. Otherwise `None`. |
+| `ocs.line_endpoints(handle)` | Returns two `[x, y, z]` points for a nonzero XY LINE; otherwise `None`. |
+| `ocs.polyline_segments(handle)` | Returns segment endpoint, width, length, and optional bulge-arc centre/radius dictionaries for an XY lightweight polyline; otherwise `None`. |
+| `ocs.write_new_text_file(path, content)` | Writes a new UTF-8 report file at an explicit path during a `PY_` command. Refuses to overwrite or create parent directories. |
+| `ocs.curve_samples(handle, segments)` | Returns equally spaced XY sample vertices, elevation, and closure for a line, arc, or circle; otherwise `None`. |
+| `ocs.replace_with_polyline(handle, vertices, elevation, closed)` | Replaces a line, arc, or circle in place with a lightweight polyline, preserving the handle and common drawing properties. |
+| `ocs.add_line(x1, y1, x2, y2)` | Adds a 2D line (z=0, layer `"0"`); returns its handle. |
+| `ocs.add_circle(x, y, radius)` | Adds a 2D circle (z=0, layer `"0"`); returns its handle. |
+| `ocs.add_arc(x, y, radius, start_deg, end_deg)` | Adds a 2D arc (z=0, layer `"0"`), angles in degrees; returns its handle. |
+| `ocs.add_polyline(vertices, elevation)` | Adds an open 2D lightweight polyline. Each vertex is `[x, y, start_width, end_width]`; returns its handle. |
+| `ocs.add_text_centered(value, x, y, z, height, rotation_radians)` | Adds middle-center aligned single-line text; returns its handle. |
+| `ocs.add_text_left(value, x, y, z, height, rotation_radians)` | Adds left/baseline single-line text at its insertion point; returns its handle. |
+| `ocs.add_mtext(value, point, height, width, rotation_radians)` | Adds top-left anchored MTEXT at `[x, y, z]` using Standard style; returns its handle. |
+| `ocs.add_points(points)` | Adds many 3D points (each `[x, y, z]`) in one `HostApi::add_entities` batch call; returns the new handles in order. |
+| `ocs.remove_entity(handle)` | Deletes one entity in the script's undo group; raises if the handle cannot be removed. |
+| `ocs.add_table(rows, x, y, z, row_height, column_width)` | Adds a native table from a rectangular list of string rows; returns its handle. |
+| `ocs.read_record(handle, app_name)` | Returns `{app_name, values}` for the XDATA record `app_name` on `handle`, or `None` if the entity or the record doesn't exist. See "XDATA" below for the `values` shape. |
+| `ocs.write_record(handle, app_name, values)` | Attaches an XDATA record to `handle` for `app_name`, replacing any existing record for that application. Raises if `handle` doesn't exist. |
+| `ocs.remove_record(handle, app_name)` | Removes the XDATA record for `app_name` from `handle`, if any. Returns `True` if a record was actually removed. |
+| `ocs.command(cmd)` | Experimental only; absent from the portable default build. Requires unreleased host API support and can hang on OCS 2026.37. See historical notes below. |
+| `ocs.select(handles)` | Experimental only; absent from the portable default build. Requires unreleased host API support. |
+| `ocs.system_variable(name)` / `ocs.set_system_variable(name, value)` | Development-only `experimental-host-settings` feature. Reads or sets host-managed CLAYER (text) and SNAPANG (degrees) without nested command dispatch. Requires the Felix OCS fork's `plugin/host-model-api` branch; absent from the portable default build. |
+
+`add_line`/`add_circle`/`add_arc` take plain Python numbers —
+`ocs.add_line(0, 0, 10, 10)` works with ints, not just floats. (Needed an
+explicit fix: a bare `f64` `#[pyfunction]` parameter in RustPython, unlike
+CPython's C-function argument parsing, does *not* implicitly coerce an
+`int` — it raises `TypeError`. Using `rustpython_vm::function::ArgIntoFloat`
+instead accepts anything with `__float__`/`__index__`, matching how a script
+author actually writes coordinates.)
+
+### Historical command-replay experiment (not in the default build)
+
+The following records an earlier experiment. The bundled build does **not**
+expose `ocs.command()` or `ocs.select()`. An OCS 2026.37 diagnostic found
+nested `ocs.command("CLAYER ...")` could hang, so these
+examples are not instructions to run against the released host.
+
+**`ocs.command()` + `ocs.select()` together can apply a real, persistent
+constraint, entirely from a script** — this required two host changes
+(`HostApi::run_command` and `HostApi::set_selection`, `ocs_plugin_api`
+v0.2.1+ built from a worktree that isn't upstream yet — see the note at the
+bottom of this file), not something achievable from the plugin alone.
+Verified end-to-end against a real running host, not just "it compiles":
+```python
+ocs.select([line1_handle, line2_handle])
+ocs.command("PCONSTRAINT")
+```
+run as a plain `.py` file via `PY_RUN` — no automation-API help, no manual
+pre-selection — ran the actual geometric solver and visibly adjusted both
+lines' coordinates to be genuinely parallel (checked numerically:
+direction-vector cross product ≈ 0 after, nonzero before). A real,
+persistent `PCONSTRAINT` object. Same result verified for `TCONSTRAINT`
+(circle-to-line tangency): center-to-line distance equals the radius
+exactly after. `examples/example.py` does both — its "parallel" lines and
+"tangent" circle are real constraint objects, not geometry computed once.
+
+Why two calls, not one: constraint commands read a prior *selection* (a
+`"Select objects:"` prompt), not picks fed as command-line tokens the way
+`LINE`'s points are — feeding `ocs.command("PCONSTRAINT {h1} {h2}")` with
+handles as trailing tokens starts the command but ends in "Command
+cancelled", not a constraint. `ocs.select()` sets that selection state
+first; `ocs.command()` then reads it.
+
+**Not every command completes cleanly this way — `ALIGN` is the found
+counterexample.** `ocs.command()`'s point-feeding sends exactly *one*
+trailing Enter after the fed tokens, to finish the command. `ALIGN` needs
+two after its point pairs (skip the optional 3rd source/destination pair,
+then answer a "Scale objects? [Yes/No]" question) — so
+`ocs.command("ALIGN 0,0 20,20 2,0 22,22")` **does** apply the actual
+move/rotate transform correctly (verified: the entities land at the right
+transformed coordinates), but leaves that Scale prompt open instead of
+cleanly finishing the command. Not attempted in `examples/example.py` —
+shipping something that half-completes seemed worse than leaving it out.
+A general fix would need `ocs.command()` to accept a trailing-Enter *count*
+(or an explicit terminator convention) instead of always exactly one;
+not implemented.
+
+**`ocs.command()` cannot invoke itself or any other plugin's command** —
+only built-ins. This call is a nested plugin→host request arriving while the
+plugin's own `dispatch()` is still running (its one runner thread is
+blocked waiting for this exact call to return); routing it back through
+normal plugin dispatch would hand that same plugin (or any plugin) a second
+`Dispatch` request it has no free thread to answer, deadlocking both sides.
+Found this the hard way — `ocs.command("LINE 0,0 10,10")` hung completely
+before the host-side fix. `run_command` skips plugin dispatch entirely, by
+design, not as an oversight.
+
+### Which built-in commands `ocs.command()` can reach
+
+`ocs.command()` goes through the exact same dispatcher as the interactive
+command line — `HostApi::run_command` → the host's
+`run_command_line_no_plugin_reentry` → `dispatch_command_inner(cmd,
+allow_suggest=false, try_plugins=false)` — so almost everything typeable in
+OCS also works from a script, minus one deliberate carve-out.
+
+**Reachable: the full built-in command set**, spread across ten dispatch
+families in the host's `src/app/commands/` (`fileops`, `layers`, `blocks`,
+`draw`, `dim`, `inquiry`, `view`, `layerprops`, `styleprops`, `display`).
+That covers everything AutoCAD-compatible the host implements natively —
+drawing entities and constraints (`LINE`, `CIRCLE`, `ARC`, `POLYLINE`,
+`MOVE`, `ROTATE`, `ALIGN`, `PCONSTRAINT`, `TCONSTRAINT`, in `dispatch_draw`),
+dimensions (`DIMLINEAR`, `DIMALIGNED`, `DIMSTYLE`, ...), blocks (`BLOCK`,
+`INSERT`, `WBLOCK`, `ATTSYNC`, ...), layers/properties (`LAYER`, `LAYISO`,
+`LAYDEL`, `CHPROP`, `PROPERTIES`, ...), file ops (`NEW`, `OPEN`, `SAVE`,
+`SAVEAS`, `EXPORT...`, `PLOT`, ...), inquiry (`LIST`, `DIST`, `AREA`,
+`DBLIST`, ...), view (`ZOOM`, `PAN`, `VIEW`, `REGEN`, ...), and
+directly-settable system variables typed as commands (`PICKBOX 5`,
+`MIRRTEXT 1`, `LUPREC 4`, ...). Aliases still resolve too (`ocs.command("L
+0,0 10,10")` works the same as `LINE`), since alias expansion happens before
+the plugin-skip.
+
+**Not reachable: any plugin-provided command, including this plugin's own**
+(`PYTHONSHELL`, `PY_EVAL`, `PY_RUN`) — see the paragraph above for why. This
+is the *only* restriction versus the interactive command line; there is no
+narrower allow-list beyond it. `allow_suggest=false` also means no
+autocomplete/fuzzy-matching of partial verbs (unlike typing `BAC` and
+pressing Enter for `BACKGROUND`) — a script must spell out the exact command
+name or a real alias.
+
+Usage notes already verified end-to-end (see the constraint example above
+and `examples/example.py`):
+
+- Multi-point/interactive commands take their args inline on one string,
+  exactly as if typed then Enter: `ocs.command("LINE 0,0 10,10")`.
+- A command that reads a *prior selection* rather than inline picks
+  (constraint commands are the concrete case) needs `ocs.select(handles)`
+  called first — `ocs.command()` alone can't feed a "Select objects:"
+  prompt.
+- `ALIGN` needs two trailing Enters (skip the optional 3rd point pair, then
+  answer the Scale prompt); `ocs.command()` only ever sends one, so it
+  applies the transform but leaves that prompt dangling — see above.
+
+For the exhaustive, exact list rather than this summary, the source of
+truth is the `inventory::submit!(CommandRegistration { names: &[...] })`
+blocks scattered across the host's `src/app/commands/*.rs` (105 files
+register at least one command as of this writing); the largest single block
+— everything without its own interactive command module — is
+`src/app/commands/mod.rs`'s command-line autocomplete registry. Since it's
+the same dispatcher, OCS's own command-line autocomplete is also a live
+index of what `ocs.command()` can run.
+
+**One `push_undo` group per script, not per `ocs.add_*` call.** A `PY_RUN`
+script that calls `ocs.add_line` ten times undoes as one step. Verified
+end-to-end: a two-line script undoes both lines in a single `undo`.
+Implemented via `host_ctx::ensure_undo_started`, called lazily by the first
+write in a given `PY_EVAL`/`PY_RUN` — a read-only script never touches the
+undo stack. Note: `ocs.command()` does *not* go through this — a built-in
+command manages its own undo the same way it would if typed, so `ocs.command`
+calls are not folded into the script's shared undo group.
+
+**`ocs.selection()` is a cache, not a live query.** `HostApi` has no
+synchronous "give me the current selection" call — only a best-effort
+`SelectionChanged` / `SelectionChangedV4` notification. It reflects the
+selection as of the last time it changed, not necessarily the instant the
+script calls it.
+
+That cache is populated via `BuiltinPlugin::on_notification`, **not** by
+calling `HostApi::try_recv_notification()` from `dispatch()`. Found the hard
+way: `ocs_plugin_api::runner`'s own V4 event loop (`run_v4` in `runner.rs`)
+drains that queue itself on every iteration and forwards each notification to
+`on_notification` *before* a `Dispatch` request ever reaches `dispatch()` — so
+polling it from inside `dispatch` always finds it empty. This plugin
+overrides `on_notification` and stashes the latest selection in a
+process-wide cache (`selection_cache.rs`); `ocs.selection()` reads that.
+Verified end-to-end against a real host build: select an entity, then
+`PY_EVAL ocs.selection()` returns its handle.
+
+Each `PY_EVAL`/`PY_RUN` runs in a fresh interpreter (no stdlib, no session
+state across calls) — REPL/session persistence is an open question for a
+later phase.
+
+**Typing or pasting `PY_EVAL`/`PY_RUN` directly into the interactive command
+line is broken for anything beyond trivial arithmetic — a host issue, not
+this plugin.** `Message::CommandInput` in `src/app/update/mod.rs` (this
+repo) uppercases the *entire* input line on every keystroke *and* on paste,
+and auto-submits the instant it contains a space (both deliberate, for
+classic single-line CAD commands like `LINE 0,0 10,10`). That mangles case
+(`ocs.add_line` → `OCS.ADD_LINE`, a `NameError`) and truncates arguments
+(`PY_EVAL ` submits before you finish typing the expression) for *any*
+multi-word, case-sensitive plugin argument — automation
+(`ocs_execute`/`--mcp`) bypasses this UI path entirely, which is why it
+never surfaced in this session's own testing until a live user tried typing
+it by hand. **`Run Script…` (below) sidesteps this correctly** — the host
+authors already solved the identical problem for file paths via
+`ModuleEvent::PluginFileDialog`, which dispatches with original case intact.
+There is no equivalent bypass for `PY_EVAL` today; typed/pasted `PY_EVAL`
+only survives if it has no spaces and no case-sensitive identifiers.
+
+## Ribbon
+
+Two tools in the "Tools" group:
+
+| Tool | Behavior |
+|------|----------|
+| Eval 1+1 | Dispatches `PY_EVAL 1 + 1` directly — a smoke test. |
+| Run Script… | `ModuleEvent::PluginFileDialog` opens a native "pick a `.py` file" dialog; on selection the host dispatches `PY_RUN <chosen path>` back to the plugin. Cancel does nothing. |
+
+**A real script manager UI (list/run/save scripts, or a dockable REPL
+console) is not possible with today's `ocs_plugin_api`.** This was an open
+question in `ROADMAP.md` — now answered by reading
+`ribbon.rs`: `CadModule` exposes exactly one hook, `ribbon_groups()`, which
+returns a **static** set of ribbon buttons/dropdowns (`RibbonItem`). There is
+no API for a plugin to host a persistent custom panel, list dynamic content,
+or render arbitrary UI — the ribbon vocabulary is deliberately "plain data
+the host renders," not a widget toolkit. Getting a script list or REPL panel
+would need a new `HostApi`/`CadModule` capability, i.e. an `ocs_plugin_api`
+version bump — a host-side feature, out of scope for a plugin repo. `Run
+Script…` (above) is the most a plugin can do today: reuse the host's own
+native file picker via the existing `PluginFileDialog` event, which was
+already there for other plugins to import files.
+
+## lisp2py — AutoLISP macro transpiler
+
+`../lisp2py/` (an independent sibling workspace — zero dependency on this
+crate or `ocs_plugin_api`) is a **best-effort, offline, source-to-source**
+translator from AutoLISP (`.lsp`) to the `ocs.*` Python dialect documented
+above. Not an interpreter: it never executes AutoLISP, and its output is a
+draft a human reviews and finishes, then runs through `PY_RUN` like any
+other script. This is Phase 2.2/2.3 of `ROADMAP.md` — see
+[`../lisp2py/README.md`](../lisp2py/README.md)
+for the full pipeline, the corpus-measured builtin coverage, and every
+known limitation; this is just the quick-start.
+
+```sh
+cargo run --manifest-path ../lisp2py/Cargo.toml --bin ocs-lisp2py -- macro.lsp > macro.py
+# then, inside OCS:
+PY_RUN macro.py
+```
+
+(Or pipe source on stdin: `cat macro.lsp | cargo run --manifest-path ../lisp2py/Cargo.toml --bin
+ocs-lisp2py -- > macro.py`.)
+
+Anything the translator can't confidently map — an unrecognized builtin, a
+construct with no Python equivalent — becomes a `_todo_manual_port(...)`
+call in the generated file (raises `NotImplementedError` if actually run)
+plus a warning printed to stderr, never a silent guess. `vla-*`/`vlax-*`
+(ActiveX/COM) and `vlr-*` (reactors) are explicitly out of scope, for the
+same reason as everywhere else in this plugin's design: COM doesn't run
+under AutoCAD for Mac either. Builtin coverage was widened using measured
+call-frequency data from a real AutoLISP corpus sample rather than
+guesswork, biased toward 2D geometry (`angle`/`distance`/`polar`) over
+3D/solid-modeling per current project priority.
+
+## XDATA
+
+`ocs.read_record`/`ocs.write_record`/`ocs.remove_record` wrap
+`HostApi::read_record`/`write_record`/`remove_record` — already implemented
+by the host (unlike `run_command`/`set_selection`, these needed no host
+change or `[patch]` entry). A record is `{"app_name": str, "values": [...]}`;
+each value is `{"kind": str, "value": ...}`. Supported kinds and their
+Python `value` shape:
+
+| `kind` | Python `value` |
+|---|---|
+| `String`, `ControlString`, `LayerName` | `str` |
+| `BinaryData` | `bytes` |
+| `Handle` | `int` |
+| `Point3D`, `Position3D`, `Displacement3D`, `Direction3D` | `[x, y, z]` (`float`) |
+| `Real`, `Distance`, `ScaleFactor` | `float` |
+| `Integer16`, `Integer32` | `int` |
+
+```python
+ocs.write_record(handle, "MYAPP", [
+    {"kind": "String", "value": "part-042"},
+    {"kind": "Integer32", "value": 7},
+])
+record = ocs.read_record(handle, "MYAPP")  # {"app_name": "MYAPP", "values": [...]}
+ocs.remove_record(handle, "MYAPP")
+```
+
+This `{app_name, values}`/`{kind, value}` shape is deliberately the same one
+`schoeller/ocs_python_repl` (a separate, out-of-process PyO3-based Python
+plugin for OCS) uses in its `ocs.doc.read_record`/`write_record`, so a
+script's XDATA handling ports between the two plugins unchanged. `write_record`
+starts the script's shared undo group the same way `ocs.add_*` does (see
+below); `remove_record` only starts it when a record actually existed to
+remove.
+
+## Build note: bundled host API
+
+`Cargo.toml` uses the repository-relative `ocs_plugin_api` crate. Packaging
+builds the plugin with the same compiler and CAD codec as the host and stages
+matching metadata beside the library. The `experimental-command-replay` Cargo
+feature keeps the old bridge code available, but the tested nested-command
+path can hang. Do not enable it for production.

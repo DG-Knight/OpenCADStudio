@@ -1,0 +1,233 @@
+{
+  "type_filter": [
+    "Point",
+    "Line",
+    "Circle",
+    "Arc",
+    "Ellipse",
+    "Polyline",
+    "Polyline2D",
+    "Polyline3D",
+    "LwPolyline",
+    "Spline",
+    "Text",
+    "MText",
+    "Ray",
+    "XLine",
+    "Solid",
+    "Face3D",
+    "Insert",
+    "Tolerance",
+    "Shape",
+    "AttributeDefinition",
+    "AttributeEntity",
+    "Hatch"
+  ],
+  "base_fields": ["handle", "layer", "owner_handle"],
+  "overrides": {
+    "Point": {
+      "fields": {
+        "location": { "required": true }
+      }
+    },
+    "Line": {
+      "fields": {
+        "start": { "required": true },
+        "end": { "required": true }
+      }
+    },
+    "Circle": {
+      "fields": {
+        "center": { "required": true },
+        "radius": { "required": true }
+      }
+    },
+    "Arc": {
+      "fields": {
+        "center": { "required": true },
+        "radius": { "required": true },
+        "start_angle": { "required": true },
+        "end_angle": { "required": true }
+      }
+    },
+    "Ellipse": {
+      "fields": {
+        "center": { "required": true },
+        "major_axis": { "required": true },
+        "minor_axis_ratio": { "required": true }
+      }
+    },
+    "Polyline": {
+      "fields": {
+        "vertices": { "required": true },
+        "flags": {
+          "python_name": "closed",
+          "rust_getter": "VAR.flags.is_closed()",
+          "rust_setter": "VAR.flags.set_closed(get_opt_bool(dict, \"closed\", vm)?);"
+        }
+      }
+    },
+    "Polyline2D": {
+      "fields": {
+        "vertices": { "required": true },
+        "flags": {
+          "python_name": "closed",
+          "rust_getter": "VAR.flags.is_closed()",
+          "rust_setter": "VAR.flags.set_closed(get_opt_bool(dict, \"closed\", vm)?);"
+        }
+      }
+    },
+    "Polyline3D": {
+      "fields": {
+        "vertices": { "required": true },
+        "smooth_type": {
+          "exclude": true,
+          "_comment": "acadrust defines two distinct SmoothSurfaceType enums with the same name (polyline.rs, used by Polyline2D's smooth_surface — and a separate one private to polyline3d.rs, used here); the type registry's tracer keys purely by name and collapses them, so the generically generated conversion resolves to the wrong one. Needs a hand-written override with the fully qualified acadrust::entities::polyline3d::SmoothSurfaceType path to support, not just a rename."
+        }
+      }
+    },
+    "LwPolyline": {
+      "fields": {
+        "vertices": { "required": true }
+      }
+    },
+    "Spline": {
+      "fields": {
+        "control_points": { "required": true }
+      }
+    },
+    "Text": {
+      "fields": {
+        "value": { "python_name": "text", "required": true },
+        "insertion_point": { "python_name": "insertion", "required": true }
+      }
+    },
+    "MText": {
+      "fields": {
+        "value": { "python_name": "text", "required": true },
+        "insertion_point": { "python_name": "insertion", "required": true },
+        "background_color": {
+          "exclude": true,
+          "_comment": "Color is a tagged enum (Index(u8)/Rgb{r,g,b} carry data, not just unit variants) — this generator only handles C-like unit enums generically; EntityCommon's own color/line_weight/transparency fields are out of scope for the same reason (see base_fields)."
+        }
+      }
+    },
+    "Ray": {
+      "fields": {
+        "base_point": { "required": true },
+        "direction": { "required": true }
+      }
+    },
+    "XLine": {
+      "fields": {
+        "base_point": { "required": true },
+        "direction": { "required": true }
+      }
+    },
+    "Solid": {
+      "rust_constructor": "acadrust::entities::Solid::new(acadrust::types::Vector3::ZERO, acadrust::types::Vector3::ZERO, acadrust::types::Vector3::ZERO, acadrust::types::Vector3::ZERO)",
+      "fields": {
+        "first_corner": { "required": true },
+        "second_corner": { "required": true },
+        "third_corner": { "required": true },
+        "fourth_corner": { "required": true }
+      }
+    },
+    "Face3D": {
+      "rust_constructor": "acadrust::entities::Face3D::new(acadrust::types::Vector3::ZERO, acadrust::types::Vector3::ZERO, acadrust::types::Vector3::ZERO, acadrust::types::Vector3::ZERO)",
+      "fields": {
+        "first_corner": { "required": true },
+        "second_corner": { "required": true },
+        "third_corner": { "required": true },
+        "fourth_corner": { "required": true }
+      }
+    },
+    "Insert": {
+      "update_only": true,
+      "fields": {
+        "block_name": { "read_only": true },
+        "x_scale": {
+          "rust_getter": "VAR.x_scale()",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"x_scale\", vm)? { let scale = v.try_into_value::<f64>(vm)?; if !scale.is_finite() || scale.abs() < 1e-12 { return Err(vm.new_value_error(\"Insert.x_scale must be finite and nonzero\".to_owned())); } VAR.set_x_scale(scale); }"
+        },
+        "y_scale": {
+          "rust_getter": "VAR.y_scale()",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"y_scale\", vm)? { let scale = v.try_into_value::<f64>(vm)?; if !scale.is_finite() || scale.abs() < 1e-12 { return Err(vm.new_value_error(\"Insert.y_scale must be finite and nonzero\".to_owned())); } VAR.set_y_scale(scale); }"
+        },
+        "z_scale": {
+          "rust_getter": "VAR.z_scale()",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"z_scale\", vm)? { let scale = v.try_into_value::<f64>(vm)?; if !scale.is_finite() || scale.abs() < 1e-12 { return Err(vm.new_value_error(\"Insert.z_scale must be finite and nonzero\".to_owned())); } VAR.set_z_scale(scale); }"
+        },
+        "dwg_minsert": { "exclude": true },
+        "attributes": { "exclude": true },
+        "view_rep_handle": { "exclude": true },
+        "seqend_handle": { "exclude": true }
+      }
+    },
+    "Tolerance": {
+      "fields": {
+        "insertion_point": { "required": true },
+        "text": { "required": true },
+        "dimension_style_name": {
+          "rust_getter": "VAR.dimension_style_name.clone()",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"dimension_style_name\", vm)? { VAR.dimension_style_name = v.try_into_value::<String>(vm)?; VAR.dimension_style_handle = None; }"
+        },
+        "dimension_style_handle": { "read_only": true },
+        "dwg_unknown_short": { "exclude": true }
+      }
+    },
+    "Shape": {
+      "fields": {
+        "insertion_point": { "required": true },
+        "size": { "required": true },
+        "shape_name": { "required": true },
+        "shape_number": { "required": true },
+        "style_name": {
+          "rust_getter": "VAR.style_name.clone()",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"style_name\", vm)? { VAR.style_name = v.try_into_value::<String>(vm)?; VAR.style_handle = None; }"
+        },
+        "style_handle": { "read_only": true }
+      }
+    },
+    "AttributeDefinition": {
+      "fields": {
+        "tag": { "required": true },
+        "insertion_point": { "required": true },
+        "height": { "required": true },
+        "embedded_mtext": {
+          "exclude": true,
+          "_comment": "Embedded R2018+ MTEXT carries linked layout state. It remains snapshot-readable but is preserved untouched by Python edits until linked-payload mutation has dedicated validation."
+        }
+      }
+    },
+    "AttributeEntity": {
+      "fields": {
+        "tag": { "required": true },
+        "value": { "required": true },
+        "insertion_point": { "required": true },
+        "height": { "required": true },
+        "attdef_handle": { "read_only": true },
+        "embedded_mtext": {
+          "exclude": true,
+          "_comment": "The embedded R2018+ MTEXT payload remains snapshot-readable and is preserved by partial edits."
+        }
+      }
+    },
+    "Hatch": {
+      "fields": {
+        "paths": { "required": true },
+        "is_mpolygon": {
+          "exclude": true,
+          "_comment": "MPOLYGON is a distinct class-backed record and is preserved without exposing Hatch creation semantics."
+        },
+        "gradient_color": {
+          "exclude": true,
+          "_comment": "Gradient payload mutation requires a separate validated model; partial Hatch edits preserve it."
+        },
+        "mpolygon_hatch_color": { "exclude": true },
+        "mpolygon_x_direction": { "exclude": true },
+        "mpolygon_boundary_handle_count": { "exclude": true }
+      }
+    }
+  }
+}

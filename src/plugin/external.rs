@@ -15,7 +15,8 @@
 
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// One entry in the curated plugin registry (`plugins/registry.json`).
 #[derive(Debug, Clone)]
@@ -68,6 +69,9 @@ pub struct ExternalPlugin {
     pub command_prefixes: Vec<String>,
     /// The package directory under the plugins folder.
     pub dir: PathBuf,
+    /// True when the package ships inside the application rather than the
+    /// per-user plugin directory.
+    pub bundled: bool,
     /// Whether a native library for this platform sits beside `plugin.toml`.
     pub lib_present: bool,
 }
@@ -147,6 +151,24 @@ pub fn plugins_dir() -> Option<PathBuf> {
     Some(p)
 }
 
+/// Read-only plugins shipped with the application. The environment override
+/// makes development and packaging tests independent of a particular bundle
+/// layout.
+pub fn bundled_plugins_dir() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OCS_BUNDLED_PLUGINS_DIR") {
+        return Some(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        return Some(exe.parent()?.parent()?.join("Resources").join("plugins"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(exe.parent()?.join("plugins"))
+    }
+}
+
 /// Delete an installed package's folder. It stays loaded for the current
 /// session (the library is resident); the removal takes effect on next start.
 #[cfg(not(target_arch = "wasm32"))]
@@ -171,16 +193,33 @@ fn lib_extension() -> &'static str {
     }
 }
 
-/// Discover every package under the plugins directory, sorted by `ribbon_order`
-/// then id. Missing directory → empty list (not an error).
+/// Discover bundled and per-user packages, sorted by `ribbon_order` then id.
+/// A per-user package with the same id explicitly overrides the bundled copy.
+/// Missing directories are ignored.
 pub fn discover() -> Vec<ExternalPlugin> {
-    let Some(root) = plugins_dir() else {
-        return Vec::new();
+    discover_from_roots(bundled_plugins_dir().as_deref(), plugins_dir().as_deref())
+}
+
+fn discover_from_roots(
+    bundled_root: Option<&Path>,
+    user_root: Option<&Path>,
+) -> Vec<ExternalPlugin> {
+    let mut found = BTreeMap::new();
+    if let Some(root) = bundled_root {
+        discover_root(root, true, &mut found);
+    }
+    if let Some(root) = user_root {
+        discover_root(root, false, &mut found);
+    }
+    let mut found: Vec<_> = found.into_values().collect();
+    found.sort_by(|a, b| a.ribbon_order.cmp(&b.ribbon_order).then(a.id.cmp(&b.id)));
+    found
+}
+
+fn discover_root(root: &Path, bundled: bool, found: &mut BTreeMap<String, ExternalPlugin>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
     };
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
@@ -198,11 +237,10 @@ pub fn discover() -> Vec<ExternalPlugin> {
             }
             p.lib_present = lib_present_in(&dir);
             p.dir = dir;
-            found.push(p);
+            p.bundled = bundled;
+            found.insert(p.id.clone(), p);
         }
     }
-    found.sort_by(|a, b| a.ribbon_order.cmp(&b.ribbon_order).then(a.id.cmp(&b.id)));
-    found
 }
 
 /// True when a file with this platform's dynamic-library extension exists in
@@ -290,6 +328,7 @@ pub(crate) fn parse_plugin_toml(text: &str) -> Option<ExternalPlugin> {
         ribbon_order,
         command_prefixes,
         dir: PathBuf::new(),
+        bundled: false,
         lib_present: false,
     })
 }
@@ -521,6 +560,42 @@ xdata_apps = ["MYPLUGIN_RECORD"]
     #[test]
     fn missing_id_is_rejected() {
         assert!(parse_plugin_toml("name = \"x\"").is_none());
+    }
+
+    #[test]
+    fn discovers_bundled_plugins_and_allows_a_user_override() {
+        let base = std::env::temp_dir().join(format!(
+            "ocs-bundled-plugin-discovery-{}",
+            std::process::id()
+        ));
+        let bundled = base.join("bundled").join("opencad.python");
+        let user = base.join("user").join("opencad.python");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        let manifest = |version: &str| {
+            format!(
+                "[plugin]\nid=\"opencad.python\"\nversion=\"{version}\"\n[opencad]\napi_version=7\n"
+            )
+        };
+        std::fs::write(bundled.join("plugin.toml"), manifest("bundled")).unwrap();
+        std::fs::write(user.join("plugin.toml"), manifest("user")).unwrap();
+        std::fs::write(
+            bundled.join(format!("plugin.{}", lib_extension())),
+            b"fixture",
+        )
+        .unwrap();
+        std::fs::write(user.join(format!("plugin.{}", lib_extension())), b"fixture").unwrap();
+
+        let bundled_only = discover_from_roots(Some(&base.join("bundled")), None);
+        assert_eq!(bundled_only.len(), 1);
+        assert!(bundled_only[0].bundled);
+        assert_eq!(bundled_only[0].version, "bundled");
+
+        let overridden = discover_from_roots(Some(&base.join("bundled")), Some(&base.join("user")));
+        assert_eq!(overridden.len(), 1);
+        assert!(!overridden[0].bundled);
+        assert_eq!(overridden[0].version, "user");
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
