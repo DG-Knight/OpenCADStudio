@@ -548,6 +548,80 @@ fn validate_multileader(
     Ok(())
 }
 
+/// Field checks shared by Table creation and mutation.
+#[cfg(feature = "host")]
+fn validate_table(
+    old: Option<&crate::host::acadrust::entities::Table>,
+    new: &crate::host::acadrust::entities::Table,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    finite_vector("Table.insertion_point", &new.insertion_point)?;
+    solid_normal("Table.normal", &new.normal)?;
+    solid_normal("Table.horizontal_direction", &new.horizontal_direction)?;
+    if !new.break_spacing.is_finite() || new.break_spacing < 0.0 {
+        return Err("Table.break_spacing must be finite and non-negative".into());
+    }
+    if new.rows.is_empty() || new.columns.is_empty() {
+        return Err("Table requires at least one row and one column".into());
+    }
+    for (ci, column) in new.columns.iter().enumerate() {
+        if !column.width.is_finite() || column.width <= 0.0 {
+            return Err(format!("Table.columns[{ci}].width must be finite and greater than zero"));
+        }
+    }
+    for (ri, row) in new.rows.iter().enumerate() {
+        if !row.height.is_finite() || row.height <= 0.0 {
+            return Err(format!("Table.rows[{ri}].height must be finite and greater than zero"));
+        }
+        if row.cells.len() != new.columns.len() {
+            return Err(format!(
+                "Table.rows[{ri}] has {} cells but the table has {} columns",
+                row.cells.len(),
+                new.columns.len()
+            ));
+        }
+        for (ci, cell) in row.cells.iter().enumerate() {
+            if !cell.rotation.is_finite() || !cell.geometry_scale.is_finite() || !cell.block_scale.is_finite() {
+                return Err(format!("Table.rows[{ri}].cells[{ci}] has non-finite rotation or scale"));
+            }
+            for (ki, content) in cell.contents.iter().enumerate() {
+                if !content.rotation.is_finite() || !content.scale.is_finite() || !content.text_height.is_finite() || content.text_height < 0.0 {
+                    return Err(format!(
+                        "Table.rows[{ri}].cells[{ci}].contents[{ki}] has invalid rotation, scale or text height"
+                    ));
+                }
+                if !content.value.numeric_value.is_finite() {
+                    return Err(format!(
+                        "Table.rows[{ri}].cells[{ci}].contents[{ki}].value.numeric_value must be finite"
+                    ));
+                }
+            }
+        }
+    }
+    let (rows, columns) = (new.rows.len(), new.columns.len());
+    for (mi, range) in new.merged_ranges.iter().enumerate() {
+        if range.top_row > range.bottom_row
+            || range.left_col > range.right_col
+            || range.bottom_row >= rows
+            || range.right_col >= columns
+        {
+            return Err(format!("Table.merged_ranges[{mi}] lies outside the {rows}x{columns} grid"));
+        }
+        for (mj, other) in new.merged_ranges.iter().enumerate().skip(mi + 1) {
+            let separate = range.bottom_row < other.top_row
+                || other.bottom_row < range.top_row
+                || range.right_col < other.left_col
+                || other.right_col < range.left_col;
+            if !separate {
+                return Err(format!("Table.merged_ranges[{mi}] overlaps merged_ranges[{mj}]"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -643,6 +717,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::MLine(value) => validate_mline(None, value)?,
         EntityType::Dimension(value) => validate_dimension(None, value)?,
         EntityType::MultiLeader(value) => validate_multileader(None, value)?,
+        EntityType::Table(value) => validate_table(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -999,6 +1074,7 @@ pub fn validate_entity_mutation(
         }
         (EntityType::Dimension(old), EntityType::Dimension(new)) => validate_dimension(Some(old), new)?,
         (EntityType::MultiLeader(old), EntityType::MultiLeader(new)) => validate_multileader(Some(old), new)?,
+        (EntityType::Table(old), EntityType::Table(new)) => validate_table(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1260,6 +1336,32 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    if let EntityType::Table(value) = entity {
+        if let Some(handle) = value.table_style_handle.filter(|handle| !handle.is_null()) {
+            if !matches!(
+                document.objects.get(&handle),
+                Some(crate::host::acadrust::objects::ObjectType::TableStyle(_))
+            ) {
+                return Err(format!("Table style handle {handle:?} does not exist"));
+            }
+        }
+        for (ri, row) in value.rows.iter().enumerate() {
+            for (ci, cell) in row.cells.iter().enumerate() {
+                for content in &cell.contents {
+                    if let Some(handle) = content.text_style_handle.filter(|handle| !handle.is_null()) {
+                        if !document.text_styles.iter().any(|style| style.handle == handle) {
+                            return Err(format!("Table.rows[{ri}].cells[{ci}] text style handle {handle:?} does not exist"));
+                        }
+                    }
+                    if let Some(handle) = content.block_handle.filter(|handle| !handle.is_null()) {
+                        if !document.block_records.iter().any(|record| record.handle == handle) {
+                            return Err(format!("Table.rows[{ri}].cells[{ci}] block handle {handle:?} does not exist"));
+                        }
+                    }
+                }
+            }
         }
     }
     if let EntityType::MultiLeader(value) = entity {
@@ -1646,6 +1748,7 @@ mod tests {
                         | "MLine"
                         | "Dimension"
                         | "MultiLeader"
+                        | "Table"
                 )
             {
                 assert!(
@@ -1867,6 +1970,16 @@ mod tests {
                 "MultiLeader.arrowhead_handle".to_owned(),
                 "MultiLeader.line_type_handle".to_owned(),
                 "MultiLeader.block_content_handle".to_owned(),
+                "Table.insertion_point".to_owned(),
+                "Table.horizontal_direction".to_owned(),
+                "Table.normal".to_owned(),
+                "Table.table_style_handle".to_owned(),
+                "Table.rows".to_owned(),
+                "Table.columns".to_owned(),
+                "Table.merged_ranges".to_owned(),
+                "Table.break_spacing".to_owned(),
+                "Table.break_flow_direction".to_owned(),
+                "Table.break_options".to_owned(),
             ])
         );
     }

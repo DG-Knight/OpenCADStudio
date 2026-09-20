@@ -786,6 +786,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                             | "annotation_offset"
                     )
                     | ("MultiLeader", _)
+                    | ("Table", _)
                     | (
                         "MLine",
                         "flags"

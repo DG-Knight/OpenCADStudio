@@ -158,6 +158,13 @@ impl<'a> HostSession<'a> {
         if let EntityType::Dimension(dimension) = entity {
             crate::entities::dimension::normalize_scripted_dimension(dimension);
         }
+        if let EntityType::Table(new) = entity {
+            let old = match old {
+                Some(EntityType::Table(old)) => Some(old),
+                _ => None,
+            };
+            crate::entities::table::normalize_scripted_table(old, new);
+        }
         if let EntityType::MLine(new) = entity {
             let old = match old {
                 Some(EntityType::MLine(old)) => Some(old),
@@ -2920,6 +2927,162 @@ mod tests {
         for (name, bytes) in [
             ("mleader-deleted.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()),
             ("mleader-deleted.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+        ] {
+            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+        }
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
+    fn staged_python_table_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+
+        dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Table', insertion_point={'x':5.0,'y':5.0,'z':0.0}).handle");
+        let handle = host.document().entities().find_map(|entity| match entity {
+            EntityType::Table(value) => Some(value.common.handle),
+            _ => None,
+        }).unwrap_or_else(|| panic!("Python did not create Table: {}", last_output(&host)));
+        let created = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::Table(created_table) = &created else { unreachable!() };
+        assert_eq!((created_table.rows.len(), created_table.columns.len()), (3, 3));
+        assert_eq!(created_table.insertion_point, acadrust::types::Vector3::new(5.0, 5.0, 0.0));
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+
+        let script = std::env::temp_dir().join(format!("ocs_table_edit_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "doc = ocs.active_document\n",
+            "t = doc.entities[{}]\n",
+            "rows = t.rows\n",
+            "cols = t.columns\n",
+            "rows.append(dict(rows[0]))\n",
+            "cols[0]['width'] = 30.0\n",
+            "rows[1]['cells'][1]['contents'] = [{{'content_type': 'Value', 'scale': 1.0, 'text_height': 2.5,\n",
+            "    'value': {{'value_type': 'String', 'raw_type_code': 4, 'text': 'Hello', 'formatted_value': 'Hello'}}}}]\n",
+            "with doc.transaction('Edit table'):\n",
+            "    t.rows = rows\n",
+            "    t.columns = cols\n",
+            "    t.merged_ranges = [{{'top_row': 0, 'left_col': 0, 'bottom_row': 0, 'right_col': 2}}]\n",
+            "    t.break_spacing = 2.0\n",
+            "doc.selection = [t]\n"
+        ), handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let expected = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::Table(edited) = &expected else { unreachable!() };
+        assert_eq!(edited.rows.len(), 4, "edit failed: {}", last_output(&host));
+        assert_eq!(edited.columns[0].width, 30.0);
+        assert_eq!(edited.rows[1].cells[1].contents[0].value.text, "Hello");
+        assert_eq!(edited.merged_ranges.len(), 1);
+        assert_eq!(edited.break_spacing, 2.0);
+        assert_eq!(edited.common, created_table.common);
+        assert_eq!(edited.insertion_point, created_table.insertion_point);
+        assert_eq!(edited.normal, created_table.normal);
+        assert_eq!(edited.columns[1], created_table.columns[1]);
+        assert_eq!(edited.rows[2], created_table.rows[2]);
+        assert_eq!(edited.table_style_handle, created_table.table_style_handle);
+        assert_eq!(host.selection(), vec![handle]);
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty());
+
+        for (patch, message) in [
+            ("'columns':[{'name':'A','width':0.0},{'width':1.0},{'width':1.0}]", "greater than zero"),
+            ("'columns':[{'width':5.0}]", "cells but the table has 1 columns"),
+            ("'columns':[]", "at least one row and one column"),
+            ("'merged_ranges':[{'top_row':0,'left_col':0,'bottom_row':9,'right_col':0}]", "outside the"),
+            ("'merged_ranges':[{'top_row':1,'left_col':0,'bottom_row':2,'right_col':1},{'top_row':2,'left_col':1,'bottom_row':3,'right_col':2}]", "overlaps"),
+            ("'table_style_handle':999999", "does not exist"),
+            ("'block_name':'x'", "read-only"),
+            ("'normal':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
+            ("'break_spacing':-1.0", "non-negative"),
+            ("'insertion_point':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
+        ] {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many('Reject table', [{{'handle':{}, {patch}}}])", handle.value()));
+            assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
+            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+        }
+        dispatch(&mut host, &format!(concat!(
+            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'break_spacing':7.0}},",
+            "{{'handle':{},'break_spacing':-1.0}}])"
+        ), handle.value(), handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+
+        let mut gaps = Vec::new();
+        let dwg = crate::io::load_bytes("table.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("table.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            let Some(EntityType::Table(value)) = document.get_entity(handle) else {
+                gaps.push(format!("{format}: Table missing"));
+                continue;
+            };
+            if value.rows.len() != 4 { gaps.push(format!("{format}: rows {}", value.rows.len())); }
+            if value.columns.first().map(|c| c.width) != Some(30.0) { gaps.push(format!("{format}: column width {:?}", value.columns.first().map(|c| c.width))); }
+            let text = value.rows.get(1).and_then(|r| r.cells.get(1)).and_then(|c| c.contents.first()).map(|c| c.value.text.clone());
+            if text.as_deref() != Some("Hello") { gaps.push(format!("{format}: cell text {text:?}")); }
+            // DWG stores the ranges; DXF stores the origin cell's merge
+            // dimensions and its reader does not rebuild `merged_ranges`
+            // (engine gap, recorded in the ledger). Scripted saves populate
+            // both, so each format keeps the merge in its own form.
+            let origin = &value.rows[0].cells[0];
+            if format == "DXF" {
+                if (origin.merge_width, origin.merge_height) != (3, 1) { gaps.push(format!("DXF: merge dims {}x{}", origin.merge_width, origin.merge_height)); }
+                if !value.merged_ranges.is_empty() { gaps.push("DXF: reader now rebuilds merged_ranges; drop the blocker".into()); }
+            } else if value.merged_ranges.len() != 1 {
+                gaps.push(format!("DWG: merged_ranges {}", value.merged_ranges.len()));
+            }
+            if value.insertion_point != edited.insertion_point { gaps.push(format!("{format}: insertion {:?}", value.insertion_point)); }
+        }
+        assert!(gaps.is_empty(), "persistence gaps: {gaps:#?}");
+        for (name, mut document) in [("table-reedit.dwg", dwg), ("table-reedit.dxf", dxf)] {
+            let before = document.get_entity(handle).unwrap().clone();
+            let mut after = before.clone();
+            let EntityType::Table(value) = &mut after else { unreachable!() };
+            value.columns[1].width = 12.0;
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            *document.get_entity_mut(handle).unwrap() = after;
+            let bytes = if name.ends_with("dwg") {
+                acadrust::DwgWriter::write_to_vec(&document).unwrap()
+            } else {
+                acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
+            };
+            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
+                Some(EntityType::Table(value)) if value.columns[1].width == 12.0), "{name}");
+        }
+
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none());
+        for (name, bytes) in [
+            ("table-deleted.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()),
+            ("table-deleted.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()),
         ] {
             assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
         }

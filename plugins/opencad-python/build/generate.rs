@@ -201,6 +201,10 @@ fn helper_closure(manifest: &Manifest, registry: &TypeRegistry) -> Vec<String> {
     }
 
     while let Some(name) = queue.pop() {
+        if let Some(parts) = tuple_parts(&name) {
+            queue.extend(parts.into_iter().map(str::to_owned));
+            continue;
+        }
         if BUILTIN.contains(&name.as_str())
             || SPECIAL.contains(&name.as_str())
             || f64_array_len(&name).is_some()
@@ -300,6 +304,26 @@ fn is_native(type_id: &str) -> bool {
     BUILTIN.contains(&type_id)
 }
 
+/// Split a tuple type id such as `(u32,CellBorder)` into its element types.
+fn tuple_parts(type_id: &str) -> Option<Vec<&str>> {
+    let inner = type_id.strip_prefix('(')?.strip_suffix(')')?;
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '(' | '[' | '<' => depth += 1,
+            ')' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(inner[start..].trim());
+    (parts.len() >= 2).then_some(parts)
+}
+
 /// `[f64; N]` fixed arrays (e.g. a 4x4 transform) convert as flat float lists.
 fn f64_array_len(type_id: &str) -> Option<usize> {
     type_id
@@ -312,6 +336,10 @@ fn f64_array_len(type_id: &str) -> Option<usize> {
 fn default_expr(type_id: &str) -> String {
     if let Some(n) = f64_array_len(type_id) {
         return format!("[0.0f64; {n}]");
+    }
+    if let Some(parts) = tuple_parts(type_id) {
+        let items: Vec<String> = parts.iter().map(|part| default_expr(part)).collect();
+        return format!("({})", items.join(", "));
     }
     match type_id {
         "f64" | "f32" => "0.0".to_string(),
@@ -339,6 +367,14 @@ fn leaf_to_py(registry: &TypeRegistry, type_id: &str, item_expr: &str) -> String
             "Ok(vm.ctx.new_list(({item_expr}).iter().map(|item| vm.new_pyobj(*item)).collect()).into())"
         );
     }
+    if let Some(parts) = tuple_parts(type_id) {
+        let items: Vec<String> = parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| format!("{}?", leaf_to_py(registry, part, &format!("&({item_expr}).{i}"))))
+            .collect();
+        return format!("Ok(vm.ctx.new_list(vec![{}]).into())", items.join(", "));
+    }
     match type_id {
         "f64" | "f32" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "bool" => {
             format!("Ok(vm.new_pyobj(*{parenthesized}))")
@@ -365,11 +401,27 @@ fn leaf_to_py(registry: &TypeRegistry, type_id: &str, item_expr: &str) -> String
 
 /// `value_expr` must already be an owned `PyObjectRef` expression. Result: a `PyResult<T>` expression.
 fn leaf_from_py(registry: &TypeRegistry, type_id: &str, value_expr: &str) -> String {
+    if type_id == "u64" {
+        // serde reports Rust `usize` as `u64`; the inferred cast serves both.
+        return format!("{value_expr}.try_into_value::<u64>(vm).map(|n| n as _)");
+    }
     if is_native(type_id) {
         return format!("{value_expr}.try_into_value::<{}>(vm)", native_rust_type(type_id));
     }
     if let Some(n) = f64_array_len(type_id) {
         return format!("py_to_f64_array::<{n}>({value_expr}, vm)");
+    }
+    if let Some(parts) = tuple_parts(type_id) {
+        let n = parts.len();
+        let items: Vec<String> = parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| format!("{}?", leaf_from_py(registry, part, &format!("items.remove(0 * {i})"))))
+            .collect();
+        return format!(
+            "(|| -> PyResult<_> {{ let mut items: Vec<PyObjectRef> = ({value_expr}).try_into_value(vm)?; if items.len() != {n} {{ return Err(vm.new_value_error(\"expected a {n}-item list\".to_owned())); }} Ok(({})) }})()",
+            items.join(", ")
+        );
     }
     match type_id {
         "Vector3" => format!("py_to_vector3_dict({value_expr}, vm)"),

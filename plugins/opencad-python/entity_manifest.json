@@ -25,7 +25,8 @@
     "Leader",
     "MLine",
     "Dimension",
-    "MultiLeader"
+    "MultiLeader",
+    "Table"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -279,6 +280,35 @@
           "rust_getter": "multi_leader_annot_context_to_dict(vm, &VAR.context)?",
           "rust_setter": "if let Some(v) = dict.get_item_opt(\"context\", vm)? { VAR.context = merge_multileader_context(&VAR.context, v, vm)?; }"
         }
+      }
+    },
+    "Table": {
+      "fields": {
+        "insertion_point": { "required": true },
+        "block_name": { "read_only": true },
+        "block_record_handle": { "read_only": true },
+        "data_version": { "read_only": true },
+        "value_flags": { "read_only": true },
+        "override_flag": { "read_only": true },
+        "override_border_color": { "read_only": true },
+        "override_border_line_weight": { "read_only": true },
+        "override_border_visibility": { "read_only": true },
+        "legacy_style_override": { "read_only": true },
+        "name": { "read_only": true },
+        "description": { "read_only": true },
+        "field_handles": { "read_only": true },
+        "base_style": { "read_only": true },
+        "break_data": { "read_only": true },
+        "break_ranges": { "read_only": true },
+        "dwg_unknown_byte": { "exclude": true },
+        "dwg_unknown_handle": { "exclude": true },
+        "dwg_unknown_long1": { "exclude": true },
+        "dwg_r2010_unknown_bit": { "exclude": true },
+        "dwg_unknown_long2": { "exclude": true },
+        "dwg_unknown_short": { "exclude": true },
+        "legacy_border_colors": { "exclude": true, "_comment": "Generic LegacyBorderOverrides<T> is not expressible by the generator; legacy R13-R2000 border overrides are preserved untouched." },
+        "legacy_border_line_weights": { "exclude": true },
+        "legacy_border_visibility": { "exclude": true }
       }
     }
   }

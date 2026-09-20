@@ -331,6 +331,19 @@
       "arrowhead_handle",
       "line_type_handle",
       "block_content_handle"
+    ],
+    "Table": [
+      "layer",
+      "insertion_point",
+      "horizontal_direction",
+      "normal",
+      "table_style_handle",
+      "rows",
+      "columns",
+      "merged_ranges",
+      "break_spacing",
+      "break_flow_direction",
+      "break_options"
     ]
   },
   "readable": {
@@ -363,6 +376,23 @@
       "property_override_flags",
       "text_align_in_ipe",
       "text_height"
+    ],
+    "Table": [
+      "block_name",
+      "block_record_handle",
+      "data_version",
+      "value_flags",
+      "override_flag",
+      "override_border_color",
+      "override_border_line_weight",
+      "override_border_visibility",
+      "legacy_style_override",
+      "name",
+      "description",
+      "field_handles",
+      "base_style",
+      "break_data",
+      "break_ranges"
     ]
   },
   "aliases": {

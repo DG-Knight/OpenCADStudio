@@ -7,13 +7,13 @@ Build a general Python document model over the OCS host API for all **43 canvas 
 As of 20 September 2026, the working branch is `plugin/host-model-api` at
 `a8dd3640` plus the Leader increment, published as draft PR
 [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391). Host API is
-v7. The Python feature has explicit writes for **26 of 43** canvas kinds: 25
-are creatable and `Insert` remains update-only. This is **not** 26 completed
-kinds: Tolerance, Shape, AttributeEntity, Hatch, MLine, Dimension and MultiLeader pass every completion gate.
+v7. The Python feature has explicit writes for **27 of 43** canvas kinds: 26
+are creatable and `Insert` remains update-only. This is **not** 27 completed
+kinds: Tolerance, Shape, AttributeEntity, Hatch, MLine, Dimension, MultiLeader and Table pass every completion gate.
 AttributeDefinition passes its host and real IPC lifecycle but remains short of
 `Complete` because the previously pinned CAD codec dropped optional ATTDEF
 fields during DXF reads; revalidate that blocker against the current
-`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). The other 17 canvas kinds have only `layer`
+`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). The other 16 canvas kinds have only `layer`
 writes through the document model. All 43 have raw typed snapshots. There are
 three internal records and two opaque fallbacks outside the 43 canvas kinds.
 
@@ -123,7 +123,7 @@ The last five may require new engine capabilities rather than only Python conver
 
 ## Handoff start point
 
-Continue with **Table** (queue item 5). Leader is done except for its W
+Continue with **PolygonMesh** (queue item 6). Leader is done except for its W
 gate; when the engine writes DXF group 340, reads group 213 and the DWG
 R2010+ text-size question is decided, flip the canary assertions in
 `staged_python_leader_lifecycle_over_real_ipc` and mark it `Complete`.
@@ -161,3 +161,4 @@ exact queue above and update statuses with evidence after each increment.
 - Completed `MLine`. Host validation and style binding live in `ocs_plugin_api`; derived vertex geometry and element parameters are recomputed by the host (`normalize_scripted_mline`) on scripted create/edit, so scripts supply positions only. The adapter maps `flags` as an integer through a manifest override because the generator cannot classify acadrust's serde-newtype `MLineFlags`. `staged_python_mline_lifecycle_over_real_ipc` passes C/R/E/D/U/I/W/V/P with DWG and DXF reopen. The queue now continues with `Dimension`.
 - Completed `Dimension` for all nine subtypes. Because the payload is an enum, the adapter generator gained a `manual_kinds` hook (hand-written `<kind>_to_dict/_from_dict/_apply`) and the host catalog a `synthetic` policy section. The host derives `actual_measurement` and the base definition point on every scripted create/edit. Python ints are now accepted wherever a coordinate or angle is expected. `staged_python_dimension_lifecycle_over_real_ipc` records each subtype separately and all nine pass C/R/E/D/U/I/W/V/P. The queue now continues with `MultiLeader`.
 - Completed `MultiLeader`. The adapter generator now converts `Color`, `LineWeight`, mixed unit/payload enums, fixed float arrays and bitflags-2 newtypes, and a `keep_types` override lets a hand-written setter reuse generated converters (used for the merge-style `context` patch). `Leader.override_color` became writable through the same `Color` form; neither file format stores it. `staged_python_multileader_lifecycle_over_real_ipc` passes the full gate with DWG and DXF reopen. The queue now continues with `Table`.
+- Completed `Table`. The generator now handles tuples and `usize`; the host keeps DXF cell merge dimensions in step with `merged_ranges`. `staged_python_table_lifecycle_over_real_ipc` passes the full gate with DWG and DXF reopen. The queue now continues with `PolygonMesh`.
