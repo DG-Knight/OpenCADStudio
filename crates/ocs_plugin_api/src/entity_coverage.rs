@@ -1020,6 +1020,209 @@ fn validate_light(
     Ok(())
 }
 
+/// Every geometry problem of a first-generation mapped kind. Messages name
+/// the field, so an edit can be compared against the entity it replaces.
+#[cfg(feature = "host")]
+fn basic_entity_errors(new: &crate::host::EntityType) -> Vec<String> {
+    use crate::host::EntityType;
+    let mut errs: Vec<String> = Vec::new();
+    macro_rules! chk {
+        ($e:expr) => {
+            if let Err(error) = $e {
+                errs.push(error);
+            }
+        };
+    }
+    let finite = |name: &str, value: f64| {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err(format!("{name} must be finite"))
+        }
+    };
+    let positive = |name: &str, value: f64| {
+        if value.is_finite() && value > 0.0 {
+            Ok(())
+        } else {
+            Err(format!("{name} must be finite and greater than zero"))
+        }
+    };
+    match new {
+        EntityType::Point(v) => {
+            chk!(finite_vector("Point.location", &v.location));
+            chk!(finite("Point.thickness", v.thickness));
+            chk!(finite("Point.x_axis_angle", v.x_axis_angle));
+            chk!(solid_normal("Point.normal", &v.normal));
+        }
+        EntityType::Line(v) => {
+            chk!(finite_vector("Line.start", &v.start));
+            chk!(finite_vector("Line.end", &v.end));
+            chk!(finite("Line.thickness", v.thickness));
+            chk!(solid_normal("Line.normal", &v.normal));
+        }
+        EntityType::Circle(v) => {
+            chk!(finite_vector("Circle.center", &v.center));
+            chk!(positive("Circle.radius", v.radius));
+            chk!(finite("Circle.thickness", v.thickness));
+            chk!(solid_normal("Circle.normal", &v.normal));
+        }
+        EntityType::Arc(v) => {
+            chk!(finite_vector("Arc.center", &v.center));
+            chk!(positive("Arc.radius", v.radius));
+            chk!(finite("Arc.start_angle", v.start_angle));
+            chk!(finite("Arc.end_angle", v.end_angle));
+            chk!(finite("Arc.thickness", v.thickness));
+            chk!(solid_normal("Arc.normal", &v.normal));
+        }
+        EntityType::Ellipse(v) => {
+            chk!(finite_vector("Ellipse.center", &v.center));
+            chk!(solid_normal("Ellipse.major_axis", &v.major_axis));
+            if !v.minor_axis_ratio.is_finite() || v.minor_axis_ratio <= 0.0 || v.minor_axis_ratio > 1.0 {
+                errs.push("Ellipse.minor_axis_ratio must be within (0, 1]".into());
+            }
+            chk!(finite("Ellipse.start_parameter", v.start_parameter));
+            chk!(finite("Ellipse.end_parameter", v.end_parameter));
+            chk!(solid_normal("Ellipse.normal", &v.normal));
+        }
+        EntityType::Text(v) => {
+            chk!(finite_vector("Text.insertion_point", &v.insertion_point));
+            if let Some(alignment) = &v.alignment_point {
+                chk!(finite_vector("Text.alignment_point", alignment));
+            }
+            chk!(positive("Text.height", v.height));
+            chk!(finite("Text.rotation", v.rotation));
+            chk!(finite("Text.oblique_angle", v.oblique_angle));
+            if !v.width_factor.is_finite() || v.width_factor <= 0.0 {
+                errs.push("Text.width_factor must be finite and greater than zero".into());
+            }
+            chk!(finite("Text.thickness", v.thickness));
+            chk!(solid_normal("Text.normal", &v.normal));
+        }
+        EntityType::MText(v) => {
+            chk!(finite_vector("MText.insertion_point", &v.insertion_point));
+            chk!(positive("MText.height", v.height));
+            chk!(finite("MText.rotation", v.rotation));
+            if !v.rectangle_width.is_finite() || v.rectangle_width < 0.0 {
+                errs.push("MText.rectangle_width must be finite and non-negative".into());
+            }
+            if let Some(height) = v.rectangle_height {
+                chk!(finite("MText.rectangle_height", height));
+            }
+            chk!(positive("MText.line_spacing_factor", v.line_spacing_factor));
+            chk!(solid_normal("MText.normal", &v.normal));
+        }
+        EntityType::LwPolyline(v) => {
+            if v.vertices.len() < 2 {
+                errs.push("LwPolyline.vertices requires at least 2 vertices".into());
+            }
+            for (i, vertex) in v.vertices.iter().enumerate() {
+                if !vertex.location.x.is_finite() || !vertex.location.y.is_finite() {
+                    errs.push(format!("LwPolyline.vertices[{i}].location must be finite"));
+                }
+                if !vertex.bulge.is_finite() || !vertex.start_width.is_finite() || !vertex.end_width.is_finite() {
+                    errs.push(format!("LwPolyline.vertices[{i}] has a non-finite bulge or width"));
+                }
+            }
+            if !v.constant_width.is_finite() || v.constant_width < 0.0 {
+                errs.push("LwPolyline.constant_width must be finite and non-negative".into());
+            }
+            chk!(finite("LwPolyline.elevation", v.elevation));
+            chk!(finite("LwPolyline.thickness", v.thickness));
+            chk!(solid_normal("LwPolyline.normal", &v.normal));
+        }
+        EntityType::Polyline2D(v) => {
+            if v.vertices.len() < 2 {
+                errs.push("Polyline2D.vertices requires at least 2 vertices".into());
+            }
+            for (i, vertex) in v.vertices.iter().enumerate() {
+                chk!(finite_vector(&format!("Polyline2D.vertices[{i}].location"), &vertex.location));
+                if !vertex.bulge.is_finite() || !vertex.start_width.is_finite() || !vertex.end_width.is_finite() {
+                    errs.push(format!("Polyline2D.vertices[{i}] has a non-finite bulge or width"));
+                }
+            }
+            for (name, value) in [("start_width", v.start_width), ("end_width", v.end_width), ("thickness", v.thickness), ("elevation", v.elevation)] {
+                chk!(finite(&format!("Polyline2D.{name}"), value));
+            }
+            chk!(solid_normal("Polyline2D.normal", &v.normal));
+        }
+        EntityType::Polyline(v) => {
+            if v.vertices.len() < 2 {
+                errs.push("Polyline.vertices requires at least 2 vertices".into());
+            }
+            for (i, vertex) in v.vertices.iter().enumerate() {
+                chk!(finite_vector(&format!("Polyline.vertices[{i}].location"), &vertex.location));
+            }
+        }
+        EntityType::Polyline3D(v) => {
+            if v.vertices.len() < 2 {
+                errs.push("Polyline3D.vertices requires at least 2 vertices".into());
+            }
+            for (i, vertex) in v.vertices.iter().enumerate() {
+                chk!(finite_vector(&format!("Polyline3D.vertices[{i}].position"), &vertex.position));
+            }
+            for (name, value) in [("default_start_width", v.default_start_width), ("default_end_width", v.default_end_width), ("elevation", v.elevation)] {
+                chk!(finite(&format!("Polyline3D.{name}"), value));
+            }
+            chk!(solid_normal("Polyline3D.normal", &v.normal));
+        }
+        EntityType::Spline(v) => {
+            if v.degree < 1 {
+                errs.push("Spline.degree must be at least 1".into());
+            }
+            let degree = v.degree as usize;
+            if v.control_points.len() <= degree {
+                errs.push("Spline needs more control points than its degree".into());
+            }
+            for (i, point) in v.control_points.iter().enumerate() {
+                chk!(finite_vector(&format!("Spline.control_points[{i}]"), point));
+            }
+            for (i, point) in v.fit_points.iter().enumerate() {
+                chk!(finite_vector(&format!("Spline.fit_points[{i}]"), point));
+            }
+            if v.knots.len() != v.control_points.len() + degree + 1 {
+                errs.push(format!(
+                    "Spline.knots must hold {} values for {} control points of degree {degree}",
+                    v.control_points.len() + degree + 1,
+                    v.control_points.len()
+                ));
+            }
+            if v.knots.iter().any(|k| !k.is_finite()) || v.knots.windows(2).any(|w| w[1] < w[0]) {
+                errs.push("Spline.knots must be finite and nondecreasing".into());
+            }
+            if !v.weights.is_empty() {
+                if v.weights.len() != v.control_points.len() {
+                    errs.push("Spline.weights must match the control points".into());
+                }
+                if v.weights.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+                    errs.push("Spline.weights must be finite and greater than zero".into());
+                }
+            }
+            chk!(solid_normal("Spline.normal", &v.normal));
+        }
+        _ => {}
+    }
+    errs
+}
+
+/// Creation must be fully valid. An edit is refused only for problems it
+/// introduces: a legacy value that was already invalid and is untouched
+/// keeps the entity editable.
+#[cfg(feature = "host")]
+fn validate_basic_entity(
+    old: Option<&crate::host::EntityType>,
+    new: &crate::host::EntityType,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    let errors = basic_entity_errors(new);
+    let existing = old.map(basic_entity_errors).unwrap_or_default();
+    match errors.into_iter().find(|error| !existing.contains(error)) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -1028,6 +1231,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
     if entity.common().layer.trim().is_empty() {
         return Err("layer name is empty".into());
     }
+    validate_basic_entity(None, entity)?;
     match entity {
         EntityType::Ray(value) => {
             finite_vector("Ray.base_point", &value.base_point)?;
@@ -1283,6 +1487,7 @@ pub fn validate_entity_mutation(
             Ok(())
         }
     };
+    validate_basic_entity(Some(before), after)?;
     match (before, after) {
         (EntityType::Point(old), EntityType::Point(new)) => {
             if !same3(&old.location, &new.location) {
