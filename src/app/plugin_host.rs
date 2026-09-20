@@ -158,6 +158,11 @@ impl<'a> HostSession<'a> {
         if let EntityType::Dimension(dimension) = entity {
             crate::entities::dimension::normalize_scripted_dimension(dimension);
         }
+        if let EntityType::Spline(spline) = entity {
+            // The DXF writer emits weights only for a rational spline, so the
+            // flag must follow the weights a script sets.
+            spline.flags.rational = !spline.weights.is_empty();
+        }
         if let EntityType::Helix(new) = entity {
             let old = match old {
                 Some(EntityType::Helix(old)) => Some(old),
@@ -4208,8 +4213,8 @@ mod tests {
             expect_reedited: "deg2 cp3 y9.0 w[1.0, 2.0, 1.0]",
             expect_edited_dwg: "",
             expect_reedited_dwg: "",
-            expect_edited_dxf: "deg2 cp3 y8.0 w[]",
-            expect_reedited_dxf: "deg2 cp3 y9.0 w[]",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
         });
     }
 
