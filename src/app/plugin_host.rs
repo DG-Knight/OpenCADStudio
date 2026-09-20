@@ -2556,7 +2556,7 @@ mod tests {
             ("'style_name':'Missing'", "does not exist"),
             ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}}]", "at least 2"),
             ("'scale_factor':0.0", "nonzero"),
-            ("'flags':64", "unknown or out-of-range bits"),
+            ("'flags':64", "unknown bits"),
             ("'flags':3,'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':1.0,'y':0.0,'z':0.0}}]", "requires at least 3"),
             ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':0.0,'y':0.0,'z':0.0}}]", "coincide"),
             ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':1.0,'y':float('nan'),'z':0.0}}]", "finite"),
