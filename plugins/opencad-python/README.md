@@ -94,7 +94,7 @@ The host-owned catalog classifies all 48 entity variants and tracks every
 traced field, including fields marked `unmapped`. Query it with
 `doc.coverage()` or `doc.coverage("Line")`; each row includes source field,
 type, access, and current validation status. Geometry edits remain limited to
-the 42 mapped kinds.
+the 43 mapped kinds.
 For any entity, `entity.snapshot` returns a detached dictionary of its raw
 CAD fields, including `snapshot["common"]` and kind-specific nested values.
 It can inspect an unmapped kind; editing the dictionary does

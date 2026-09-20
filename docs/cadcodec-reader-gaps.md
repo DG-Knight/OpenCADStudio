@@ -151,7 +151,8 @@ reopens as a different, opaque entity kind instead of `ViewBorder`. DWG restores
 the typed record. The same applies to `SectionSymbol`.
 
 **Evidence:** `audit_python_view_border_lifecycle_over_real_ipc` (canary
-`expect_edited_dxf: "wrong kind"`).
+`expect_edited_dxf: "wrong kind"`) and `audit_python_section_symbol_lifecycle_over_real_ipc`
+(canary `wrong kind Unknown`).
 
 **Suggested fix:** add the two arms to the ENTITIES dispatch, calling
 `read_view_border_dxf` and `read_section_symbol_dxf`.

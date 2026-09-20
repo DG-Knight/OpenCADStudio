@@ -41,7 +41,8 @@
     "Solid3D",
     "Body",
     "Region",
-    "Surface"
+    "Surface",
+    "SectionSymbol"
   ],
   "manual_kinds": [
     "Dimension"
@@ -923,6 +924,47 @@
           "read_only": true
         },
         "history_handle": {
+          "read_only": true
+        }
+      }
+    },
+    "SectionSymbol": {
+      "fields": {
+        "points": {
+          "required": true
+        },
+        "view_symbol_version": {
+          "read_only": true
+        },
+        "raw_view_symbol_70": {
+          "read_only": true
+        },
+        "version": {
+          "read_only": true
+        },
+        "raw_point_count_90": {
+          "read_only": true
+        },
+        "raw_flags_90": {
+          "read_only": true,
+          "_comment": "Semantics unknown in cadcodec; preserved as read, 0 for a new symbol."
+        },
+        "raw_point_record_count": {
+          "read_only": true
+        },
+        "end_a": {
+          "read_only": true
+        },
+        "end_b": {
+          "read_only": true
+        },
+        "tick_a": {
+          "read_only": true
+        },
+        "tick_b": {
+          "read_only": true
+        },
+        "label": {
           "read_only": true
         }
       }

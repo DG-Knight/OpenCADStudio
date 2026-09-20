@@ -507,6 +507,13 @@
       "layer",
       "u_isolines",
       "v_isolines"
+    ],
+    "SectionSymbol": [
+      "layer",
+      "symbol_scale",
+      "points",
+      "style_handle",
+      "view_rep_handle"
     ]
   },
   "readable": {
@@ -638,6 +645,19 @@
       "modeler_format_version",
       "point_of_reference",
       "history_handle"
+    ],
+    "SectionSymbol": [
+      "view_symbol_version",
+      "raw_view_symbol_70",
+      "version",
+      "raw_point_count_90",
+      "raw_flags_90",
+      "raw_point_record_count",
+      "end_a",
+      "end_b",
+      "tick_a",
+      "tick_b",
+      "label"
     ]
   },
   "aliases": {

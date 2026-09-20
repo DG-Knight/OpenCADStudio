@@ -158,6 +158,19 @@ impl<'a> HostSession<'a> {
         if let EntityType::Dimension(dimension) = entity {
             crate::entities::dimension::normalize_scripted_dimension(dimension);
         }
+        if let EntityType::SectionSymbol(symbol) = entity {
+            // `points` is the canonical geometry: the point counts follow it
+            // (they equal the point count in every verified export) and the
+            // end, tick and label projections are refreshed from it. A symbol
+            // whose points did not change is left exactly as it was read.
+            let unchanged = matches!(old, Some(EntityType::SectionSymbol(previous)) if previous.points == symbol.points);
+            if !unchanged {
+                let count = i32::try_from(symbol.points.len()).unwrap_or(i32::MAX);
+                symbol.raw_point_count_90 = count;
+                symbol.raw_point_record_count = count;
+                symbol.sync_display_fields();
+            }
+        }
         if let EntityType::Spline(spline) = entity {
             // The DXF writer emits weights only for a rational spline, so the
             // flag must follow the weights a script sets.
@@ -5559,6 +5572,104 @@ mod tests {
         let _ = std::fs::remove_file(&script);
         let message = host.app.command_line.history.last().unwrap().text.clone();
         assert!(message.contains("Coincident") && message.contains("nothing was changed"), "{message}");
+    }
+
+    #[test]
+    fn audit_python_section_symbol_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('SectionSymbol', symbol_scale=1.0, points=[\n",
+                "    {'point': P(0.0, 0.0, 0.0), 'label': 'A', 'label_offset': P(0.0, 2.0, 0.0)},\n",
+                "    {'point': P(40.0, 0.0, 0.0), 'label': 'A', 'label_offset': P(0.0, 2.0, 0.0)}])\n"),
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.points = [{'point': P(0.0, 0.0, 0.0), 'label': 'B', 'label_offset': P(0.0, 3.0, 0.0)},\n",
+                "        {'point': P(20.0, 10.0, 0.0), 'bulge': 0.0}, {'point': P(40.0, 0.0, 0.0), 'label': 'B', 'label_offset': P(0.0, -3.0, 0.0)}]\n",
+                "    e.symbol_scale = 2.0\n",
+                "doc.selection = [e]\n"),
+            rejects: &[
+                ("'points':[{'point':{'x':0.0,'y':0.0,'z':0.0}}]", "at least 2 points"),
+                ("'points':[{'point':{'x':float('nan'),'y':0.0,'z':0.0}},{'point':{'x':1.0,'y':0.0,'z':0.0}}]", "finite"),
+                ("'symbol_scale':0.0", "greater than zero"),
+                ("'style_handle':999999", "not an existing SectionViewStyle"),
+                ("'view_rep_handle':999999", "not an existing ViewRep"),
+                ("'raw_point_count_90':9", "read-only"),
+                ("'end_a':[1.0, 1.0]", "read-only"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::SectionSymbol(_)),
+            digest: |entity| match entity {
+                EntityType::SectionSymbol(v) => format!("n{} ends {:.1},{:.1}->{:.1},{:.1} label{} tick{:.1}/{:.1} scale{:.1} counts{}/{}",
+                    v.points.len(), v.end_a[0], v.end_a[1], v.end_b[0], v.end_b[1], v.label, v.tick_a, v.tick_b,
+                    v.symbol_scale, v.raw_point_count_90, v.raw_point_record_count),
+                other => format!("wrong kind {}", format!("{other:?}").split('(').next().unwrap()),
+            },
+            reedit: |entity| if let EntityType::SectionSymbol(v) = entity { v.symbol_scale = 3.0; },
+            expect_created: "n2 ends 0.0,0.0->40.0,0.0 labelA tick2.0/2.0 scale1.0 counts2/2",
+            expect_edited: "n3 ends 0.0,0.0->40.0,0.0 labelB tick3.0/-3.0 scale2.0 counts3/3",
+            expect_reedited: "n3 ends 0.0,0.0->40.0,0.0 labelB tick3.0/-3.0 scale3.0 counts3/3",
+            // BLOCKER (cadcodec, see docs/cadcodec-reader-gaps.md issue 5): the
+            // DXF reader dispatches SECTIONLINE only inside blocks, so a symbol
+            // in the entity list reopens as an unknown entity.
+            expect_edited_dxf: "wrong kind Unknown",
+            expect_reedited_dxf: "wrong kind Unknown",
+            expect_edited_dwg: "",
+            expect_reedited_dwg: "",
+        });
+    }
+
+    #[test]
+    fn audit_python_section_symbol_references_over_real_ipc() {
+        use acadrust::objects::{ClassObject, ClassObjectData, ObjectType};
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let mut object = |host: &mut HostSession<'_>, data: ClassObjectData| {
+            let handle = host.document_mut().allocate_handle();
+            let mut class_object = ClassObject::new(data);
+            class_object.handle = handle;
+            host.document_mut().objects.insert(handle, ObjectType::ClassObject(class_object));
+            handle
+        };
+        let style = object(&mut host, ClassObjectData::SectionViewStyle(Default::default()));
+        let view_rep = object(&mut host, ClassObjectData::ViewRep(Default::default()));
+        let scale = host.document_mut().allocate_handle();
+        let mut scale_object = acadrust::objects::Scale::new("1:1", 1.0, 1.0);
+        scale_object.handle = scale;
+        host.document_mut().objects.insert(scale, ObjectType::Scale(scale_object));
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let count = |host: &HostSession<'_>| host.document().entities().filter(|e| matches!(e, EntityType::SectionSymbol(_))).count();
+        let create = |extra: &str| format!(
+            "PY_EVAL ocs.active_document.create_entity('SectionSymbol', points=[{{'point': {{'x': 0.0, 'y': 0.0, 'z': 0.0}}}}, {{'point': {{'x': 10.0, 'y': 0.0, 'z': 0.0}}}}]{extra}).handle");
+        // A symbol may reference the drawing's own style and view representation.
+        dispatch(&mut host, &create(&format!(", style_handle={}, view_rep_handle={}", style.value(), view_rep.value())));
+        assert_eq!(count(&host), 1, "{}", last(&host));
+        let Some(EntityType::SectionSymbol(symbol)) = host.document().entities().find(|e| matches!(e, EntityType::SectionSymbol(_))) else { unreachable!() };
+        assert_eq!((symbol.style_handle, symbol.view_rep_handle), (style, view_rep));
+        // A standalone symbol needs neither.
+        dispatch(&mut host, &create(""));
+        assert_eq!(count(&host), 2, "{}", last(&host));
+        // Wrong object kinds are refused: a style slot cannot hold a view rep, a
+        // scale object is neither, and a swapped pair fails.
+        for (extra, message) in [
+            (format!(", style_handle={}", view_rep.value()), "not an existing SectionViewStyle"),
+            (format!(", style_handle={}", scale.value()), "not an existing SectionViewStyle"),
+            (format!(", view_rep_handle={}", style.value()), "not an existing ViewRep"),
+            (", view_rep_handle=424242".to_string(), "not an existing ViewRep"),
+        ] {
+            dispatch(&mut host, &create(&extra));
+            assert_eq!(count(&host), 2, "{extra}");
+            assert!(last(&host).contains(message), "{extra}: {}", last(&host));
+        }
     }
 
     #[test]

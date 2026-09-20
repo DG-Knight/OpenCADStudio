@@ -1263,6 +1263,33 @@ fn validate_surface(
     Ok(())
 }
 
+/// SectionSymbol: the cut mark drawn on a Model-Documentation view. `points`
+/// is the canonical geometry; the counts and the end/tick/label projections are
+/// derived by the host, so only the inputs are validated.
+#[cfg(feature = "host")]
+fn validate_section_symbol(
+    old: Option<&crate::host::acadrust::entities::SectionSymbol>,
+    new: &crate::host::acadrust::entities::SectionSymbol,
+) -> Result<(), String> {
+    if old.is_some_and(|old| old.points == new.points && old.symbol_scale.to_bits() == new.symbol_scale.to_bits()) {
+        return Ok(());
+    }
+    if !new.symbol_scale.is_finite() || new.symbol_scale <= 0.0 {
+        return Err("SectionSymbol.symbol_scale must be finite and greater than zero".into());
+    }
+    if new.points.len() < 2 {
+        return Err("SectionSymbol.points requires at least 2 points".into());
+    }
+    for (index, point) in new.points.iter().enumerate() {
+        finite_vector(&format!("SectionSymbol.points[{index}].point"), &point.point)?;
+        finite_vector(&format!("SectionSymbol.points[{index}].label_offset"), &point.label_offset)?;
+        if !point.bulge.is_finite() {
+            return Err(format!("SectionSymbol.points[{index}].bulge must be finite"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -1390,6 +1417,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         }
         EntityType::Ole2Frame(value) => validate_ole_frame(None, value)?,
         EntityType::Surface(value) => validate_surface(None, value)?,
+        EntityType::SectionSymbol(value) => validate_section_symbol(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1765,6 +1793,7 @@ pub fn validate_entity_mutation(
             }
         }
         (EntityType::Surface(old), EntityType::Surface(new)) => validate_surface(Some(old), new)?,
+        (EntityType::SectionSymbol(old), EntityType::SectionSymbol(new)) => validate_section_symbol(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -2072,6 +2101,28 @@ pub fn validate_canvas_entity_references(
                         }
                     }
                 }
+            }
+        }
+    }
+    if let EntityType::SectionSymbol(value) = entity {
+        use crate::host::acadrust::objects::{ClassObjectData, ObjectType};
+        for (name, handle, wanted) in [
+            ("style", value.style_handle, "SectionViewStyle"),
+            ("view representation", value.view_rep_handle, "ViewRep"),
+        ] {
+            if handle.is_null() {
+                continue;
+            }
+            let matches = match document.objects.get(&handle) {
+                Some(ObjectType::ClassObject(object)) => match (&object.data, wanted) {
+                    (ClassObjectData::SectionViewStyle(_), "SectionViewStyle") => true,
+                    (ClassObjectData::ViewRep(_), "ViewRep") => true,
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !matches {
+                return Err(format!("SectionSymbol {name} {handle:?} is not an existing {wanted} object"));
             }
         }
     }
@@ -2570,6 +2621,7 @@ mod tests {
                         | "Body"
                         | "Region"
                         | "Surface"
+                        | "SectionSymbol"
                 )
             {
                 assert!(
@@ -2861,6 +2913,10 @@ mod tests {
                 "Ole2Frame.is_paper_space".to_owned(),
                 "Surface.u_isolines".to_owned(),
                 "Surface.v_isolines".to_owned(),
+                "SectionSymbol.symbol_scale".to_owned(),
+                "SectionSymbol.points".to_owned(),
+                "SectionSymbol.style_handle".to_owned(),
+                "SectionSymbol.view_rep_handle".to_owned(),
                 "Underlay.underlay_type".to_owned(),
                 "Underlay.definition_handle".to_owned(),
                 "Underlay.insertion_point".to_owned(),
