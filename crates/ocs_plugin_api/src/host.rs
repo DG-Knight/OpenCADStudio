@@ -60,6 +60,33 @@ pub enum LogLevel {
     Error,
 }
 
+/// A solid primitive the host can build with its geometry kernel. Lengths are
+/// in drawing units; `center`/`origin` are world coordinates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SolidPrimitive {
+    /// Axis-aligned box from its center and full extents.
+    Box { center: [f64; 3], size: [f64; 3] },
+    /// Right triangular prism from its minimum corner and extents.
+    Wedge { origin: [f64; 3], size: [f64; 3] },
+    /// Cylinder standing on the plane through `center`.
+    Cylinder { center: [f64; 3], radius: f64, height: f64 },
+    Sphere { center: [f64; 3], radius: f64 },
+    Torus { center: [f64; 3], major: f64, minor: f64 },
+    /// Regular pyramid with `sides` base edges.
+    Pyramid { center: [f64; 3], radius: f64, height: f64, sides: u32 },
+}
+
+/// A kernel operation on ACIS-backed solids (API v7, additive). The host owns
+/// the geometry: a script never sees or rewrites the payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SolidOperation {
+    /// Build a new solid on `layer` (layer `0` when `None`).
+    Create { primitive: SolidPrimitive, layer: Option<String> },
+    /// Apply a rigid transform, given as a column-major 4x4 matrix, to an
+    /// existing solid. Scaling and shear are refused.
+    Transform { handle: Handle, matrix: [f64; 16] },
+}
+
 /// Value of a host-managed drafting or document setting exposed to plugins.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HostSettingValue {
@@ -619,6 +646,13 @@ pub trait HostApi {
     /// Missing or duplicate handles reject the request (API v7).
     fn set_selection(&mut self, _handles: &[Handle]) -> Result<(), String> {
         Err("selection writes are not supported by this host".to_owned())
+    }
+
+    /// Run a kernel-backed solid operation and return the created or updated
+    /// entity's handle. Refused, without any change, when the kernel cannot
+    /// perform it losslessly (API v7, additive).
+    fn solid_operation(&mut self, _operation: SolidOperation) -> Result<Handle, String> {
+        Err("solid operations are not supported by this host".to_owned())
     }
 }
 

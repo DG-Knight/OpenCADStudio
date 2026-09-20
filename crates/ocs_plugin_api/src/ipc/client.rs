@@ -470,6 +470,18 @@ impl HostApi for PluginHostApi {
         }
     }
 
+    fn solid_operation(&mut self, operation: crate::host::SolidOperation) -> Result<Handle, String> {
+        match self.client.request(PluginRequest::SolidOperation { operation }) {
+            Ok(PluginResponse::SolidResult(result)) => {
+                if result.is_ok() { self.document_cache = OnceCell::new(); }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected solid operation response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn set_selection(&mut self, handles: &[Handle]) -> Result<(), String> {
         match self.client.request(PluginRequest::SetSelection { handles: handles.to_vec() }) {
             Ok(PluginResponse::SelectionResult(result)) => result,

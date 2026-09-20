@@ -84,10 +84,65 @@ class _Transaction:
         return False
 
 
+class _Solids:
+    """Kernel-backed solid creation and rigid moves.
+
+    The host builds and edits the geometry; a script never sees the ACIS
+    payload. Every call is its own operation in the script's undo group and
+    fails, leaving the drawing unchanged, when the kernel cannot do it.
+    """
+
+    def __init__(self, document):
+        self._document = document
+
+    def _create(self, primitive, values, layer):
+        handle = ocs.solid_create(primitive, [float(v) for v in values], layer)
+        return self._document.entities[handle]
+
+    def box(self, center=(0, 0, 0), size=(1, 1, 1), layer=None):
+        return self._create("box", tuple(center) + tuple(size), layer)
+
+    def wedge(self, origin=(0, 0, 0), size=(1, 1, 1), layer=None):
+        return self._create("wedge", tuple(origin) + tuple(size), layer)
+
+    def cylinder(self, center=(0, 0, 0), radius=1, height=1, layer=None):
+        return self._create("cylinder", tuple(center) + (radius, height), layer)
+
+    def sphere(self, center=(0, 0, 0), radius=1, layer=None):
+        return self._create("sphere", tuple(center) + (radius,), layer)
+
+    def torus(self, center=(0, 0, 0), major=2, minor=0.5, layer=None):
+        return self._create("torus", tuple(center) + (major, minor), layer)
+
+    def pyramid(self, center=(0, 0, 0), radius=1, height=1, sides=4, layer=None):
+        return self._create("pyramid", tuple(center) + (radius, height, sides), layer)
+
+    def transform(self, entity, matrix):
+        """Apply a column-major 4x4 rigid transform (16 numbers) in place."""
+        handle = entity.handle if isinstance(entity, _Entity) else int(entity)
+        ocs.solid_transform(handle, [float(v) for v in matrix])
+        return self._document.entities[handle]
+
+    def translate(self, entity, offset):
+        dx, dy, dz = (float(v) for v in offset)
+        return self.transform(entity, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, dx, dy, dz, 1])
+
+    def rotate(self, entity, axis, angle, about=(0, 0, 0)):
+        """Turn about the world axis 'x', 'y' or 'z' through `about`."""
+        index = {"x": 0, "y": 1, "z": 2}[axis]
+        return self.transform(entity, ocs.rotation_matrix(index, float(angle), [float(v) for v in about]))
+
+    def mirror(self, entity, axis, about=(0, 0, 0)):
+        """Reflect across the plane normal to the world axis through `about`."""
+        index = {"x": 0, "y": 1, "z": 2}[axis]
+        return self.transform(entity, ocs.mirror_matrix(index, [float(v) for v in about]))
+
+
 class _Document:
     def __init__(self):
         self._pending = None
         self.entities = _Entities(self)
+        self.solids = _Solids(self)
 
     def transaction(self, label):
         return _Transaction(self, label)

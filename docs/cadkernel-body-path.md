@@ -135,3 +135,5 @@ is refused with a clear message instead of being rewritten.
 4. **Surface** (plane first).
 
 Phase 1 alone would move Solid3D from blocked to complete-in-OCS.
+
+**Status (2026-09-20): phase 1 is done.** `HostApi::solid_operation` (create primitive and rigid transform), the `doc.solids` Python API and `audit_python_solid3d_lifecycle_over_real_ipc` are in; Solid3D is complete, Body moves through the same channel. Design B was implemented as recommended. Booleans, Region creation and Surface remain.

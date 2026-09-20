@@ -530,6 +530,151 @@ impl<'a> HostSession<'a> {
         }
     }
 
+    /// Kernel-backed solid create or transform. Every result is verified by
+    /// `solid_to_sat` (the exported payload must lift back with no loss) and an
+    /// existing payload is only transformed when it lifts losslessly, so a
+    /// failure never changes the document.
+    pub fn solid_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::SolidOperation,
+    ) -> Result<Handle, String> {
+        use crate::scene::model::solid_model as model;
+        use ocs_plugin_api::host::{SolidOperation, SolidPrimitive};
+        let positive = |name: &str, value: f64| {
+            if value.is_finite() && value > 0.0 {
+                Ok(())
+            } else {
+                Err(format!("{name} must be finite and greater than zero"))
+            }
+        };
+        let finite3 = |name: &str, value: [f64; 3]| {
+            if value.iter().all(|v| v.is_finite()) {
+                Ok(())
+            } else {
+                Err(format!("{name} must be finite"))
+            }
+        };
+        match operation {
+            SolidOperation::Create { primitive, layer } => {
+                let body = match primitive {
+                    SolidPrimitive::Box { center, size } => {
+                        finite3("box center", center)?;
+                        for (name, v) in [("length", size[0]), ("width", size[1]), ("height", size[2])] {
+                            positive(&format!("box {name}"), v)?;
+                        }
+                        model::box_solid(center, size[0], size[1], size[2])
+                    }
+                    SolidPrimitive::Wedge { origin, size } => {
+                        finite3("wedge origin", origin)?;
+                        for (name, v) in [("length", size[0]), ("width", size[1]), ("height", size[2])] {
+                            positive(&format!("wedge {name}"), v)?;
+                        }
+                        model::wedge_solid(origin, size[0], size[1], size[2])
+                    }
+                    SolidPrimitive::Cylinder { center, radius, height } => {
+                        finite3("cylinder center", center)?;
+                        positive("cylinder radius", radius)?;
+                        positive("cylinder height", height)?;
+                        model::cylinder_solid(center, radius, height)
+                    }
+                    SolidPrimitive::Sphere { center, radius } => {
+                        finite3("sphere center", center)?;
+                        positive("sphere radius", radius)?;
+                        model::sphere_solid(center, radius)
+                    }
+                    SolidPrimitive::Torus { center, major, minor } => {
+                        finite3("torus center", center)?;
+                        positive("torus major radius", major)?;
+                        positive("torus minor radius", minor)?;
+                        if minor >= major {
+                            return Err("torus minor radius must be smaller than the major radius".into());
+                        }
+                        model::torus_solid(center, major, minor)
+                    }
+                    SolidPrimitive::Pyramid { center, radius, height, sides } => {
+                        finite3("pyramid center", center)?;
+                        positive("pyramid radius", radius)?;
+                        positive("pyramid height", height)?;
+                        if !(3..=1024).contains(&sides) {
+                            return Err("pyramid sides must be between 3 and 1024".into());
+                        }
+                        model::pyramid_solid(center, radius, height, sides as usize)
+                    }
+                }
+                .ok_or("the geometry kernel refused these dimensions")?;
+                let sat = crate::scene::convert::acis_export::solid_to_sat(&body)
+                    .ok_or("the solid could not be exported losslessly")?;
+                let mut solid = acadrust::entities::Solid3D::new();
+                solid.wires = model::edge_wires(&body);
+                solid.set_sat_document(&sat);
+                if let Some(layer) = layer {
+                    if layer.trim().is_empty() {
+                        return Err("layer name is empty".into());
+                    }
+                    solid.common.layer = layer;
+                }
+                self.push_undo("Create solid");
+                let handle = self.add_entity(EntityType::Solid3D(solid));
+                if handle.is_null() {
+                    return Err("the solid could not be added".into());
+                }
+                Ok(handle)
+            }
+            SolidOperation::Transform { handle, matrix } => {
+                if matrix.iter().any(|v| !v.is_finite()) {
+                    return Err("transform matrix must be finite".into());
+                }
+                let column = |i: usize| [matrix[i], matrix[i + 1], matrix[i + 2]];
+                let (x, y, z) = (column(0), column(4), column(8));
+                let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+                let rigid = [x, y, z].iter().all(|c| (dot(*c, *c) - 1.0).abs() < 1e-6)
+                    && dot(x, y).abs() < 1e-6
+                    && dot(x, z).abs() < 1e-6
+                    && dot(y, z).abs() < 1e-6
+                    && matrix[3].abs() < 1e-9
+                    && matrix[7].abs() < 1e-9
+                    && matrix[11].abs() < 1e-9
+                    && (matrix[15] - 1.0).abs() < 1e-9;
+                if !rigid {
+                    return Err("only rigid moves and mirrors are supported; scaling and shear are not".into());
+                }
+                let mut entity = self
+                    .document()
+                    .get_entity(handle)
+                    .cloned()
+                    .ok_or_else(|| format!("entity {handle:?} does not exist"))?;
+                if self.app.tabs[self.tab].scene.is_layer_locked(handle) {
+                    return Err(format!("entity {handle:?} is on a locked layer"));
+                }
+                macro_rules! retarget {
+                    ($value:expr) => {{
+                        let body = crate::scene::convert::solid3d_tess::kernel_acis_body(&$value.acis_data)
+                            .ok_or("this body's payload cannot be lifted losslessly, so it is left untouched")?;
+                        let moved = model::by_matrix(&body, matrix)
+                            .ok_or("the geometry kernel refused this transform")?;
+                        let sat = crate::scene::convert::acis_export::solid_to_sat(&moved)
+                            .ok_or("the moved body could not be exported losslessly")?;
+                        $value.wires = model::edge_wires(&moved);
+                        $value.silhouettes.clear();
+                        $value.history_handle = None;
+                        $value.set_sat_document(&sat);
+                    }};
+                }
+                match &mut entity {
+                    EntityType::Solid3D(value) => retarget!(value),
+                    EntityType::Body(value) => retarget!(value),
+                    EntityType::Region(value) => retarget!(value),
+                    _ => return Err("transform applies to Solid3D, Body and Region entities".into()),
+                }
+                self.push_undo("Transform solid");
+                if !self.update_entity(entity) {
+                    return Err(format!("entity {handle:?} could not be updated"));
+                }
+                Ok(handle)
+            }
+        }
+    }
+
     pub fn push_undo(&mut self, label: &str) {
         self.app.push_undo_snapshot(self.tab, label);
     }
@@ -621,6 +766,12 @@ impl HostApi for HostSession<'_> {
     }
     fn set_selection(&mut self, handles: &[Handle]) -> Result<(), String> {
         self.set_selection(handles)
+    }
+    fn solid_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::SolidOperation,
+    ) -> Result<Handle, String> {
+        self.solid_operation(operation)
     }
     fn remove_entity(&mut self, handle: Handle) -> bool {
         self.remove_entity(handle)
@@ -4556,6 +4707,199 @@ mod tests {
         time("solid_to_sat(union)", &mut || format!("{}", crate::scene::convert::acis_export::solid_to_sat(&result).is_some()));
         time("edge_wires(union)", &mut || format!("{}", sm::edge_wires(&result).len()));
         time("volume(union)", &mut || format!("{:.1}", sm::volume(&result)));
+    }
+
+    #[test]
+    fn audit_python_solid3d_lifecycle_over_real_ipc() {
+        use crate::scene::convert::solid3d_tess::kernel_body;
+        use crate::scene::model::solid_model as sm;
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let solids = |host: &HostSession<'_>| -> Vec<Handle> {
+            let mut list: Vec<_> = host.document().entities().filter_map(|e| match e {
+                EntityType::Solid3D(s) => Some(s.common.handle), _ => None }).collect();
+            list.sort_by_key(|h| h.value());
+            list
+        };
+        let body_of = |host: &HostSession<'_>, handle: Handle| {
+            let Some(EntityType::Solid3D(solid)) = host.document().get_entity(handle) else { panic!("no solid {handle:?}") };
+            kernel_body(solid).expect("payload lifts losslessly")
+        };
+        let volume = |host: &HostSession<'_>, handle: Handle| sm::volume(&body_of(host, handle));
+        let extent = |host: &HostSession<'_>, handle: Handle| sm::extent(&body_of(host, handle)).unwrap();
+        let close = |a: f64, b: f64, tolerance: f64| (a - b).abs() <= tolerance * b.abs().max(1.0);
+
+        // C: every primitive, checked against its analytic volume.
+        let script = std::env::temp_dir().join(format!("ocs_solid_create_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "s = ocs.active_document.solids\n",
+            "s.box(center=(0, 0, 0), size=(10, 6, 4))\n",
+            "s.cylinder(center=(20, 0, 0), radius=2, height=5)\n",
+            "s.sphere(center=(40, 0, 0), radius=3)\n",
+            "s.torus(center=(60, 0, 0), major=5, minor=1)\n",
+            "s.wedge(origin=(80, 0, 0), size=(4, 3, 2))\n",
+            "s.pyramid(center=(100, 0, 0), radius=3, height=4, sides=5)\n",
+            "s.box(center=(0, 20, 0), size=(2, 2, 2), layer='SOLIDS')\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let list = solids(&host);
+        assert_eq!(list.len(), 7, "{}", last(&host));
+        let pi = std::f64::consts::PI;
+        let five_gon = 0.5 * 5.0 * 3.0f64.powi(2) * (2.0 * pi / 5.0).sin();
+        for (index, expected, tolerance) in [
+            (0, 240.0, 1e-9), (1, pi * 4.0 * 5.0, 0.02), (2, 4.0 / 3.0 * pi * 27.0, 0.02),
+            (3, 2.0 * pi * pi * 5.0 * 1.0, 0.02), (4, 12.0, 1e-9), (5, five_gon * 4.0 / 3.0, 0.02), (6, 8.0, 1e-9),
+        ] {
+            let actual = volume(&host, list[index]);
+            assert!(close(actual, expected, tolerance), "solid {index}: volume {actual}, expected {expected}");
+        }
+        let Some(EntityType::Solid3D(first)) = host.document().get_entity(list[0]) else { unreachable!() };
+        assert_eq!((first.wires.len(), first.common.layer.as_str()), (12, "0"));
+        assert!(matches!(host.document().get_entity(list[6]), Some(EntityType::Solid3D(s)) if s.common.layer == "SOLIDS"));
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[list[0]]).is_empty(), "no canvas geometry");
+        let read = |host: &mut HostSession<'_>, expression: &str| {
+            dispatch(host, &format!("PY_EVAL {expression}"));
+            last(host)
+        };
+        assert!(read(&mut host, &format!("ocs.active_document.entities[{}].kind", list[0].value())).contains("Solid3D"));
+
+        // E: rigid moves keep the volume and move the extent exactly.
+        let box_handle = list[0];
+        let before = host.document().get_entity(box_handle).unwrap().clone();
+        let undo_before = host.app.tabs[0].history.undo_stack.len();
+        let (low, high) = extent(&host, box_handle);
+        assert!(close(low[0], -5.0, 1e-6) && close(high[2], 2.0, 1e-6), "{low:?} {high:?}");
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (5, 5, 5)).handle", box_handle.value()));
+        let (low, high) = extent(&host, box_handle);
+        assert!(close(low[0], 0.0, 1e-6) && close(high[1], 8.0, 1e-6) && close(high[2], 7.0, 1e-6), "{low:?} {high:?}");
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.rotate({}, 'z', 0.7853981633974483, (5, 5, 5)).handle", box_handle.value()));
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.mirror({}, 'x', (0, 0, 0)).handle", box_handle.value()));
+        assert!(close(volume(&host, box_handle), 240.0, 1e-9), "moves preserve volume");
+        let Some(EntityType::Solid3D(moved)) = host.document().get_entity(box_handle) else { unreachable!() };
+        assert_eq!((moved.wires.len(), moved.history_handle, moved.common.handle), (12, None, box_handle));
+        assert_eq!(moved.common.layer, "0");
+        assert_eq!(host.app.tabs[0].history.undo_stack.len() - undo_before, 3, "one undo step per move");
+
+        // V: refused operations change nothing and leave no undo step.
+        let snapshot = host.document().get_entity(box_handle).unwrap().clone();
+        let count_before = solids(&host).len();
+        let undo_now = host.app.tabs[0].history.undo_stack.len();
+        let empty_payload = acadrust::entities::Solid3D::new();
+        let unliftable = host.add_entity(EntityType::Solid3D(empty_payload.clone()));
+        let unliftable_before = host.document().get_entity(unliftable).unwrap().clone();
+        for (command, message) in [
+            ("ocs.active_document.solids.box(size=(0, 1, 1))".to_string(), "greater than zero"),
+            ("ocs.active_document.solids.box(center=(float('nan'), 0, 0))".to_string(), "must be finite"),
+            ("ocs.active_document.solids.torus(major=1, minor=2)".to_string(), "smaller than the major"),
+            ("ocs.active_document.solids.pyramid(sides=2)".to_string(), "between 3 and 1024"),
+            ("ocs.active_document.solids.sphere(radius=-1)".to_string(), "greater than zero"),
+            ("ocs.active_document.solids.box(layer='')".to_string(), "layer name is empty"),
+            ("ocs.solid_create('blob', [1.0], None)".to_string(), "unknown primitive"),
+            ("ocs.solid_create('box', [1.0], None)".to_string(), "takes 6 numbers"),
+            (format!("ocs.active_document.solids.transform({}, [2,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])", box_handle.value()), "rigid moves"),
+            (format!("ocs.active_document.solids.transform({}, [1]*16)", box_handle.value()), "rigid moves"),
+            (format!("ocs.active_document.solids.translate({}, (float('nan'), 0, 0))", box_handle.value()), "must be finite"),
+            (format!("ocs.active_document.solids.translate({}, (1, 0, 0))", unliftable.value()), "cannot be lifted losslessly"),
+            ("ocs.active_document.solids.translate(999999, (1, 0, 0))".to_string(), "does not exist"),
+        ] {
+            dispatch(&mut host, &format!("PY_EVAL {command}"));
+            assert!(last(&host).contains(message), "{command}: {}", last(&host));
+        }
+        assert_eq!(host.document().get_entity(box_handle), Some(&snapshot));
+        assert_eq!(host.document().get_entity(unliftable), Some(&unliftable_before));
+        assert_eq!(solids(&host).len(), count_before + 1, "only the fixture was added");
+        assert_eq!(host.app.tabs[0].history.undo_stack.len(), undo_now, "refusals record no undo step");
+        // Transforming a non-solid is refused.
+        let line = host.add_entity(EntityType::Line(acadrust::entities::Line::from_points(
+            acadrust::types::Vector3::ZERO, acadrust::types::Vector3::new(1.0, 0.0, 0.0))));
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (1, 0, 0))", line.value()));
+        assert!(last(&host).contains("outside the Python schema") || last(&host).contains("applies to Solid3D"), "{}", last(&host));
+
+        // W: both formats reopen the moved solid losslessly; the reopened
+        // payload can be moved again.
+        let moved_volume = volume(&host, box_handle);
+        let moved_extent = extent(&host, box_handle);
+        let dwg = crate::io::load_bytes("solid.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("solid.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            let Some(EntityType::Solid3D(back)) = document.get_entity(box_handle) else { panic!("{format} lost the solid") };
+            let body = kernel_body(back).unwrap_or_else(|| panic!("{format} payload does not lift"));
+            assert!(close(sm::volume(&body), moved_volume, 1e-6), "{format}");
+            let reopened_extent = sm::extent(&body).unwrap();
+            for axis in 0..3 {
+                assert!(close(reopened_extent.0[axis], moved_extent.0[axis], 1e-6) && close(reopened_extent.1[axis], moved_extent.1[axis], 1e-6), "{format} extent");
+            }
+            let again = host.add_entity(EntityType::Solid3D(back.clone()));
+            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
+            let (low, _) = extent(&host, again);
+            assert!(close(low[0], reopened_extent.0[0] + 100.0, 1e-6), "{format} re-edit");
+        }
+
+        // D and U: delete, then undo and redo restore the moved state.
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", box_handle.value()));
+        assert!(host.document().get_entity(box_handle).is_none());
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        // Steps after creation: 3 moves, 2 re-edits of reopened copies, 1 delete.
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(box_handle).is_some(), "undo restores the deleted solid");
+        app.undo_steps(5);
+        assert_eq!(app.tabs[0].scene.document.get_entity(box_handle), Some(&before), "undoing every move restores the original solid exactly");
+        app.redo_steps(6);
+        assert!(app.tabs[0].scene.document.get_entity(box_handle).is_none(), "redo replays the moves and the delete");
+    }
+
+    #[test]
+    fn audit_python_body_transform_over_real_ipc() {
+        use crate::scene::model::solid_model as sm;
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        // A Body entity carrying a kernel box; scripts cannot create one.
+        let boxed = sm::box_solid([0.0; 3], 4.0, 4.0, 4.0).unwrap();
+        let mut body = acadrust::entities::Body::new();
+        body.set_sat_document(&crate::scene::convert::acis_export::solid_to_sat(&boxed).unwrap());
+        body.wires = sm::edge_wires(&boxed);
+        let handle = host.add_entity(EntityType::Body(body));
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let extent = |host: &HostSession<'_>| {
+            let Some(EntityType::Body(b)) = host.document().get_entity(handle) else { panic!("no body") };
+            sm::extent(&crate::scene::convert::solid3d_tess::kernel_acis_body(&b.acis_data).unwrap()).unwrap()
+        };
+        assert!((extent(&host).0[0] + 2.0).abs() < 1e-6);
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", handle.value()));
+        assert!(host.app.command_line.history.last().unwrap().text.contains("Body"));
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (10, 0, 0)).handle", handle.value()));
+        assert!((extent(&host).0[0] - 8.0).abs() < 1e-6, "{:?}", extent(&host));
+        let bytes = acadrust::DwgWriter::write_to_vec(host.document()).unwrap();
+        let reopened = crate::io::load_bytes("body.dwg", bytes).unwrap();
+        let Some(EntityType::Body(back)) = reopened.get_entity(handle) else { panic!("DWG lost the body") };
+        let lifted = crate::scene::convert::solid3d_tess::kernel_acis_body(&back.acis_data).expect("DWG body lifts");
+        assert!((sm::volume(&lifted) - 64.0).abs() < 1e-6);
+        // Scripts cannot create a Body and get the explanatory message.
+        dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Body')");
+        assert!(host.app.command_line.history.last().unwrap().text.contains("use doc.solids"), "{}", host.app.command_line.history.last().unwrap().text);
     }
 
     #[test]

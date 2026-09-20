@@ -149,6 +149,8 @@ pub enum PluginRequest {
     /// V7: synchronous selection read/write for the dispatch tab.
     GetSelection,
     SetSelection { handles: Vec<Handle> },
+    /// V7 (additive): kernel-backed solid create or transform.
+    SolidOperation { operation: crate::host::SolidOperation },
 }
 
 /// Responses the host sends back for `PluginRequest`.
@@ -180,6 +182,7 @@ pub enum PluginResponse {
     EntityTransactionResult(Result<(), String>),
     Selection(Vec<Handle>),
     SelectionResult(Result<(), String>),
+    SolidResult(Result<Handle, String>),
 }
 
 /// Messages sent from the host to the plugin runner.

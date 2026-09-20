@@ -2532,6 +2532,9 @@ mod tests {
                         | "ViewBorder"
                         | "Light"
                         | "Ole2Frame"
+                        | "Solid3D"
+                        | "Body"
+                        | "Region"
                 )
             {
                 assert!(

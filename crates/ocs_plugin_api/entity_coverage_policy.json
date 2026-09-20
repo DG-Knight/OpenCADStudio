@@ -493,6 +493,15 @@
       "lower_right_corner",
       "lock_aspect",
       "is_paper_space"
+    ],
+    "Solid3D": [
+      "layer"
+    ],
+    "Body": [
+      "layer"
+    ],
+    "Region": [
+      "layer"
     ]
   },
   "readable": {
@@ -603,6 +612,21 @@
       "source_application",
       "ole_object_type",
       "dwg_mode"
+    ],
+    "Solid3D": [
+      "uid",
+      "point_of_reference",
+      "history_handle"
+    ],
+    "Body": [
+      "uid",
+      "point_of_reference",
+      "history_handle"
+    ],
+    "Region": [
+      "uid",
+      "point_of_reference",
+      "history_handle"
     ]
   },
   "aliases": {

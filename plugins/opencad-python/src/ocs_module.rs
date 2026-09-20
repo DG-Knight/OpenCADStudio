@@ -411,6 +411,114 @@ mod ocs {
         .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))
     }
 
+    /// Build a kernel solid. `values` are the primitive's numbers in a fixed
+    /// order (see `document_model.py`); the host validates and builds it.
+    #[pyfunction]
+    fn solid_create(
+        primitive: String,
+        values: Vec<f64>,
+        layer: Option<String>,
+        vm: &VirtualMachine,
+    ) -> PyResult<u64> {
+        use ocs_plugin_api::host::{SolidOperation, SolidPrimitive};
+        let expect = |count: usize| -> PyResult<()> {
+            if values.len() == count {
+                Ok(())
+            } else {
+                Err(vm.new_value_error(format!(
+                    "ocs.solid_create: {primitive} takes {count} numbers, got {}",
+                    values.len()
+                )))
+            }
+        };
+        let v3 = |i: usize| [values[i], values[i + 1], values[i + 2]];
+        let primitive = match primitive.as_str() {
+            "box" => { expect(6)?; SolidPrimitive::Box { center: v3(0), size: v3(3) } }
+            "wedge" => { expect(6)?; SolidPrimitive::Wedge { origin: v3(0), size: v3(3) } }
+            "cylinder" => { expect(5)?; SolidPrimitive::Cylinder { center: v3(0), radius: values[3], height: values[4] } }
+            "sphere" => { expect(4)?; SolidPrimitive::Sphere { center: v3(0), radius: values[3] } }
+            "torus" => { expect(5)?; SolidPrimitive::Torus { center: v3(0), major: values[3], minor: values[4] } }
+            "pyramid" => {
+                expect(6)?;
+                if values[5] < 0.0 || values[5].fract() != 0.0 || values[5] > f64::from(u32::MAX) {
+                    return Err(vm.new_value_error("ocs.solid_create: sides must be a whole number".to_owned()));
+                }
+                SolidPrimitive::Pyramid { center: v3(0), radius: values[3], height: values[4], sides: values[5] as u32 }
+            }
+            other => return Err(vm.new_value_error(format!("ocs.solid_create: unknown primitive {other:?}"))),
+        };
+        // The host records its own undo step once the operation validates, like
+        // an entity transaction, so a refused operation leaves no empty step.
+        let result = host_ctx::with_host(|host| {
+            host.solid_operation(SolidOperation::Create { primitive, layer })
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.solid_create: {error}")))
+    }
+
+    /// Apply a column-major 4x4 rigid transform to a solid, body or region.
+    #[pyfunction]
+    fn solid_transform(handle: u64, matrix: Vec<f64>, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::SolidOperation;
+        let matrix: [f64; 16] = matrix.try_into().map_err(|_| {
+            vm.new_value_error("ocs.solid_transform: the matrix needs 16 numbers".to_owned())
+        })?;
+        let result = host_ctx::with_host(|host| {
+            host.solid_operation(SolidOperation::Transform { handle: Handle::new(handle), matrix })
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.solid_transform: {error}")))
+    }
+
+    /// Column-major matrix that turns about a world axis (0=X, 1=Y, 2=Z)
+    /// through the point `about`. The sandbox has no `math` module.
+    #[pyfunction]
+    fn rotation_matrix(axis: usize, angle: f64, about: Vec<f64>, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        if axis > 2 || about.len() != 3 || !angle.is_finite() || about.iter().any(|v| !v.is_finite()) {
+            return Err(vm.new_value_error("ocs.rotation_matrix: axis 0-2, a finite angle and a 3-point".to_owned()));
+        }
+        let (sin, cos) = angle.sin_cos();
+        let (x, y, z) = match axis {
+            0 => ([1.0, 0.0, 0.0], [0.0, cos, sin], [0.0, -sin, cos]),
+            1 => ([cos, 0.0, -sin], [0.0, 1.0, 0.0], [sin, 0.0, cos]),
+            _ => ([cos, sin, 0.0], [-sin, cos, 0.0], [0.0, 0.0, 1.0]),
+        };
+        Ok(matrix_to_py(vm, frame_matrix(x, y, z, &about)))
+    }
+
+    /// Column-major matrix that reflects across the plane normal to a world
+    /// axis through the point `about`.
+    #[pyfunction]
+    fn mirror_matrix(axis: usize, about: Vec<f64>, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        if axis > 2 || about.len() != 3 || about.iter().any(|v| !v.is_finite()) {
+            return Err(vm.new_value_error("ocs.mirror_matrix: axis 0-2 and a finite 3-point".to_owned()));
+        }
+        let mut columns = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        columns[axis][axis] = -1.0;
+        let [x, y, z] = columns;
+        Ok(matrix_to_py(vm, frame_matrix(x, y, z, &about)))
+    }
+
+    fn matrix_to_py(vm: &VirtualMachine, matrix: Vec<f64>) -> PyObjectRef {
+        vm.ctx.new_list(matrix.into_iter().map(|value| vm.new_pyobj(value)).collect()).into()
+    }
+
+    /// A transform about `about` has origin `about - M * about`.
+    fn frame_matrix(x: [f64; 3], y: [f64; 3], z: [f64; 3], about: &[f64]) -> Vec<f64> {
+        let mut origin = [about[0], about[1], about[2]];
+        for axis in 0..3 {
+            origin[axis] -= x[axis] * about[0] + y[axis] * about[1] + z[axis] * about[2];
+        }
+        vec![
+            x[0], x[1], x[2], 0.0, y[0], y[1], y[2], 0.0, z[0], z[1], z[2], 0.0,
+            origin[0], origin[1], origin[2], 1.0,
+        ]
+    }
+
     /// Delete one entity in the script's shared undo group.
     #[pyfunction]
     fn remove_entity(handle: u64, vm: &VirtualMachine) -> PyResult<()> {
@@ -4780,7 +4888,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(emitted.len(), 38);
+        assert_eq!(emitted.len(), 41);
     }
 
     #[cfg(feature = "experimental-host-model")]

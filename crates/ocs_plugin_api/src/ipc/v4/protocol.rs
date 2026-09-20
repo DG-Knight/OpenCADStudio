@@ -106,6 +106,27 @@ mod tests {
     }
 
     #[test]
+    fn solid_operation_request_and_response_roundtrip() {
+        use crate::host::{SolidOperation, SolidPrimitive};
+        for operation in [
+            SolidOperation::Create {
+                primitive: SolidPrimitive::Pyramid { center: [1.0, 2.0, 3.0], radius: 4.0, height: 5.0, sides: 6 },
+                layer: Some("SOLIDS".into()),
+            },
+            SolidOperation::Transform { handle: acadrust::Handle::new(7), matrix: [1.0; 16] },
+        ] {
+            let bytes = bincode::serialize(&PluginRequest::SolidOperation { operation: operation.clone() }).unwrap();
+            assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
+                PluginRequest::SolidOperation { operation: decoded } if decoded == operation));
+        }
+        for result in [Ok(acadrust::Handle::new(9)), Err("refused".to_owned())] {
+            let bytes = bincode::serialize(&PluginResponse::SolidResult(result.clone())).unwrap();
+            assert!(matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+                PluginResponse::SolidResult(decoded) if decoded == result));
+        }
+    }
+
+    #[test]
     fn selection_request_and_response_roundtrip() {
         let request = PluginRequest::SetSelection { handles: vec![acadrust::Handle::new(9)] };
         let bytes = bincode::serialize(&request).unwrap();
