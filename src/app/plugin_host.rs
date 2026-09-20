@@ -3195,6 +3195,11 @@ mod tests {
 
         let tmp = std::env::temp_dir().to_string_lossy().into_owned();
         let mut create_script = case.create.replace("TMPDIR", &tmp);
+        let paper = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle.value());
+        let layer0 = host.document().layers.iter().find(|l| l.name == "0").map(|l| l.handle.value());
+        create_script = create_script
+            .replace("PAPERSPACE", &paper.unwrap_or_default().to_string())
+            .replace("LAYER0", &layer0.unwrap_or_default().to_string());
         if create_script.contains("DEFHANDLE") {
             // Scripts reference an underlay definition that the drawing owns.
             let handle = host.document_mut().allocate_handle();
@@ -3209,14 +3214,21 @@ mod tests {
             .unwrap_or_else(|| panic!("Python did not create the mesh: {}", last_output(&host)));
         let created = host.document().get_entity(handle).unwrap().clone();
         assert_eq!((case.digest)(&created), case.expect_created);
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+        // Viewports draw only on their paper-space layout tab, which this
+        // driver does not activate, so they have no model-tab wire oracle.
+        let has_wires = !matches!(created, EntityType::Viewport(_));
+        if has_wires {
+            assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+        }
 
-        run_script(&mut host, "edit", &case.edit.replace("HANDLE", &handle.value().to_string()).replace("TMPDIR", &tmp));
+        run_script(&mut host, "edit", &case.edit.replace("HANDLE", &handle.value().to_string()).replace("TMPDIR", &tmp).replace("LAYER0", &layer0.unwrap_or_default().to_string()));
         let expected = host.document().get_entity(handle).unwrap().clone();
         assert_eq!((case.digest)(&expected), case.expect_edited, "edit failed: {}", last_output(&host));
         assert_eq!(expected.common(), created.common());
         assert_eq!(host.selection(), vec![handle]);
-        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty());
+        if has_wires {
+            assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty());
+        }
 
         for (patch, message) in case.rejects {
             dispatch(&mut host, &format!(
@@ -3583,6 +3595,45 @@ mod tests {
             // it unconverted, so 0.5 rad reopens as 28.6 and a second save-reopen compounds it to 1641.4.
             expect_edited_dxf: "Pdf at8.0,9.0 s3.0 r28.6 c70 f20 clip2",
             expect_reedited_dxf: "Pdf at8.0,9.0 s4.0 r1641.4 c70 f20 clip2",
+        });
+    }
+
+    #[test]
+    fn staged_python_viewport_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('Viewport', owner_handle=PAPERSPACE, center=P(100.0, 100.0, 0.0),\n",
+                "    width=80.0, height=60.0, view_center=P(0.0, 0.0, 0.0), view_height=50.0)\n"),
+            edit: concat!(
+                "vp = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit viewport'):\n",
+                "    vp.center = (120.0, 110.0, 0.0)\n",
+                "    vp.width = 90.0\n",
+                "    vp.view_height = 75.0\n",
+                "    vp.twist_angle = 0.25\n",
+                "    vp.frozen_layers = [LAYER0]\n",
+                "doc.selection = [vp]\n"),
+            rejects: &[
+                ("'width':0.0", "greater than zero"),
+                ("'view_height':float('nan')", "greater than zero"),
+                ("'view_direction':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
+                ("'frozen_layers':[999999]", "does not exist"),
+                ("'circle_sides':2", "at least 3"),
+                ("'id':7", "read-only"),
+                ("'clip_boundary_handle':5", "read-only"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::Viewport(_)),
+            digest: |entity| match entity {
+                EntityType::Viewport(v) => format!("at{:.1},{:.1} {:.1}x{:.1} vh{:.1} tw{:.2} frozen{}", v.center.x, v.center.y,
+                    v.width, v.height, v.view_height, v.twist_angle, v.frozen_layers.len()),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::Viewport(v) = entity { v.width = 95.0; },
+            expect_created: "at100.0,100.0 80.0x60.0 vh50.0 tw0.00 frozen0",
+            expect_edited: "at120.0,110.0 90.0x60.0 vh75.0 tw0.25 frozen1",
+            expect_reedited: "at120.0,110.0 95.0x60.0 vh75.0 tw0.25 frozen1",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
         });
     }
 

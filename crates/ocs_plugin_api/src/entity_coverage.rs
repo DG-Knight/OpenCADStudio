@@ -919,6 +919,36 @@ fn validate_underlay(
     Ok(())
 }
 
+/// Viewport view state. Owner and layer-handle references are checked with the
+/// other references; this validates the numbers.
+#[cfg(feature = "host")]
+fn validate_viewport(
+    old: Option<&crate::host::acadrust::entities::Viewport>,
+    new: &crate::host::acadrust::entities::Viewport,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    finite_vector("Viewport.center", &new.center)?;
+    finite_vector("Viewport.view_center", &new.view_center)?;
+    finite_vector("Viewport.view_target", &new.view_target)?;
+    solid_normal("Viewport.view_direction", &new.view_direction)?;
+    for (name, value) in [("width", new.width), ("height", new.height), ("view_height", new.view_height), ("lens_length", new.lens_length), ("custom_scale", new.custom_scale)] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("Viewport.{name} must be finite and greater than zero"));
+        }
+    }
+    for (name, value) in [("front_clip_z", new.front_clip_z), ("back_clip_z", new.back_clip_z), ("twist_angle", new.twist_angle)] {
+        if !value.is_finite() {
+            return Err(format!("Viewport.{name} must be finite"));
+        }
+    }
+    if new.circle_sides < 3 {
+        return Err("Viewport.circle_sides must be at least 3".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -1022,6 +1052,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::RasterImage(value) => validate_raster_image(None, value)?,
         EntityType::Wipeout(value) => validate_wipeout(None, value)?,
         EntityType::Underlay(value) => validate_underlay(None, value)?,
+        EntityType::Viewport(value) => validate_viewport(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1386,6 +1417,7 @@ pub fn validate_entity_mutation(
         (EntityType::RasterImage(old), EntityType::RasterImage(new)) => validate_raster_image(Some(old), new)?,
         (EntityType::Wipeout(old), EntityType::Wipeout(new)) => validate_wipeout(Some(old), new)?,
         (EntityType::Underlay(old), EntityType::Underlay(new)) => validate_underlay(Some(old), new)?,
+        (EntityType::Viewport(old), EntityType::Viewport(new)) => validate_viewport(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1647,6 +1679,22 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    if let EntityType::Viewport(value) = entity {
+        let owner = value.common.owner_handle;
+        let in_paper_space = !owner.is_null()
+            && document
+                .block_records
+                .iter()
+                .any(|record| record.handle == owner && record.is_paper_space());
+        if !in_paper_space {
+            return Err("Viewport must be owned by a paper-space layout block".into());
+        }
+        for handle in &value.frozen_layers {
+            if !document.layers.iter().any(|layer| layer.handle == *handle) {
+                return Err(format!("Viewport frozen layer {handle:?} does not exist"));
+            }
         }
     }
     if let EntityType::Underlay(value) = entity {
@@ -2095,6 +2143,7 @@ mod tests {
                         | "RasterImage"
                         | "Wipeout"
                         | "Underlay"
+                        | "Viewport"
                 )
             {
                 assert!(
@@ -2393,6 +2442,23 @@ mod tests {
                 "Underlay.fade".to_owned(),
                 "Underlay.clip_boundary_vertices".to_owned(),
                 "Underlay.clip_inverted".to_owned(),
+                "Viewport.center".to_owned(),
+                "Viewport.width".to_owned(),
+                "Viewport.height".to_owned(),
+                "Viewport.status".to_owned(),
+                "Viewport.view_center".to_owned(),
+                "Viewport.view_direction".to_owned(),
+                "Viewport.view_target".to_owned(),
+                "Viewport.lens_length".to_owned(),
+                "Viewport.front_clip_z".to_owned(),
+                "Viewport.back_clip_z".to_owned(),
+                "Viewport.view_height".to_owned(),
+                "Viewport.twist_angle".to_owned(),
+                "Viewport.custom_scale".to_owned(),
+                "Viewport.frozen_layers".to_owned(),
+                "Viewport.render_mode".to_owned(),
+                "Viewport.circle_sides".to_owned(),
+                "Viewport.ucs_icon_visible".to_owned(),
             ])
         );
     }

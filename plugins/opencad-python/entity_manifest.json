@@ -33,7 +33,8 @@
     "Helix",
     "RasterImage",
     "Wipeout",
-    "Underlay"
+    "Underlay",
+    "Viewport"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -366,6 +367,41 @@
       "fields": {
         "definition_handle": { "required": true },
         "insertion_point": { "required": true }
+      }
+    },
+    "Viewport": {
+      "fields": {
+        "id": { "read_only": true },
+        "snap_base": { "read_only": true },
+        "snap_spacing": { "read_only": true },
+        "grid_spacing": { "read_only": true },
+        "snap_angle": { "read_only": true },
+        "clip_boundary_handle": { "read_only": true },
+        "style_sheet": { "read_only": true },
+        "ucs_at_origin": { "read_only": true },
+        "ucs_per_viewport": { "read_only": true },
+        "ucs_origin": { "read_only": true },
+        "ucs_x_axis": { "read_only": true },
+        "ucs_y_axis": { "read_only": true },
+        "ucs_handle": { "read_only": true },
+        "base_ucs_handle": { "read_only": true },
+        "ucs_ortho_type": { "read_only": true },
+        "elevation": { "read_only": true },
+        "shade_plot_mode": { "read_only": true },
+        "grid_flags": { "read_only": true },
+        "grid_major": { "read_only": true },
+        "background_handle": { "read_only": true },
+        "shade_plot_handle": { "read_only": true },
+        "visual_style_handle": { "read_only": true },
+        "sun_handle": { "read_only": true },
+        "default_lighting": { "read_only": true },
+        "default_lighting_type": { "read_only": true },
+        "brightness": { "read_only": true },
+        "contrast": { "read_only": true },
+        "ambient_color": { "read_only": true },
+        "center": { "required": true },
+        "width": { "required": true },
+        "height": { "required": true }
       }
     }
   }

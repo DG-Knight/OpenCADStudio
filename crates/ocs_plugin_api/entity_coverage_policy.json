@@ -432,6 +432,26 @@
       "fade",
       "clip_boundary_vertices",
       "clip_inverted"
+    ],
+    "Viewport": [
+      "layer",
+      "center",
+      "width",
+      "height",
+      "status",
+      "view_center",
+      "view_direction",
+      "view_target",
+      "lens_length",
+      "front_clip_z",
+      "back_clip_z",
+      "view_height",
+      "twist_angle",
+      "custom_scale",
+      "frozen_layers",
+      "render_mode",
+      "circle_sides",
+      "ucs_icon_visible"
     ]
   },
   "readable": {
@@ -503,6 +523,36 @@
       "class_version",
       "definition_handle",
       "definition_reactor_handle"
+    ],
+    "Viewport": [
+      "id",
+      "snap_base",
+      "snap_spacing",
+      "grid_spacing",
+      "snap_angle",
+      "clip_boundary_handle",
+      "style_sheet",
+      "ucs_at_origin",
+      "ucs_per_viewport",
+      "ucs_origin",
+      "ucs_x_axis",
+      "ucs_y_axis",
+      "ucs_handle",
+      "base_ucs_handle",
+      "ucs_ortho_type",
+      "elevation",
+      "shade_plot_mode",
+      "grid_flags",
+      "grid_major",
+      "background_handle",
+      "shade_plot_handle",
+      "visual_style_handle",
+      "sun_handle",
+      "default_lighting",
+      "default_lighting_type",
+      "brightness",
+      "contrast",
+      "ambient_color"
     ]
   },
   "aliases": {
