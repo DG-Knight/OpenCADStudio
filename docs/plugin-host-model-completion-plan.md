@@ -8,7 +8,7 @@ As of 20 September 2026, the working branch is `plugin/host-model-api` at
 `a8dd3640` plus the Leader increment, published as draft PR
 [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391). Host API is
 v7. The Python feature has explicit writes for **37 of 43** canvas kinds: 36
-are creatable (the legacy `Polyline` is update-only) and `Insert` remains update-only. This is **not** 37 completed
+are creatable (the legacy `Polyline` is update-only). This is **not** 37 completed
 kinds: Tolerance, Shape, AttributeEntity, Hatch, MLine, Dimension, MultiLeader, Table, PolygonMesh, PolyfaceMesh, Mesh, Wipeout, Point, Line, Circle, Arc, Ellipse, LwPolyline, Text, MText, Ray, XLine, Solid and Face3D pass every completion gate; Insert now passes every gate too; the audited Polyline (update-only by decision), Polyline2D, Polyline3D and Spline pass every gate that their format allows.
 AttributeDefinition passes its host and real IPC lifecycle but remains short of
 `Complete` because the previously pinned CAD codec dropped optional ATTDEF

@@ -50,10 +50,11 @@ The bundled first-party adapter under `plugins/opencad-python` currently maps
 these entity kinds to Python dictionaries: Point, Line, Circle, Arc, Ellipse,
 Polyline, Polyline2D, Polyline3D, LwPolyline, Spline, Text, MText, Ray, XLine,
 Solid, Face3D, Insert, Tolerance, Shape, AttributeDefinition,
-AttributeEntity, and Hatch. Insert is update-only: the block name is readable
-but cannot be changed, and Python creation is withheld until block-table
-references can be established safely. Attached attributes remain available in
-the raw snapshot. The authoritative per-field mapping is
+AttributeEntity, and Hatch. An Insert is created by naming an existing
+ordinary block (the host refuses unknown blocks, model or paper space and
+containment cycles); the block name cannot be changed afterwards. Attached
+attributes stay with the AttributeEntity flow and remain in the raw snapshot.
+The legacy Polyline is update-only: create a Polyline2D or Polyline3D. The authoritative per-field mapping is
 `plugins/opencad-python/entity_manifest.json`. The generated
 mapping excludes fields it cannot represent, including common color, line
 weight, transparency, Polyline3D smooth type, and MText background color.
