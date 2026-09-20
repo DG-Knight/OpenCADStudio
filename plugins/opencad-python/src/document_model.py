@@ -8,7 +8,7 @@ def _coerce_points(kind, properties):
     """Let create_entity take (x, y, z) tuples for point properties, as
     transaction edits already do, by using the property types in the schema."""
     schema = ocs.entity_coverage(kind)
-    types = {row["name"]: row for row in schema["properties"]} if schema else {}
+    types = {row["name"]: row for row in schema.get("properties", [])} if schema else {}
     result = {}
     for name, value in properties.items():
         row = types.get(name)

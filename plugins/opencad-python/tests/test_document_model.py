@@ -65,6 +65,20 @@ class DocumentModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.doc.create_entity("Line", handle=4)
 
+    def test_create_entity_accepts_coordinate_tuples_for_point_properties(self):
+        self.ocs.entity_coverage = lambda kind: {"kind": kind, "scope": "canvas",
+            "editable": [], "readable": [], "unmapped": [], "properties": [
+                {"name": "start", "type": "Vector3", "sequence": False},
+                {"name": "end", "type": "Vector3", "sequence": False},
+                {"name": "corners", "type": "Vector2", "sequence": True},
+                {"name": "knots", "type": "f64", "sequence": True}]}
+        self.doc.create_entity("Line", start=(0, 0, 0), end=(10, 5, 0),
+            corners=[(1, 2), (3, 4)], knots=[0, 0, 1])
+        self.assertEqual(self.calls[-1], ("add", {"kind": "Line",
+            "start": {"x": 0.0, "y": 0.0, "z": 0.0}, "end": {"x": 10.0, "y": 5.0, "z": 0.0},
+            "corners": [{"x": 1.0, "y": 2.0}, {"x": 3.0, "y": 4.0}],
+            "knots": [0, 0, 1]}))
+
     def test_coverage_and_read_only_entity(self):
         self.assertEqual(len(self.doc.entities), 2)
         self.assertEqual([entity.handle for entity in self.doc.entities], [1, 2])
