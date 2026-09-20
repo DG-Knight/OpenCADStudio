@@ -109,10 +109,10 @@ is refused with a clear message instead of being rewritten.
 
 ## Risks and open questions
 
-1. **Boolean speed.** About 23 s each in a debug build. Time them in release
-   before deciding whether they can run on the host thread (the GUI BOOLEAN
-   command has the same cost) or need a background task. Everything else is
-   instant.
+1. **Boolean speed.** Measured in release, see "Boolean timings" below: about
+   1 to 2.2 s for a box and a cylinder, 0.2 s for two spheres and 1 to 2 ms for
+   planar-only operands, against 23 s in a debug build. The kernel also refuses
+   many curved cases, which matters more than speed.
 2. **Interoperability cannot be verified here.** `solid_to_sat` is verified by
    OCS's own lifter. Whether AutoCAD accepts the SAT/SAB that OCS writes is not
    testable without AutoCAD, so completion should be scoped as "OCS round trip",
@@ -137,3 +137,62 @@ is refused with a clear message instead of being rewritten.
 Phase 1 alone would move Solid3D from blocked to complete-in-OCS.
 
 **Status (2026-09-20): phase 1 is done.** `HostApi::solid_operation` (create primitive and rigid transform), the `doc.solids` Python API and `audit_python_solid3d_lifecycle_over_real_ipc` are in; Solid3D is complete, Body moves through the same channel. Design B was implemented as recommended. Region creation from a closed profile followed (`RegionFromProfile`). Plane surfaces and extrusions (`SurfaceFromProfile`, `Extrude`) followed. Only booleans remain, plus lofted, revolved, swept and NURBS surfaces.
+
+## Boolean timings (release build)
+
+Measured 2026-09-20 in a scratch crate built with `--release` (opt-level 3)
+against the same cadkernel revision OCS pins (`6f046af`, features `acis` and
+`offset`), calling exactly what OCS's `solid_model::boolean_result` calls:
+`brep::operation_tolerance` then `brep::combine`. A debug build of OCS is about
+22 times slower, so booleans must never be exercised in a debug test run. The
+scratch program is not in the repository; to repeat it, depend on cadkernel at
+that revision and time `brep::combine` on `brep::make::{cuboid, cylinder,
+sphere, torus}` operands.
+
+| Operation | Time | Result |
+|---|---|---|
+| box union / subtract / intersect cylinder (10x6x4 box, r=2 cylinder) | 1.05 to 1.08 s each, identical on repeat runs | ok |
+| same, operands scaled 10x and 100x | 2.21 s and 2.21 s | ok |
+| box union / subtract box (planar only) | 0.001 to 0.002 s | ok |
+| sphere union sphere (overlapping) | 0.22 s | ok |
+| sphere subtract sphere (overlapping) | 0.23 s | refused `CutRefused` |
+| box subtract sphere (sphere cutting the box faces) | 1.28 s | refused `Coincident` |
+| sphere union torus (disjoint) | under 1 ms | refused `NoClosedForm` |
+| torus subtract cylinder through the ring | under 1 ms | refused `NoClosedForm` |
+| drill a first cylinder hole in a box | 0.03 s | ok |
+| drill a second hole in the drilled box | under 1 ms | refused `CutRefused` |
+
+What this means:
+
+- **Speed is acceptable.** A curved boolean costs 0.2 to 2.2 s, the same cost as
+  the GUI BOOLEAN command, and planar work is instant. The 23 s seen earlier was
+  a debug-build artifact.
+- **It blocks the host thread.** The plugin's `PY_RUN` is a synchronous dispatch
+  and nested host requests run inline, so a script freezes the UI while a
+  boolean runs. One to two seconds per operation is tolerable; a script with
+  dozens is not.
+- **The whole script has a budget.** A `Dispatch` call uses the 30 s default
+  timeout (`OCS_PLUGIN_CALL_TIMEOUT_SECS`, with a 10 s floor), and nested host
+  work counts against one deadline. Roughly fifteen curved booleans in a single
+  script would exceed it.
+- **Refusals are the real limit.** The kernel says no often: coincident faces, a
+  cut it has no closed form for, torus operands, and, surprisingly, a second
+  cut in a body that was already drilled. Refusals are fast and leave the inputs
+  intact, which is the behavior the API already relies on, but it means booleans
+  will be a partial feature that fails with a reason, not a general one.
+- **Timing is not proportional to size.** Scaling the operands 10x doubled the
+  time, 100x changed nothing more, so the cost is dominated by the surface
+  intersection setup rather than the geometry size.
+
+### Recommendation
+
+Add `SolidOperation::Boolean { first, second, operation, layer }` and run it
+synchronously on the host thread, surfacing the kernel's refusal (`Coincident`,
+`CutRefused`, `NoClosedForm`, ...) verbatim in the error and leaving both
+operands untouched on failure. Build the result with the existing
+`entity_with_boolean_body` path so it inherits the lossless verification.
+Test it with **planar** operands (millisecond cost, safe in debug) plus one
+`#[ignore]` curved case that documents the release-only runtime. Document the
+30 s script budget and that chained cuts on a drilled body are often refused.
+Do not move booleans to a background thread yet: it would need cancellation and
+undo coordination for a cost that is one to two seconds.
