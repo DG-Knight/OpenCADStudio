@@ -789,7 +789,7 @@
     },
     "Ole2Frame": {
       "update_only": true,
-      "update_only_message": "Ole2Frame cannot be created from a script: its embedded object storage is opaque; existing frames can be moved, resized and aspect-locked, and the stored object is preserved untouched",
+      "update_only_message": "create an Ole2Frame with doc.embed_picture(path, origin, width); existing frames can be moved, resized and aspect-locked, and the stored object is preserved untouched",
       "fields": {
         "storage": {
           "exclude": true,

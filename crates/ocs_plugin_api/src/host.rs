@@ -109,6 +109,11 @@ pub enum SolidOperation {
     /// layer. The kernel refuses some cases (coincident faces, cuts it has no
     /// closed form for); a refusal changes nothing. Curved operands can take a
     /// second or two, and the host thread is busy meanwhile.
+    /// Embed a picture file as an OLE frame whose bottom-left corner is at
+    /// `origin`, `width` drawing units wide, keeping the picture's aspect.
+    /// PNG, JPEG and BMP are stored as read; other formats are re-encoded as
+    /// PNG. The frame goes on `layer` (layer `0` when `None`).
+    EmbedPicture { path: String, origin: [f64; 3], width: f64, layer: Option<String> },
     Boolean {
         first: Handle,
         second: Handle,

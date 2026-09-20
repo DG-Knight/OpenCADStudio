@@ -115,6 +115,7 @@ mod tests {
             },
             SolidOperation::Transform { handle: acadrust::Handle::new(7), matrix: [1.0; 16] },
             SolidOperation::RegionFromProfile { source: acadrust::Handle::new(3), layer: None, delete_source: true },
+            SolidOperation::EmbedPicture { path: "p.png".into(), origin: [0.0; 3], width: 5.0, layer: None },
             SolidOperation::Boolean {
                 first: acadrust::Handle::new(1),
                 second: acadrust::Handle::new(2),

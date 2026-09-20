@@ -475,6 +475,28 @@ mod ocs {
             .map_err(|error| vm.new_runtime_error(format!("ocs.solid_region: {error}")))
     }
 
+    /// Embed a picture file as an OLE frame.
+    #[pyfunction]
+    fn embed_picture(
+        path: String,
+        origin: Vec<f64>,
+        width: f64,
+        layer: Option<String>,
+        vm: &VirtualMachine,
+    ) -> PyResult<u64> {
+        use ocs_plugin_api::host::SolidOperation;
+        let origin: [f64; 3] = origin.try_into().map_err(|_| {
+            vm.new_value_error("ocs.embed_picture: the origin needs 3 numbers".to_owned())
+        })?;
+        let result = host_ctx::with_host(|host| {
+            host.solid_operation(SolidOperation::EmbedPicture { path, origin, width, layer })
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.embed_picture: {error}")))
+    }
+
     /// Combine two solids ("union", "subtract" or "intersect").
     #[pyfunction]
     fn solid_boolean(

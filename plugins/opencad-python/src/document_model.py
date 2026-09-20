@@ -220,6 +220,13 @@ class _Document:
         handle = entity.handle if isinstance(entity, _Entity) else int(entity)
         ocs.remove_entity(handle)
 
+    def embed_picture(self, path, origin=(0, 0, 0), width=1, layer=None):
+        """Embed a picture file (PNG, JPEG, BMP or another format re-encoded as
+        PNG) as an OLE frame. `origin` is the bottom-left corner and `width`
+        the frame width; the height follows the picture's aspect ratio."""
+        handle = ocs.embed_picture(str(path), [float(v) for v in origin], float(width), layer)
+        return self.entities[handle]
+
     def coverage(self, kind=None):
         if kind is not None:
             return ocs.entity_coverage(kind)

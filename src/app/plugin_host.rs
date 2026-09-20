@@ -705,6 +705,30 @@ impl<'a> HostSession<'a> {
                 };
                 self.commit_profile_result(result, source, delete_source, "Extrude profile")
             }
+            SolidOperation::EmbedPicture { path, origin, width, layer } => {
+                finite3("picture origin", origin)?;
+                positive("picture width", width)?;
+                if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
+                    return Err("layer name is empty".into());
+                }
+                let picture = crate::io::ole_embed::EmbeddedImage::from_file(std::path::Path::new(&path))
+                    .map_err(|error| format!("cannot read the picture {path:?}: {error}"))?;
+                let (upper_left, lower_right) = crate::io::ole_embed::corners_from_placement(
+                    acadrust::types::Vector3::new(origin[0], origin[1], origin[2]),
+                    width,
+                    picture.aspect(),
+                );
+                let mut frame = crate::io::ole_embed::build_embedded_ole(&picture, upper_left, lower_right);
+                if let Some(layer) = layer {
+                    frame.common.layer = layer;
+                }
+                self.push_undo("Embed picture");
+                let handle = self.add_entity(EntityType::Ole2Frame(frame));
+                if handle.is_null() {
+                    return Err("the picture frame could not be added".into());
+                }
+                Ok(handle)
+            }
             SolidOperation::Boolean { first, second, operation, layer, keep_operands } => {
                 use ocs_plugin_api::host::SolidBoolean;
                 if first == second {
@@ -4779,8 +4803,11 @@ mod tests {
 
     #[test]
     fn audit_python_ole2frame_lifecycle_over_real_ipc() {
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 120, 200, 255]))
+            .save(std::env::temp_dir().join("ocs_ole_audit.png"))
+            .unwrap();
         run_mesh_lifecycle(&MeshCase {
-            create: "# MAKEOLE\n",
+            create: "doc.embed_picture('TMPDIR/ocs_ole_audit.png', origin=(10, 10, 0), width=20)\n",
             edit: concat!(
                 "e = doc.entities[HANDLE]\n",
                 "with doc.transaction('Edit'):\n",
@@ -5669,6 +5696,84 @@ mod tests {
             dispatch(&mut host, &create(&extra));
             assert_eq!(count(&host), 2, "{extra}");
             assert!(last(&host).contains(message), "{extra}: {}", last(&host));
+        }
+    }
+
+    #[test]
+    fn audit_python_ole2frame_creation_rules_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let dir = std::env::temp_dir();
+        let png = dir.join("ocs_ole_rules.png");
+        let jpeg = dir.join("ocs_ole_rules.jpg");
+        let tiff = dir.join("ocs_ole_rules.tif");
+        let text = dir.join("ocs_ole_rules.txt");
+        let picture = image::RgbImage::from_pixel(8, 4, image::Rgb([200, 40, 40]));
+        picture.save(&png).unwrap();
+        picture.save(&jpeg).unwrap();
+        picture.save(&tiff).unwrap();
+        std::fs::write(&text, "not a picture").unwrap();
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let frames = |host: &HostSession<'_>| host.document().entities().filter(|e| matches!(e, EntityType::Ole2Frame(_))).count();
+        let picture_len = |host: &HostSession<'_>, index: usize| {
+            let mut all: Vec<_> = host.document().entities().filter_map(|e| match e {
+                EntityType::Ole2Frame(f) => Some(f.clone()), _ => None }).collect();
+            all.sort_by_key(|f| f.common.handle.value());
+            match acadrust::entities::extract_presentation(&all[index].encoded_payload()) {
+                Some(acadrust::entities::OlePresentation::Raster(bytes)) => bytes,
+                other => panic!("no embedded raster: {other:?}"),
+            }
+        };
+        let embed = |file: &std::path::Path, extra: &str| format!(
+            "PY_EVAL ocs.active_document.embed_picture({:?}, origin=(1, 2, 3), width=16{extra}).handle", file.display().to_string());
+
+        // C: PNG and JPEG are stored as read, a TIFF is re-encoded as PNG, and
+        // the frame keeps the picture's 2:1 aspect and the requested layer.
+        dispatch(&mut host, &embed(&png, ", layer='PICTURES'"));
+        dispatch(&mut host, &embed(&jpeg, ""));
+        dispatch(&mut host, &embed(&tiff, ""));
+        assert_eq!(frames(&host), 3, "{}", last(&host));
+        assert_eq!(picture_len(&host, 0), std::fs::read(&png).unwrap(), "PNG is stored as read");
+        assert_eq!(picture_len(&host, 1), std::fs::read(&jpeg).unwrap(), "JPEG is stored as read");
+        assert_eq!(&picture_len(&host, 2)[..4], b"\x89PNG", "TIFF is re-encoded as PNG");
+        let mut all: Vec<_> = host.document().entities().filter_map(|e| match e {
+            EntityType::Ole2Frame(f) => Some(f.clone()), _ => None }).collect();
+        all.sort_by_key(|f| f.common.handle.value());
+        assert_eq!((all[0].common.layer.as_str(), all[1].common.layer.as_str()), ("PICTURES", "0"));
+        let frame = &all[0];
+        assert!((frame.lower_right_corner.x - frame.upper_left_corner.x - 16.0).abs() < 1e-9, "width 16");
+        assert!((frame.upper_left_corner.y - frame.lower_right_corner.y - 8.0).abs() < 1e-9, "height 8 keeps the 2:1 aspect");
+        assert!((frame.lower_right_corner.y - 2.0).abs() < 1e-9 && (frame.upper_left_corner.x - 1.0).abs() < 1e-9, "origin is the bottom-left corner");
+
+        // V: refusals change nothing and record no undo step.
+        let undo = host.app.tabs[0].history.undo_stack.len();
+        let missing = dir.join("ocs_ole_rules_missing.png");
+        for (command, message) in [
+            (embed(&missing, ""), "cannot read the picture"),
+            (embed(&text, ""), "cannot read the picture"),
+            (embed(&png, ", layer=''").replace("width=16", "width=16"), "layer name is empty"),
+            (embed(&png, "").replace("width=16", "width=0"), "must be finite and greater than zero"),
+            (embed(&png, "").replace("origin=(1, 2, 3)", "origin=(float('nan'), 0, 0)"), "must be finite"),
+            ("ocs.embed_picture('x.png', [1.0], 5.0, None)".to_string(), "origin needs 3 numbers"),
+            ("ocs.active_document.create_entity('Ole2Frame', upper_left_corner=(0, 0, 0), lower_right_corner=(1, 1, 0))".to_string(), "doc.embed_picture"),
+        ] {
+            dispatch(&mut host, &format!("PY_EVAL {}", command.trim_start_matches("PY_EVAL ")));
+            assert!(last(&host).contains(message), "{command}: {}", last(&host));
+        }
+        assert_eq!(frames(&host), 3);
+        assert_eq!(host.app.tabs[0].history.undo_stack.len(), undo, "refusals record no undo step");
+        for file in [&png, &jpeg, &tiff, &text] {
+            let _ = std::fs::remove_file(file);
         }
     }
 
