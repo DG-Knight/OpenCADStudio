@@ -29,7 +29,8 @@
     "Table",
     "PolygonMesh",
     "PolyfaceMesh",
-    "Mesh"
+    "Mesh",
+    "Helix"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -330,6 +331,14 @@
         "vertices": { "required": true },
         "faces": { "required": true },
         "version": { "read_only": true }
+      }
+    },
+    "Helix": {
+      "fields": {
+        "start_point": { "required": true },
+        "spline": { "read_only": true, "_comment": "Derived by the host from the generating parameters." },
+        "major_version": { "read_only": true },
+        "maintenance_version": { "read_only": true }
       }
     }
   }

@@ -602,3 +602,28 @@ mod tests {
         }
     }
 }
+
+/// Rebuild the derived spline after a scripted create or edit of the
+/// generating parameters. `radius` is the top radius; the base radius is the
+/// start point's distance from the axis.
+pub(crate) fn normalize_scripted_helix(old: Option<&Helix>, new: &mut Helix) -> Result<(), String> {
+    let unchanged = old.is_some_and(|old| {
+        old.axis_base_point == new.axis_base_point
+            && old.start_point == new.start_point
+            && old.axis_vector == new.axis_vector
+            && old.radius.to_bits() == new.radius.to_bits()
+            && old.turns.to_bits() == new.turns.to_bits()
+            && old.turn_height.to_bits() == new.turn_height.to_bits()
+            && old.handedness == new.handedness
+            && old.constraint == new.constraint
+    });
+    if unchanged {
+        return Ok(());
+    }
+    let top = new.radius;
+    if rebuild(new, top) {
+        Ok(())
+    } else {
+        Err("Helix parameters do not define a valid curve".into())
+    }
+}

@@ -158,6 +158,13 @@ impl<'a> HostSession<'a> {
         if let EntityType::Dimension(dimension) = entity {
             crate::entities::dimension::normalize_scripted_dimension(dimension);
         }
+        if let EntityType::Helix(new) = entity {
+            let old = match old {
+                Some(EntityType::Helix(old)) => Some(old),
+                _ => None,
+            };
+            crate::entities::helix::normalize_scripted_helix(old, new)?;
+        }
         if let EntityType::Table(new) = entity {
             let old = match old {
                 Some(EntityType::Table(old)) => Some(old),
@@ -3112,6 +3119,10 @@ mod tests {
         expect_created: &'static str,
         expect_edited: &'static str,
         expect_reedited: &'static str,
+        /// Digest a DXF reopen yields when the engine loses a field (empty:
+        /// same as DWG). A canary that fails once the engine round-trips it.
+        expect_edited_dxf: &'static str,
+        expect_reedited_dxf: &'static str,
     }
 
     fn run_mesh_lifecycle(case: &MeshCase) {
@@ -3172,13 +3183,18 @@ mod tests {
         let dxf = crate::io::load_bytes("mesh.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
         let mut gaps = Vec::new();
         for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            let expected_digest = if format == "DXF" && !case.expect_edited_dxf.is_empty() {
+                case.expect_edited_dxf
+            } else {
+                case.expect_edited
+            };
             match document.get_entity(handle) {
-                Some(entity) if (case.digest)(entity) == case.expect_edited => {}
+                Some(entity) if (case.digest)(entity) == expected_digest => {}
                 Some(entity) => gaps.push(format!("{format}: {}", (case.digest)(entity))),
                 None => gaps.push(format!("{format}: entity missing")),
             }
         }
-        assert!(gaps.is_empty(), "persistence gaps (expected {}): {gaps:#?}", case.expect_edited);
+        assert!(gaps.is_empty(), "persistence gaps (expected {} / DXF {:?}): {gaps:#?}", case.expect_edited, case.expect_edited_dxf);
         for (name, mut document) in [("mesh-reedit.dwg", dwg), ("mesh-reedit.dxf", dxf)] {
             let before = document.get_entity(handle).unwrap().clone();
             let mut after = before.clone();
@@ -3192,7 +3208,12 @@ mod tests {
                 acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
             };
             let reopened = crate::io::load_bytes(name, bytes).unwrap();
-            assert_eq!((case.digest)(reopened.get_entity(handle).unwrap()), case.expect_reedited, "{name}");
+            let expected_digest = if name.ends_with("dxf") && !case.expect_reedited_dxf.is_empty() {
+                case.expect_reedited_dxf
+            } else {
+                case.expect_reedited
+            };
+            assert_eq!((case.digest)(reopened.get_entity(handle).unwrap()), expected_digest, "{name}");
         }
 
         dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
@@ -3252,6 +3273,8 @@ mod tests {
             expect_created: "3x3 v9 z0 d0/0 NoSmooth",
             expect_edited: "3x3 v9 z2.5 d6/6 Cubic",
             expect_reedited: "3x3 v9 z2.5 d6/6 Cubic",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
         });
     }
 
@@ -3293,6 +3316,8 @@ mod tests {
             expect_created: "v4 f2 z0 last Some((1, 3, 4))",
             expect_edited: "v5 f3 z3 last Some((3, -4, 5))",
             expect_reedited: "v5 f3 z3 last Some((3, -4, 5))",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
         });
     }
 
@@ -3333,6 +3358,47 @@ mod tests {
             expect_created: "v4 f1 e1 sub0 crease Some(1.5)",
             expect_edited: "v5 f2 e1 sub1 crease Some(1.5)",
             expect_reedited: "v5 f2 e1 sub1 crease Some(1.5)",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
+        });
+    }
+
+    #[test]
+    fn staged_python_helix_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('Helix', axis_base_point=P(0.0, 0.0, 0.0), axis_vector=P(0.0, 0.0, 1.0),\n",
+                "    start_point=P(5.0, 0.0, 0.0), radius=5.0, turns=3.0, turn_height=2.0)\n"),
+            edit: concat!(
+                "helix = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit helix'):\n",
+                "    helix.turns = 5.0\n",
+                "    helix.handedness = False\n",
+                "doc.selection = [helix]\n"),
+            rejects: &[
+                ("'radius':0.0", "greater than zero"),
+                ("'turns':-1.0", "greater than zero"),
+                ("'turn_height':float('nan')", "greater than zero"),
+                ("'axis_vector':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
+                ("'start_point':{'x':0.0,'y':0.0,'z':3.0}", "on the axis"),
+                ("'spline':{}", "read-only"),
+                ("'major_version':1", "read-only"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::Helix(_)),
+            digest: |entity| match entity {
+                EntityType::Helix(h) => format!("r{} t{} h{} endz{:.1} ccw{} cp{}", h.radius, h.turns, h.turn_height,
+                    h.spline.control_points.last().map_or(f64::NAN, |p| p.z), h.handedness,
+                    !h.spline.control_points.is_empty()),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::Helix(h) = entity { h.turns = 6.0; },
+            expect_created: "r5 t3 h2 endz6.0 ccwtrue cptrue",
+            expect_edited: "r5 t5 h2 endz10.0 ccwfalse cptrue",
+            expect_reedited: "r5 t6 h2 endz10.0 ccwfalse cptrue",
+            // BLOCKER: the DXF reader parses boolean group 290 as an i16 and
+            // never applies it, so handedness always reopens counter-clockwise.
+            expect_edited_dxf: "r5 t5 h2 endz10.0 ccwtrue cptrue",
+            expect_reedited_dxf: "r5 t6 h2 endz10.0 ccwtrue cptrue",
         });
     }
 

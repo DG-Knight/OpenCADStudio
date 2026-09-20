@@ -743,6 +743,44 @@ fn validate_mesh(
     Ok(())
 }
 
+/// Helix generating parameters. The spline is derived by the host, so only
+/// the parameters are validated.
+#[cfg(feature = "host")]
+fn validate_helix(
+    old: Option<&crate::host::acadrust::entities::Helix>,
+    new: &crate::host::acadrust::entities::Helix,
+) -> Result<(), String> {
+    if old.is_some_and(|old| {
+        old.axis_base_point == new.axis_base_point
+            && old.start_point == new.start_point
+            && old.axis_vector == new.axis_vector
+            && old.radius.to_bits() == new.radius.to_bits()
+            && old.turns.to_bits() == new.turns.to_bits()
+            && old.turn_height.to_bits() == new.turn_height.to_bits()
+            && old.handedness == new.handedness
+            && old.constraint == new.constraint
+    }) {
+        return Ok(());
+    }
+    finite_vector("Helix.axis_base_point", &new.axis_base_point)?;
+    finite_vector("Helix.start_point", &new.start_point)?;
+    solid_normal("Helix.axis_vector", &new.axis_vector)?;
+    for (name, value) in [("radius", new.radius), ("turns", new.turns), ("turn_height", new.turn_height)] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("Helix.{name} must be finite and greater than zero"));
+        }
+    }
+    let axis = new.axis_vector;
+    let length = axis.x.hypot(axis.y).hypot(axis.z);
+    let delta = new.start_point - new.axis_base_point;
+    let along = (delta.x * axis.x + delta.y * axis.y + delta.z * axis.z) / length;
+    let radial = ((delta.x * delta.x + delta.y * delta.y + delta.z * delta.z) - along * along).max(0.0).sqrt();
+    if radial <= 1.0e-9 {
+        return Err("Helix.start_point must not lie on the axis".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -842,6 +880,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::PolygonMesh(value) => validate_polygon_mesh(None, value)?,
         EntityType::PolyfaceMesh(value) => validate_polyface_mesh(None, value)?,
         EntityType::Mesh(value) => validate_mesh(None, value)?,
+        EntityType::Helix(value) => validate_helix(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1202,6 +1241,7 @@ pub fn validate_entity_mutation(
         (EntityType::PolygonMesh(old), EntityType::PolygonMesh(new)) => validate_polygon_mesh(Some(old), new)?,
         (EntityType::PolyfaceMesh(old), EntityType::PolyfaceMesh(new)) => validate_polyface_mesh(Some(old), new)?,
         (EntityType::Mesh(old), EntityType::Mesh(new)) => validate_mesh(Some(old), new)?,
+        (EntityType::Helix(old), EntityType::Helix(new)) => validate_helix(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1879,6 +1919,7 @@ mod tests {
                         | "PolygonMesh"
                         | "PolyfaceMesh"
                         | "Mesh"
+                        | "Helix"
                 )
             {
                 assert!(
@@ -2134,6 +2175,14 @@ mod tests {
                 "Mesh.faces".to_owned(),
                 "Mesh.edges".to_owned(),
                 "Mesh.override_option".to_owned(),
+                "Helix.axis_base_point".to_owned(),
+                "Helix.start_point".to_owned(),
+                "Helix.axis_vector".to_owned(),
+                "Helix.radius".to_owned(),
+                "Helix.turns".to_owned(),
+                "Helix.turn_height".to_owned(),
+                "Helix.handedness".to_owned(),
+                "Helix.constraint".to_owned(),
             ])
         );
     }

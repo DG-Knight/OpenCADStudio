@@ -377,6 +377,17 @@
       "faces",
       "edges",
       "override_option"
+    ],
+    "Helix": [
+      "layer",
+      "axis_base_point",
+      "start_point",
+      "axis_vector",
+      "radius",
+      "turns",
+      "turn_height",
+      "handedness",
+      "constraint"
     ]
   },
   "readable": {
@@ -432,6 +443,11 @@
     ],
     "Mesh": [
       "version"
+    ],
+    "Helix": [
+      "spline",
+      "major_version",
+      "maintenance_version"
     ]
   },
   "aliases": {
