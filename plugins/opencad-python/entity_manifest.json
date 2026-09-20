@@ -752,6 +752,10 @@
         },
         "height": {
           "required": true
+        },
+        "custom_scale": {
+          "read_only": true,
+          "_comment": "Derived by the host as height / view_height, like MVIEW."
         }
       }
     },

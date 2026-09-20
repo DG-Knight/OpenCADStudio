@@ -158,6 +158,26 @@ impl<'a> HostSession<'a> {
         if let EntityType::Dimension(dimension) = entity {
             crate::entities::dimension::normalize_scripted_dimension(dimension);
         }
+        if let EntityType::Viewport(viewport) = entity {
+            // A viewport needs an id unique in its layout and at least 2 (id 1
+            // is the never-drawn sheet viewport, and a lone id 0 can be taken for
+            // it), and its scale follows its paper height and model view height;
+            // both are what the MVIEW command sets.
+            if old.is_none() {
+                let owner = viewport.common.owner_handle;
+                let highest = self
+                    .document()
+                    .entities()
+                    .filter_map(|e| match e {
+                        EntityType::Viewport(other) if other.common.owner_handle == owner => Some(other.id),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(1);
+                viewport.id = (highest + 1).max(2);
+            }
+            viewport.custom_scale = viewport.height / viewport.view_height;
+        }
         if let EntityType::SectionSymbol(symbol) = entity {
             // `points` is the canonical geometry: the point counts follow it
             // (they equal the point count in every verified export) and the
@@ -3682,12 +3702,18 @@ mod tests {
             .unwrap_or_else(|| panic!("Python did not create the mesh: {}", last_output(&host)));
         let created = host.document().get_entity(handle).unwrap().clone();
         assert_eq!((case.digest)(&created), case.expect_created);
-        // Viewports draw only on their paper-space layout tab, which this
-        // driver does not activate, so they have no model-tab wire oracle.
-        let has_wires = !matches!(created, EntityType::Viewport(_));
-        if has_wires {
-            assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+        // A paper-space viewport draws only on its layout tab, so the canvas
+        // oracle first activates the layout that owns it.
+        if matches!(created, EntityType::Viewport(_)) {
+            let owner = created.common().owner_handle;
+            let layout = host.document().objects.values().find_map(|object| match object {
+                acadrust::objects::ObjectType::Layout(l) if l.block_record == owner => Some(l.name.clone()),
+                _ => None,
+            }).expect("the viewport's owner is a layout block");
+            host.app.tabs[0].scene.set_current_layout(layout);
         }
+        let has_wires = true;
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
 
         run_script(&mut host, "edit", &case.edit.replace("HANDLE", &handle.value().to_string()).replace("TMPDIR", &tmp).replace("LAYER0", &layer0.unwrap_or_default().to_string()));
         let expected = host.document().get_entity(handle).unwrap().clone();
@@ -5775,6 +5801,70 @@ mod tests {
         for file in [&png, &jpeg, &tiff, &text] {
             let _ = std::fs::remove_file(file);
         }
+    }
+
+    #[test]
+    fn audit_python_viewport_ids_and_scale_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let paper = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle).unwrap();
+        let layout = host.document().objects.values().find_map(|o| match o {
+            acadrust::objects::ObjectType::Layout(l) if l.block_record == paper => Some(l.name.clone()), _ => None }).unwrap();
+        host.app.tabs[0].scene.set_current_layout(layout);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let viewports = |host: &HostSession<'_>| {
+            let mut list: Vec<_> = host.document().entities().filter_map(|e| match e {
+                EntityType::Viewport(v) => Some((v.common.handle, v.id)), _ => None }).collect();
+            list.sort_by_key(|(h, _)| h.value());
+            list
+        };
+        let create = |width: f64, height: f64, view_height: f64| format!(
+            "PY_EVAL ocs.active_document.create_entity('Viewport', owner_handle={}, center=(50, 50, 0), width={width}, height={height}, view_height={view_height}).handle", paper.value());
+        dispatch(&mut host, &create(80.0, 60.0, 50.0));
+        dispatch(&mut host, &create(40.0, 30.0, 10.0));
+        dispatch(&mut host, &create(20.0, 20.0, 20.0));
+        let list = viewports(&host);
+        assert_eq!(list.len(), 3, "{}", last(&host));
+        let ids: Vec<i16> = list.iter().map(|(_, id)| *id).collect();
+        assert_eq!(ids, vec![2, 3, 4], "scripted viewports get unique ids of at least 2: {ids:?}");
+        for (handle, expected) in [(list[0].0, 60.0 / 50.0), (list[1].0, 30.0 / 10.0), (list[2].0, 1.0)] {
+            let Some(EntityType::Viewport(v)) = host.document().get_entity(handle) else { unreachable!() };
+            assert!((v.custom_scale - expected).abs() < 1e-12, "custom_scale {} vs {expected}", v.custom_scale);
+            assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "viewport {handle:?} draws a frame");
+        }
+        // The scale follows the geometry; it cannot be set directly.
+        let second = list[0].0;
+        dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Zoom', [{{'handle':{}, 'view_height':25.0}}])", second.value()));
+        let Some(EntityType::Viewport(zoomed)) = host.document().get_entity(second) else { unreachable!() };
+        assert!((zoomed.custom_scale - 60.0 / 25.0).abs() < 1e-12, "{}", last(&host));
+        assert_eq!(zoomed.id, 2, "an edit keeps the id");
+        dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Resize', [{{'handle':{}, 'height':90.0}}])", second.value()));
+        let Some(EntityType::Viewport(resized)) = host.document().get_entity(second) else { unreachable!() };
+        assert!((resized.custom_scale - 90.0 / 25.0).abs() < 1e-12);
+        let before = host.document().get_entity(second).unwrap().clone();
+        dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Scale', [{{'handle':{}, 'custom_scale':3.0}}])", second.value()));
+        assert!(last(&host).contains("read-only"), "{}", last(&host));
+        assert_eq!(host.document().get_entity(second), Some(&before));
+        // Control: the engine's default id 0 is not invisible here (there is no
+        // sheet viewport to confuse it with), so the derived id matters for
+        // uniqueness, not for visibility.
+        let mut bare = acadrust::entities::Viewport::new();
+        bare.common.owner_handle = paper;
+        bare.width = 40.0;
+        bare.height = 30.0;
+        let bare = host.document_mut().add_entity(EntityType::Viewport(bare)).unwrap();
+        assert_eq!(host.document().get_entity(bare).map(|e| match e { EntityType::Viewport(v) => v.id, _ => -1 }), Some(0));
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[bare]).is_empty());
     }
 
     #[test]

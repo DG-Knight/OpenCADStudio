@@ -2942,7 +2942,6 @@ mod tests {
                 "Viewport.back_clip_z".to_owned(),
                 "Viewport.view_height".to_owned(),
                 "Viewport.twist_angle".to_owned(),
-                "Viewport.custom_scale".to_owned(),
                 "Viewport.frozen_layers".to_owned(),
                 "Viewport.render_mode".to_owned(),
                 "Viewport.circle_sides".to_owned(),

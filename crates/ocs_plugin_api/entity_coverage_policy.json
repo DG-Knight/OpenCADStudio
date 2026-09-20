@@ -448,7 +448,6 @@
       "back_clip_z",
       "view_height",
       "twist_angle",
-      "custom_scale",
       "frozen_layers",
       "render_mode",
       "circle_sides",
@@ -611,7 +610,8 @@
       "default_lighting_type",
       "brightness",
       "contrast",
-      "ambient_color"
+      "ambient_color",
+      "custom_scale"
     ],
     "ViewBorder": [
       "version"
