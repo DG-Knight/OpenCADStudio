@@ -2265,6 +2265,7 @@ mod tests {
             "    leader.text_height = 4.0\n",
             "    leader.arrow_enabled = False\n",
             "    leader.annotation_offset = (1.0, 2.0, 0.0)\n",
+            "    leader.override_color = {{'kind':'Rgb','value':{{'r':255,'g':0,'b':0}}}}\n",
             "doc.selection = [leader]\n"
         ), leader_handle.value())).unwrap();
         dispatch(&mut host, &format!("PY_RUN {}", script.display()));
@@ -2281,7 +2282,7 @@ mod tests {
         assert_eq!(edited.hookline_enabled, created_leader.hookline_enabled);
         assert_eq!(edited.normal, created_leader.normal);
         assert_eq!(edited.origin, created_leader.origin);
-        assert_eq!(edited.override_color, created_leader.override_color);
+        assert_eq!(edited.override_color, acadrust::types::Color::Rgb { r: 255, g: 0, b: 0 });
         assert_eq!(host.selection(), vec![leader_handle]);
         assert_geometry(&expected, host.document());
 
@@ -2292,7 +2293,7 @@ mod tests {
             ("'vertices':[{'x':0.0,'y':0.0,'z':0.0}]", "at least 2"),
             ("'text_height':0.0", "greater than zero"),
             ("'dimension_style':'Missing'", "dimension style"),
-            ("'override_color':{}", "outside the editable schema"),
+            ("'override_color':{'kind':'Index','value':300}", "Color"),
         ] {
             dispatch(&mut host, &format!(
                 "PY_EVAL ocs.update_many('Reject leader', [{{'handle':{}, {patch}}}])",
@@ -2325,6 +2326,10 @@ mod tests {
                 assert_eq!(leader.annotation_handle, text_handle);
             }
             assert!(!leader.arrow_enabled);
+            // BLOCKER: neither writer stores `override_color`, so it reopens
+            // as ByLayer in both formats.
+            assert_eq!(leader.override_color, acadrust::types::Color::ByLayer,
+                "acadrust now persists Leader.override_color; drop the blocker");
             if is_dxf {
                 // BLOCKER: the DXF writer emits group 213 but the reader's
                 // coordinate mapping does not reassemble it.

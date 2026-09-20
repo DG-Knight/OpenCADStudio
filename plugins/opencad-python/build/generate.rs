@@ -110,7 +110,7 @@ const BUILTIN: &[&str] = &[
 ];
 /// Types with their own hand-written conversion helpers in `ocs_module.rs`
 /// (`vector3_to_py`/`py_to_vector3`, etc.) rather than generated ones.
-const SPECIAL: &[&str] = &["Vector3", "Vector2", "Handle"];
+const SPECIAL: &[&str] = &["Vector3", "Vector2", "Handle", "Color"];
 
 enum Classify {
     /// A C-like enum: every variant is a unit variant. Represented in Python
@@ -289,6 +289,7 @@ fn default_expr(type_id: &str) -> String {
         "Vector3" => "acadrust::types::Vector3::ZERO".to_string(),
         "Vector2" => "acadrust::types::Vector2::ZERO".to_string(),
         "Handle" => "acadrust::Handle::new(0)".to_string(),
+        "Color" => "acadrust::types::Color::ByLayer".to_string(),
         other => format!("default_{}()", snake_case(other)),
     }
 }
@@ -309,6 +310,7 @@ fn leaf_to_py(registry: &TypeRegistry, type_id: &str, item_expr: &str) -> String
         "Vector3" => format!("vector3_to_py_dict(vm, {item_expr})"),
         "Vector2" => format!("vector2_to_py(vm, {item_expr})"),
         "Handle" => format!("Ok(vm.new_pyobj({parenthesized}.value()))"),
+        "Color" => format!("color_to_py_dict(vm, {item_expr})"),
         other => {
             let info = get(registry, other)
                 .unwrap_or_else(|| panic!("type {other} missing from registry"));
@@ -333,6 +335,7 @@ fn leaf_from_py(registry: &TypeRegistry, type_id: &str, value_expr: &str) -> Str
         "Vector3" => format!("py_to_vector3_dict({value_expr}, vm)"),
         "Vector2" => format!("py_to_vector2({value_expr}, vm)"),
         "Handle" => format!("{value_expr}.try_into_value::<u64>(vm).map(acadrust::Handle::new)"),
+        "Color" => format!("py_to_color_dict({value_expr}, vm)"),
         other => {
             let info = get(registry, other)
                 .unwrap_or_else(|| panic!("type {other} missing from registry"));

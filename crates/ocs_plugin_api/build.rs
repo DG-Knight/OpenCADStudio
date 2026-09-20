@@ -778,6 +778,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                             | "text_height"
                             | "text_width"
                             | "vertices"
+                            | "override_color"
                             | "annotation_handle"
                             | "normal"
                             | "horizontal_direction"

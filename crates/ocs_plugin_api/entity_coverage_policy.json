@@ -281,6 +281,7 @@
       "text_height",
       "text_width",
       "vertices",
+      "override_color",
       "annotation_handle",
       "normal",
       "horizontal_direction",

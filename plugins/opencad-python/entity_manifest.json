@@ -262,11 +262,7 @@
         "dwg_unknown_bit3": { "exclude": true },
         "dwg_unknown_bit4": { "exclude": true },
         "dwg_unknown_bit5": { "exclude": true },
-        "dwg_unknown_short1": { "exclude": true },
-        "override_color": {
-          "exclude": true,
-          "_comment": "Color is a multi-payload tagged enum the generator cannot express yet. It stays snapshot-readable and is preserved untouched by Python edits."
-        }
+        "dwg_unknown_short1": { "exclude": true }
       }
     }
   }

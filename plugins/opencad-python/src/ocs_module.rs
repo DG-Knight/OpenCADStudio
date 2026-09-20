@@ -3131,6 +3131,63 @@ mod ocs {
         }
     }
 
+    /// `Color` as `{"kind": "ByLayer" | "None" | "ByBlock"}`,
+    /// `{"kind": "Index", "value": n}` or
+    /// `{"kind": "Rgb", "value": {"r": .., "g": .., "b": ..}}`.
+    fn color_to_py_dict(vm: &VirtualMachine, color: &acadrust::types::Color) -> PyResult<PyObjectRef> {
+        use acadrust::types::Color;
+        let dict = vm.ctx.new_dict();
+        match color {
+            Color::ByLayer => dict.set_item("kind", vm.new_pyobj("ByLayer"), vm)?,
+            Color::None => dict.set_item("kind", vm.new_pyobj("None"), vm)?,
+            Color::ByBlock => dict.set_item("kind", vm.new_pyobj("ByBlock"), vm)?,
+            Color::Index(index) => {
+                dict.set_item("kind", vm.new_pyobj("Index"), vm)?;
+                dict.set_item("value", vm.new_pyobj(i64::from(*index)), vm)?;
+            }
+            Color::Rgb { r, g, b } => {
+                dict.set_item("kind", vm.new_pyobj("Rgb"), vm)?;
+                let rgb = vm.ctx.new_dict();
+                rgb.set_item("r", vm.new_pyobj(i64::from(*r)), vm)?;
+                rgb.set_item("g", vm.new_pyobj(i64::from(*g)), vm)?;
+                rgb.set_item("b", vm.new_pyobj(i64::from(*b)), vm)?;
+                dict.set_item("value", PyObjectRef::from(rgb), vm)?;
+            }
+        }
+        Ok(dict.into())
+    }
+
+    fn py_to_color_dict(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<acadrust::types::Color> {
+        use acadrust::types::Color;
+        let dict = value.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?;
+        let kind = dict.get_item("kind", vm)?.try_into_value::<String>(vm)?;
+        let byte = |v: PyObjectRef, what: &str| -> PyResult<u8> {
+            let n = v.try_into_value::<i64>(vm)?;
+            u8::try_from(n).map_err(|_| vm.new_value_error(format!("Color {what} must be 0..=255")))
+        };
+        Ok(match kind.as_str() {
+            "ByLayer" => Color::ByLayer,
+            "None" => Color::None,
+            "ByBlock" => Color::ByBlock,
+            "Index" => {
+                let index = byte(dict.get_item("value", vm)?, "index")?;
+                if index == 0 {
+                    return Err(vm.new_value_error("Color index must be 1..=255; use ByBlock for 0".to_owned()));
+                }
+                Color::Index(index)
+            }
+            "Rgb" => {
+                let rgb = dict.get_item("value", vm)?.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?;
+                Color::Rgb {
+                    r: byte(rgb.get_item("r", vm)?, "r")?,
+                    g: byte(rgb.get_item("g", vm)?, "g")?,
+                    b: byte(rgb.get_item("b", vm)?, "b")?,
+                }
+            }
+            other => return Err(vm.new_value_error(format!("ocs: unsupported Color kind: {other}"))),
+        })
+    }
+
     /// Accept a Python int or float; `try_into_value::<f64>` rejects ints.
     fn py_number_to_f64(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<f64> {
         Ok(value.try_float(vm)?.to_f64())

@@ -1684,6 +1684,7 @@ mod tests {
                 "Leader.text_width".to_owned(),
                 "Leader.vertices".to_owned(),
                 "Leader.annotation_handle".to_owned(),
+                "Leader.override_color".to_owned(),
                 "Leader.normal".to_owned(),
                 "Leader.horizontal_direction".to_owned(),
                 "Leader.block_offset".to_owned(),
