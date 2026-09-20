@@ -176,3 +176,5 @@ The repeatable live-editor evaluation draws three isolated entities in one batch
 ```sh
 python3 docs/automation/mcp_eval.py target/debug/OpenCADStudio
 ```
+
+The web build is driven through two JavaScript functions instead of a process; see [web.md](web.md).
