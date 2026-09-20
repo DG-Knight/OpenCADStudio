@@ -3197,6 +3197,20 @@ mod tests {
         let mut create_script = case.create.replace("TMPDIR", &tmp);
         let paper = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle.value());
         let layer0 = host.document().layers.iter().find(|l| l.name == "0").map(|l| l.handle.value());
+        if create_script.contains("VIEWPORTHANDLE") || create_script.contains("SCALEHANDLE") {
+            // A view border ties to an existing viewport and scale.
+            let owner = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle).unwrap();
+            let mut viewport = acadrust::entities::Viewport::new();
+            viewport.common.owner_handle = owner;
+            let viewport_handle = host.add_entity(EntityType::Viewport(viewport));
+            let scale_handle = host.document_mut().allocate_handle();
+            let mut scale = acadrust::objects::Scale::new("1:1", 1.0, 1.0);
+            scale.handle = scale_handle;
+            host.document_mut().objects.insert(scale_handle, acadrust::objects::ObjectType::Scale(scale));
+            create_script = create_script
+                .replace("VIEWPORTHANDLE", &viewport_handle.value().to_string())
+                .replace("SCALEHANDLE", &scale_handle.value().to_string());
+        }
         create_script = create_script
             .replace("PAPERSPACE", &paper.unwrap_or_default().to_string())
             .replace("LAYER0", &layer0.unwrap_or_default().to_string());
@@ -3634,6 +3648,46 @@ mod tests {
             expect_reedited: "at120.0,110.0 95.0x60.0 vh75.0 tw0.25 frozen1",
             expect_edited_dxf: "",
             expect_reedited_dxf: "",
+        });
+    }
+
+    #[test]
+    fn staged_python_view_border_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('ViewBorder', min=[0.0, 0.0], max=[40.0, 30.0], center=[20.0, 15.0], scale=1.0,\n",
+                "    active_viewport=VIEWPORTHANDLE, scale_handle=SCALEHANDLE)\n"),
+            edit: concat!(
+                "vb = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit view border'):\n",
+                "    vb.max = [60.0, 45.0]\n",
+                "    vb.center = [30.0, 22.5]\n",
+                "    vb.scale = 2.0\n",
+                "    vb.rotation_angle = 0.3\n",
+                "doc.selection = [vb]\n"),
+            rejects: &[
+                ("'max':[-1.0, 5.0]", "below max"),
+                ("'scale':0.0", "greater than zero"),
+                ("'rotation_angle':float('nan')", "finite"),
+                ("'center':[float('inf'), 0.0]", "finite"),
+                ("'active_viewport':999999", "does not exist"),
+                ("'scale_handle':999999", "does not exist"),
+                ("'version':3", "read-only"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::ViewBorder(_)),
+            digest: |entity| match entity {
+                EntityType::ViewBorder(v) => format!("max{:.1},{:.1} c{:.1},{:.1} s{:.1} r{:.1}", v.max[0], v.max[1],
+                    v.center[0], v.center[1], v.scale, v.rotation_angle),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::ViewBorder(v) = entity { v.scale = 3.0; },
+            expect_created: "max40.0,30.0 c20.0,15.0 s1.0 r0.0",
+            expect_edited: "max60.0,45.0 c30.0,22.5 s2.0 r0.3",
+            expect_reedited: "max60.0,45.0 c30.0,22.5 s3.0 r0.3",
+            // BLOCKER: a DXF DRAWINGVIEW reopens as a different (opaque) entity
+            // kind, not as a ViewBorder; only DWG restores the typed record.
+            expect_edited_dxf: "wrong kind",
+            expect_reedited_dxf: "wrong kind",
         });
     }
 

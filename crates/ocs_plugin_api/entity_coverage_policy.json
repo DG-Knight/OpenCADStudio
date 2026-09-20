@@ -452,6 +452,16 @@
       "render_mode",
       "circle_sides",
       "ucs_icon_visible"
+    ],
+    "ViewBorder": [
+      "layer",
+      "min",
+      "max",
+      "center",
+      "scale",
+      "rotation_angle",
+      "active_viewport",
+      "scale_handle"
     ]
   },
   "readable": {
@@ -553,6 +563,9 @@
       "brightness",
       "contrast",
       "ambient_color"
+    ],
+    "ViewBorder": [
+      "version"
     ]
   },
   "aliases": {

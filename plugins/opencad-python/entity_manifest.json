@@ -34,7 +34,8 @@
     "RasterImage",
     "Wipeout",
     "Underlay",
-    "Viewport"
+    "Viewport",
+    "ViewBorder"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -402,6 +403,15 @@
         "center": { "required": true },
         "width": { "required": true },
         "height": { "required": true }
+      }
+    },
+    "ViewBorder": {
+      "fields": {
+        "version": { "read_only": true },
+        "min": { "required": true },
+        "max": { "required": true },
+        "active_viewport": { "required": true },
+        "scale_handle": { "required": true }
       }
     }
   }

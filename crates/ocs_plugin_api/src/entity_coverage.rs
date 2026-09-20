@@ -949,6 +949,32 @@ fn validate_viewport(
     Ok(())
 }
 
+/// ViewBorder: the frame of a drawing view, tied to a viewport and a scale.
+#[cfg(feature = "host")]
+fn validate_view_border(
+    old: Option<&crate::host::acadrust::entities::ViewBorder>,
+    new: &crate::host::acadrust::entities::ViewBorder,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    for (name, pair) in [("min", new.min), ("max", new.max), ("center", new.center)] {
+        if !pair[0].is_finite() || !pair[1].is_finite() {
+            return Err(format!("ViewBorder.{name} must be finite"));
+        }
+    }
+    if new.min[0] >= new.max[0] || new.min[1] >= new.max[1] {
+        return Err("ViewBorder.min must be below max on both axes".into());
+    }
+    if !new.scale.is_finite() || new.scale <= 0.0 {
+        return Err("ViewBorder.scale must be finite and greater than zero".into());
+    }
+    if !new.rotation_angle.is_finite() {
+        return Err("ViewBorder.rotation_angle must be finite".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -1053,6 +1079,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::Wipeout(value) => validate_wipeout(None, value)?,
         EntityType::Underlay(value) => validate_underlay(None, value)?,
         EntityType::Viewport(value) => validate_viewport(None, value)?,
+        EntityType::ViewBorder(value) => validate_view_border(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1418,6 +1445,7 @@ pub fn validate_entity_mutation(
         (EntityType::Wipeout(old), EntityType::Wipeout(new)) => validate_wipeout(Some(old), new)?,
         (EntityType::Underlay(old), EntityType::Underlay(new)) => validate_underlay(Some(old), new)?,
         (EntityType::Viewport(old), EntityType::Viewport(new)) => validate_viewport(Some(old), new)?,
+        (EntityType::ViewBorder(old), EntityType::ViewBorder(new)) => validate_view_border(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1679,6 +1707,17 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    if let EntityType::ViewBorder(value) = entity {
+        if !matches!(document.get_entity(value.active_viewport), Some(EntityType::Viewport(_))) {
+            return Err(format!("ViewBorder viewport {:?} does not exist", value.active_viewport));
+        }
+        if !matches!(
+            document.objects.get(&value.scale_handle),
+            Some(crate::host::acadrust::objects::ObjectType::Scale(_))
+        ) {
+            return Err(format!("ViewBorder scale {:?} does not exist", value.scale_handle));
         }
     }
     if let EntityType::Viewport(value) = entity {
@@ -2144,6 +2183,7 @@ mod tests {
                         | "Wipeout"
                         | "Underlay"
                         | "Viewport"
+                        | "ViewBorder"
                 )
             {
                 assert!(
@@ -2459,6 +2499,13 @@ mod tests {
                 "Viewport.render_mode".to_owned(),
                 "Viewport.circle_sides".to_owned(),
                 "Viewport.ucs_icon_visible".to_owned(),
+                "ViewBorder.min".to_owned(),
+                "ViewBorder.max".to_owned(),
+                "ViewBorder.center".to_owned(),
+                "ViewBorder.scale".to_owned(),
+                "ViewBorder.rotation_angle".to_owned(),
+                "ViewBorder.active_viewport".to_owned(),
+                "ViewBorder.scale_handle".to_owned(),
             ])
         );
     }
