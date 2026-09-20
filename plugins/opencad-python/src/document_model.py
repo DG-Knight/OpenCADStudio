@@ -1,5 +1,27 @@
 """Thin Python view over OCS host API v7 entity transactions and coverage."""
 
+def _coordinates(value, width):
+    return dict(zip("xyz"[:width], (float(axis) for axis in value)))
+
+
+def _coerce_points(kind, properties):
+    """Let create_entity take (x, y, z) tuples for point properties, as
+    transaction edits already do, by using the property types in the schema."""
+    schema = ocs.entity_coverage(kind)
+    types = {row["name"]: row for row in schema["properties"]} if schema else {}
+    result = {}
+    for name, value in properties.items():
+        row = types.get(name)
+        if row is not None and row["type"] in ("Vector2", "Vector3"):
+            width = 2 if row["type"] == "Vector2" else 3
+            if row["sequence"]:
+                value = [_coordinates(item, width) if isinstance(item, (tuple, list)) else item for item in value]
+            elif isinstance(value, (tuple, list)):
+                value = _coordinates(value, width)
+        result[name] = value
+    return result
+
+
 class _Entity:
     def __init__(self, document, handle):
         object.__setattr__(self, "_document", document)
@@ -117,6 +139,13 @@ class _Solids:
     def pyramid(self, center=(0, 0, 0), radius=1, height=1, sides=4, layer=None):
         return self._create("pyramid", tuple(center) + (radius, height, sides), layer)
 
+    def region(self, profile, layer=None, delete_source=False):
+        """Make a planar region from one closed planar profile (a circle,
+        ellipse, closed polyline or spline). Keeps the profile unless
+        `delete_source` is true, and uses the profile's layer by default."""
+        handle = profile.handle if isinstance(profile, _Entity) else int(profile)
+        return self._document.entities[ocs.solid_region(handle, layer, bool(delete_source))]
+
     def transform(self, entity, matrix):
         """Apply a column-major 4x4 rigid transform (16 numbers) in place."""
         handle = entity.handle if isinstance(entity, _Entity) else int(entity)
@@ -151,7 +180,7 @@ class _Document:
         """Create one mapped entity and return its live document descriptor."""
         if "kind" in properties or "handle" in properties:
             raise ValueError("kind and handle are managed by create_entity")
-        handle = ocs.add(dict(kind=kind, **properties))
+        handle = ocs.add(dict(kind=kind, **_coerce_points(kind, properties)))
         return self.entities[handle]
 
     def delete_entity(self, entity):

@@ -620,6 +620,47 @@ impl<'a> HostSession<'a> {
                 }
                 Ok(handle)
             }
+            SolidOperation::RegionFromProfile { source, layer, delete_source } => {
+                if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
+                    return Err("layer name is empty".into());
+                }
+                let entity = self
+                    .document()
+                    .get_entity(source)
+                    .cloned()
+                    .ok_or_else(|| format!("entity {source:?} does not exist"))?;
+                if matches!(entity, EntityType::Region(_)) {
+                    return Err("the source is already a region".into());
+                }
+                if delete_source && self.app.tabs[self.tab].scene.is_layer_locked(source) {
+                    return Err(format!("entity {source:?} is on a locked layer"));
+                }
+                let (plane, loops, closed) = crate::scene::model::presspull_model::profile_geometry(&entity)
+                    .ok_or("the source is not a planar profile a region can be made from")?;
+                if !closed {
+                    return Err("the profile must be closed".into());
+                }
+                let body = cadkernel::brep::planar_region(plane, &loops)
+                    .ok_or("the geometry kernel could not build a region from this profile")?;
+                let sat = crate::scene::convert::acis_export::solid_to_sat(&body)
+                    .ok_or("the region could not be exported losslessly")?;
+                let mut region = acadrust::entities::Region::new();
+                region.point_of_reference =
+                    acadrust::types::Vector3::new(plane.origin[0], plane.origin[1], plane.origin[2]);
+                region.wires = model::edge_wires(&body);
+                region.set_sat_document(&sat);
+                region.common.layer = layer.unwrap_or_else(|| entity.common().layer.clone());
+                self.push_undo("Create region");
+                let handle = self.add_entity(EntityType::Region(region));
+                if handle.is_null() {
+                    return Err("the region could not be added".into());
+                }
+                if delete_source {
+                    self.app.tabs[self.tab].scene.erase_entities(&[source]);
+                    self.publish_document_view();
+                }
+                Ok(handle)
+            }
             SolidOperation::Transform { handle, matrix } => {
                 if matrix.iter().any(|v| !v.is_finite()) {
                     return Err("transform matrix must be finite".into());
@@ -4900,6 +4941,134 @@ mod tests {
         // Scripts cannot create a Body and get the explanatory message.
         dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Body')");
         assert!(host.app.command_line.history.last().unwrap().text.contains("use doc.solids"), "{}", host.app.command_line.history.last().unwrap().text);
+    }
+
+    #[test]
+    fn audit_python_region_lifecycle_over_real_ipc() {
+        use crate::scene::convert::solid3d_tess::kernel_acis_body;
+        use crate::scene::model::solid_model as sm;
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let regions = |host: &HostSession<'_>| -> Vec<Handle> {
+            let mut list: Vec<_> = host.document().entities().filter_map(|e| match e {
+                EntityType::Region(r) => Some(r.common.handle), _ => None }).collect();
+            list.sort_by_key(|h| h.value());
+            list
+        };
+        let extent_in = |document: &CadDocument, handle: Handle| {
+            let Some(EntityType::Region(region)) = document.get_entity(handle) else { panic!("no region {handle:?}") };
+            let body = kernel_acis_body(&region.acis_data).expect("region payload lifts losslessly");
+            sm::extent(&body).unwrap()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+
+        // C: regions from a circle (source kept), a closed rectangle (source
+        // deleted) and a second circle on its own layer.
+        let script = std::env::temp_dir().join(format!("ocs_region_create_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "doc = ocs.active_document\n",
+            "circle = doc.create_entity('Circle', center=(0, 0, 0), radius=5)\n",
+            "rect = doc.create_entity('LwPolyline', is_closed=True, vertices=[{'location': {'x': 20.0, 'y': 0.0}}, {'location': {'x': 30.0, 'y': 0.0}}, {'location': {'x': 30.0, 'y': 6.0}}, {'location': {'x': 20.0, 'y': 6.0}}])\n",
+            "doc.solids.region(circle)\n",
+            "doc.solids.region(rect, delete_source=True)\n",
+            "other = doc.create_entity('Circle', center=(50, 0, 0), radius=2, layer='PROFILES')\n",
+            "doc.solids.region(other, layer='REGIONS')\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let list = regions(&host);
+        assert_eq!(list.len(), 3, "{}", last(&host));
+        let (low, high) = extent_in(host.document(), list[0]);
+        assert!(close(low[0], -5.0) && close(high[0], 5.0) && close(low[1], -5.0) && close(high[1], 5.0) && close(low[2], 0.0) && close(high[2], 0.0), "{low:?} {high:?}");
+        let (low, high) = extent_in(host.document(), list[1]);
+        assert!(close(low[0], 20.0) && close(high[0], 30.0) && close(high[1], 6.0), "{low:?} {high:?}");
+        let layer_of = |host: &HostSession<'_>, handle: Handle| host.document().get_entity(handle).unwrap().common().layer.clone();
+        assert_eq!(layer_of(&host, list[0]), "0", "defaults to the profile's layer");
+        assert_eq!(layer_of(&host, list[2]), "REGIONS");
+        let circles = host.document().entities().filter(|e| matches!(e, EntityType::Circle(_))).count();
+        let polylines = host.document().entities().filter(|e| matches!(e, EntityType::LwPolyline(_))).count();
+        assert_eq!((circles, polylines), (2, 0), "delete_source removed only the rectangle");
+        let Some(EntityType::Region(first)) = host.document().get_entity(list[0]) else { unreachable!() };
+        assert_eq!((first.wires.is_empty(), first.point_of_reference.z), (false, 0.0));
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[list[0]]).is_empty(), "no canvas geometry");
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", list[0].value()));
+        assert!(last(&host).contains("Region"));
+
+        // V: refusals change nothing and leave no undo step.
+        let open_line = host.add_entity(EntityType::Line(acadrust::entities::Line::from_points(
+            acadrust::types::Vector3::ZERO, acadrust::types::Vector3::new(5.0, 0.0, 0.0))));
+        let mut open_poly = acadrust::entities::LwPolyline::new();
+        open_poly.vertices = vec![
+            acadrust::entities::LwVertex::new(acadrust::types::Vector2::new(0.0, 0.0)),
+            acadrust::entities::LwVertex::new(acadrust::types::Vector2::new(4.0, 0.0)),
+            acadrust::entities::LwVertex::new(acadrust::types::Vector2::new(4.0, 4.0)),
+        ];
+        let open_poly = host.add_entity(EntityType::LwPolyline(open_poly));
+        let ray = host.add_entity(EntityType::Ray(acadrust::entities::Ray::default()));
+        let entity_count = host.document().entities().count();
+        let undo_now = host.app.tabs[0].history.undo_stack.len();
+        for (command, message) in [
+            (format!("ocs.active_document.solids.region({})", open_line.value()), "must be closed"),
+            (format!("ocs.active_document.solids.region({})", open_poly.value()), "must be closed"),
+            (format!("ocs.active_document.solids.region({})", ray.value()), "planar profile"),
+            (format!("ocs.active_document.solids.region({})", list[0].value()), "already a region"),
+            ("ocs.active_document.solids.region(999999)".to_string(), "does not exist"),
+            (format!("ocs.active_document.solids.region({}, layer='')", open_line.value()), "layer name is empty"),
+        ] {
+            dispatch(&mut host, &format!("PY_EVAL {command}"));
+            assert!(last(&host).contains(message), "{command}: {}", last(&host));
+        }
+        assert_eq!(host.document().entities().count(), entity_count);
+        assert_eq!(host.app.tabs[0].history.undo_stack.len(), undo_now, "refusals record no undo step");
+
+        // E: a region moves through the same kernel channel.
+        let before = host.document().get_entity(list[0]).unwrap().clone();
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (10, 5, 0)).handle", list[0].value()));
+        let (low, high) = extent_in(host.document(), list[0]);
+        assert!(close(low[0], 5.0) && close(high[0], 15.0) && close(low[1], 0.0) && close(high[1], 10.0), "{low:?} {high:?}");
+
+        // W: both formats reopen a region that lifts with the same extent, and
+        // a reopened region moves again.
+        let dwg = crate::io::load_bytes("region.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("region.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let moved = extent_in(host.document(), list[0]);
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            assert_eq!(regions_in(document).len(), 3, "{format}");
+            let reopened = extent_in(document, list[0]);
+            for axis in 0..3 {
+                assert!(close(reopened.0[axis], moved.0[axis]) && close(reopened.1[axis], moved.1[axis]), "{format} extent {reopened:?} vs {moved:?}");
+            }
+            let Some(EntityType::Region(back)) = document.get_entity(list[0]) else { unreachable!() };
+            let again = host.add_entity(EntityType::Region(back.clone()));
+            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
+            assert!(close(extent_in(host.document(), again).0[0], reopened.0[0] + 100.0), "{format} re-edit");
+        }
+        fn regions_in(document: &CadDocument) -> Vec<Handle> {
+            document.entities().filter_map(|e| match e { EntityType::Region(r) => Some(r.common.handle), _ => None }).collect()
+        }
+
+        // D and U: delete, undo, and undo the creation steps exactly.
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", list[2].value()));
+        assert!(host.document().get_entity(list[2]).is_none());
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(list[2]).is_some(), "undo restores the deleted region");
+        // Two re-edits of reopened copies, then the move of the first region.
+        app.undo_steps(3);
+        assert_eq!(app.tabs[0].scene.document.get_entity(list[0]), Some(&before), "undoing the move restores the region exactly");
     }
 
     #[test]

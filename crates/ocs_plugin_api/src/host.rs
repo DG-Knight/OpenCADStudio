@@ -85,6 +85,11 @@ pub enum SolidOperation {
     /// Apply a rigid transform, given as a column-major 4x4 matrix, to an
     /// existing solid. Scaling and shear are refused.
     Transform { handle: Handle, matrix: [f64; 16] },
+    /// Build a planar region from one closed planar profile entity (a circle,
+    /// ellipse, closed polyline or spline, ...). The new region goes on
+    /// `layer`, or on the source's layer when `None`; `delete_source` erases
+    /// the profile afterwards, as the REGION command does.
+    RegionFromProfile { source: Handle, layer: Option<String>, delete_source: bool },
 }
 
 /// Value of a host-managed drafting or document setting exposed to plugins.

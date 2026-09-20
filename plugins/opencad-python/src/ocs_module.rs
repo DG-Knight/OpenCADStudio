@@ -458,6 +458,23 @@ mod ocs {
             .map_err(|error| vm.new_runtime_error(format!("ocs.solid_create: {error}")))
     }
 
+    /// Build a planar region from a closed planar profile entity.
+    #[pyfunction]
+    fn solid_region(source: u64, layer: Option<String>, delete_source: bool, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::SolidOperation;
+        let result = host_ctx::with_host(|host| {
+            host.solid_operation(SolidOperation::RegionFromProfile {
+                source: Handle::new(source),
+                layer,
+                delete_source,
+            })
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.solid_region: {error}")))
+    }
+
     /// Apply a column-major 4x4 rigid transform to a solid, body or region.
     #[pyfunction]
     fn solid_transform(handle: u64, matrix: Vec<f64>, vm: &VirtualMachine) -> PyResult<u64> {

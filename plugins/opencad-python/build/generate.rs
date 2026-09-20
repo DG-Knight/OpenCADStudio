@@ -406,6 +406,10 @@ fn leaf_to_py(registry: &TypeRegistry, type_id: &str, item_expr: &str) -> String
 
 /// `value_expr` must already be an owned `PyObjectRef` expression. Result: a `PyResult<T>` expression.
 fn leaf_from_py(registry: &TypeRegistry, type_id: &str, value_expr: &str) -> String {
+    if type_id == "f64" {
+        // RustPython's f64 conversion rejects ints; scripts write `radius=5`.
+        return format!("py_number_to_f64({value_expr}, vm)");
+    }
     if type_id == "u64" {
         // serde reports Rust `usize` as `u64`; the inferred cast serves both.
         return format!("{value_expr}.try_into_value::<u64>(vm).map(|n| n as _)");

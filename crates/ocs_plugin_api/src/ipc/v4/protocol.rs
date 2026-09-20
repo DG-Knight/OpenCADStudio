@@ -114,6 +114,7 @@ mod tests {
                 layer: Some("SOLIDS".into()),
             },
             SolidOperation::Transform { handle: acadrust::Handle::new(7), matrix: [1.0; 16] },
+            SolidOperation::RegionFromProfile { source: acadrust::Handle::new(3), layer: None, delete_source: true },
         ] {
             let bytes = bincode::serialize(&PluginRequest::SolidOperation { operation: operation.clone() }).unwrap();
             assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
