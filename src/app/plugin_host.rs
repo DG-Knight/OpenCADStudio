@@ -3201,7 +3201,7 @@ mod tests {
         // Insert is update-only: the host makes a block and one insert, and the
         // "create" script only has to exist.
         let update_only = create_script.contains("MAKEINSERT");
-        if update_only {
+        if update_only || create_script.contains("MAKEBLOCK") {
             let next = host.document().next_handle();
             let (record_handle, block_handle, end_handle) = (Handle::new(next), Handle::new(next + 1), Handle::new(next + 2));
             let mut record = acadrust::tables::BlockRecord::new("AUDITBLK");
@@ -3217,8 +3217,11 @@ mod tests {
             end.common.handle = end_handle;
             end.common.owner_handle = record_handle;
             host.document_mut().add_entity(EntityType::BlockEnd(end)).unwrap();
-            let insert = acadrust::entities::Insert::new("AUDITBLK", acadrust::types::Vector3::new(1.0, 2.0, 0.0));
-            host.add_entity(EntityType::Insert(insert));
+            if update_only {
+                let insert = acadrust::entities::Insert::new("AUDITBLK", acadrust::types::Vector3::new(1.0, 2.0, 0.0));
+                host.add_entity(EntityType::Insert(insert));
+            }
+            create_script = create_script.replace("BLOCKRECORD", &record_handle.value().to_string());
         }
         let paper = host.document().block_records.iter().find(|r| r.is_paper_space()).map(|r| r.handle.value());
         let layer0 = host.document().layers.iter().find(|l| l.name == "0").map(|l| l.handle.value());
@@ -4236,6 +4239,68 @@ mod tests {
             expect_reedited: "AUDITBLK at4.0,5.0 s2.0,3.0 r1.0 cols2x10.0",
             expect_edited_dxf: "",
             expect_reedited_dxf: "",
+            expect_edited_dwg: "",
+            expect_reedited_dwg: "",
+        });
+    }
+
+    #[test]
+    fn audit_python_attribute_definition_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "# MAKEBLOCK\n",
+                "doc.create_entity('AttributeDefinition', owner_handle=BLOCKRECORD, tag='PART_NO', prompt='Part number',\n",
+                "    default_value='PN-001', insertion_point=P(1.0, 2.0, 0.0), height=2.5, width_factor=1.25, oblique_angle=0.1,\n",
+                "    rotation=0.25, horizontal_alignment='Center', vertical_alignment='Top', alignment_point=P(3.0, 4.0, 0.0),\n",
+                "    flags={'invisible': True, 'constant': False, 'verify': True, 'preset': False, 'locked_position': False, 'annotative': False},\n",
+                "    field_length=12, text_generation_flags=2, lock_position=True)\n"),
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.insertion_point = (4.0, 5.0, 0.0)\n",
+                "    e.default_value = 'PN-002'\n",
+                "    e.prompt = 'Serial'\n",
+                "    e.height = 3.0\n",
+                "    e.width_factor = 0.8\n",
+                "    e.rotation = 0.5\n",
+                "    e.oblique_angle = 0.2\n",
+                "    e.horizontal_alignment = 'Right'\n",
+                "    e.vertical_alignment = 'Middle'\n",
+                "    e.flags = {'invisible': False, 'constant': True, 'verify': False, 'preset': True, 'locked_position': False, 'annotative': False}\n",
+                "    e.field_length = 20\n",
+                "doc.selection = [e]\n"),
+            rejects: &[
+                ("'tag':'BAD TAG'", "whitespace"),
+                ("'height':0.0", "greater than zero"),
+                ("'width_factor':0.0", "width_factor"),
+                ("'text_style':'Missing'", "does not exist"),
+                ("'owner_handle':999999", "read-only"),
+                ("'normal':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
+                ("'rotation':float('nan')", "finite"),
+                ("'horizontal_alignment':'Nowhere'", "unsupported"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::AttributeDefinition(_)),
+            digest: |entity| match entity {
+                EntityType::AttributeDefinition(v) => format!(
+                    "{}|{}|{} ins{:.1},{:.1} al{:.1},{:.1} h{:.1} r{:.2} wf{:.2} ob{:.2} {:?}/{:?} f{}{}{}{} fl{} tg{} lock{}",
+                    v.tag, v.prompt, v.default_value, v.insertion_point.x, v.insertion_point.y,
+                    v.alignment_point.x, v.alignment_point.y, v.height, v.rotation, v.width_factor, v.oblique_angle,
+                    v.horizontal_alignment, v.vertical_alignment,
+                    u8::from(v.flags.invisible), u8::from(v.flags.constant), u8::from(v.flags.verify), u8::from(v.flags.preset),
+                    v.field_length, v.text_generation_flags, u8::from(v.lock_position)),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::AttributeDefinition(v) = entity { v.default_value = "PN-003".into(); },
+            expect_created: "PART_NO|Part number|PN-001 ins1.0,2.0 al3.0,4.0 h2.5 r0.25 wf1.25 ob0.10 Center/Top f1010 fl12 tg2 lock1",
+            expect_edited: "PART_NO|Serial|PN-002 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
+            expect_reedited: "PART_NO|Serial|PN-003 ins4.0,5.0 al3.0,4.0 h3.0 r0.50 wf0.80 ob0.20 Right/Middle f0101 fl20 tg2 lock1",
+            // BLOCKER: acadrust's DXF ATTDEF reader handles only groups 1, 2, 3,
+            // 10, 40, 50, 280 and 101, so the alignment point and alignments,
+            // width factor, oblique angle, attribute flags, field length,
+            // generation flags, lock and text style (groups 7, 11, 41, 51, 70-74,
+            // 210, 280 lock) reopen as defaults. The writer emits all of them.
+            expect_edited_dxf: "PART_NO|Serial|PN-002 ins4.0,5.0 al0.0,0.0 h3.0 r0.50 wf1.00 ob0.00 Left/Baseline f0000 fl0 tg0 lock0",
+            expect_reedited_dxf: "PART_NO|Serial|PN-003 ins4.0,5.0 al0.0,0.0 h3.0 r0.50 wf1.00 ob0.00 Left/Baseline f0000 fl0 tg0 lock0",
             expect_edited_dwg: "",
             expect_reedited_dwg: "",
         });
