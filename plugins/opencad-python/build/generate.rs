@@ -218,7 +218,9 @@ fn helper_closure(manifest: &Manifest, registry: &TypeRegistry) -> Vec<String> {
             panic!("entity_manifest.json: type {name} (reached transitively) is not in the type registry");
         };
         for f in &info.fields {
-            queue.push(f.type_id.as_str().to_string());
+            if f.type_id.as_str() != "EntityCommon" {
+                queue.push(f.type_id.as_str().to_string());
+            }
         }
         for v in &info.variants {
             for f in &v.fields {
@@ -666,6 +668,14 @@ fn gen_struct(name: &str, info: &TypeInfo, registry: &TypeRegistry) -> String {
     let mut from_dict_fields = String::new();
     let mut default_fields = String::new();
     for f in &info.fields {
+        if f.type_id.as_str() == "EntityCommon" {
+            // A sub-record's own common data (layer, XDATA, handles) is not part
+            // of the scripted model; it defaults on the way in.
+            let default = "acadrust::entities::EntityCommon::default()";
+            from_dict_fields.push_str(&format!("        {}: {default},\n", f.name));
+            default_fields.push_str(&format!("        {}: {default},\n", f.name));
+            continue;
+        }
         let getter = getter_for_field(
             registry,
             f.type_id.as_str(),

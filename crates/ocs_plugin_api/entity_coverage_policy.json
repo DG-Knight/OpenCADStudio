@@ -344,6 +344,39 @@
       "break_spacing",
       "break_flow_direction",
       "break_options"
+    ],
+    "PolygonMesh": [
+      "layer",
+      "flags",
+      "m_vertex_count",
+      "n_vertex_count",
+      "m_smooth_density",
+      "n_smooth_density",
+      "smooth_type",
+      "elevation",
+      "normal",
+      "vertices"
+    ],
+    "PolyfaceMesh": [
+      "layer",
+      "elevation",
+      "flags",
+      "normal",
+      "start_width",
+      "end_width",
+      "smooth_surface",
+      "thickness",
+      "vertices",
+      "faces"
+    ],
+    "Mesh": [
+      "layer",
+      "blend_crease",
+      "subdivision_level",
+      "vertices",
+      "faces",
+      "edges",
+      "override_option"
     ]
   },
   "readable": {
@@ -393,6 +426,12 @@
       "base_style",
       "break_data",
       "break_ranges"
+    ],
+    "PolyfaceMesh": [
+      "seqend_handle"
+    ],
+    "Mesh": [
+      "version"
     ]
   },
   "aliases": {

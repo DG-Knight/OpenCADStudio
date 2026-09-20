@@ -622,6 +622,127 @@ fn validate_table(
     Ok(())
 }
 
+/// PolygonMesh: an M x N grid; the vertex list must match exactly.
+#[cfg(feature = "host")]
+fn validate_polygon_mesh(
+    old: Option<&crate::host::acadrust::entities::PolygonMeshEntity>,
+    new: &crate::host::acadrust::entities::PolygonMeshEntity,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    if new.m_vertex_count < 2 || new.n_vertex_count < 2 {
+        return Err("PolygonMesh.m_vertex_count and n_vertex_count must be at least 2".into());
+    }
+    let expected = new.m_vertex_count as usize * new.n_vertex_count as usize;
+    if new.vertices.len() != expected {
+        return Err(format!(
+            "PolygonMesh has {} vertices but {}x{} requires {expected}",
+            new.vertices.len(),
+            new.m_vertex_count,
+            new.n_vertex_count
+        ));
+    }
+    if new.m_smooth_density < 0 || new.n_smooth_density < 0 {
+        return Err("PolygonMesh smooth densities must be non-negative".into());
+    }
+    if !new.elevation.is_finite() {
+        return Err("PolygonMesh.elevation must be finite".into());
+    }
+    solid_normal("PolygonMesh.normal", &new.normal)?;
+    for (index, vertex) in new.vertices.iter().enumerate() {
+        finite_vector(&format!("PolygonMesh.vertices[{index}].location"), &vertex.location)?;
+    }
+    Ok(())
+}
+
+/// PolyfaceMesh: faces index the vertex list (1-based; a negative index hides
+/// that edge; 0 marks an unused corner).
+#[cfg(feature = "host")]
+fn validate_polyface_mesh(
+    old: Option<&crate::host::acadrust::entities::PolyfaceMesh>,
+    new: &crate::host::acadrust::entities::PolyfaceMesh,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    if !new.elevation.is_finite() || !new.thickness.is_finite() || !new.start_width.is_finite() || !new.end_width.is_finite() {
+        return Err("PolyfaceMesh elevation, thickness and widths must be finite".into());
+    }
+    solid_normal("PolyfaceMesh.normal", &new.normal)?;
+    if new.vertices.len() < 3 {
+        return Err("PolyfaceMesh.vertices requires at least 3 vertices".into());
+    }
+    for (index, vertex) in new.vertices.iter().enumerate() {
+        finite_vector(&format!("PolyfaceMesh.vertices[{index}].location"), &vertex.location)?;
+        if !vertex.bulge.is_finite() || !vertex.start_width.is_finite() || !vertex.end_width.is_finite() || !vertex.curve_tangent.is_finite() {
+            return Err(format!("PolyfaceMesh.vertices[{index}] has non-finite bulge, width or tangent"));
+        }
+    }
+    if new.faces.is_empty() {
+        return Err("PolyfaceMesh.faces requires at least 1 face".into());
+    }
+    let count = new.vertices.len() as i64;
+    for (index, face) in new.faces.iter().enumerate() {
+        let indices = [face.index1, face.index2, face.index3, face.index4];
+        for value in indices {
+            if i64::from(value).abs() > count {
+                return Err(format!(
+                    "PolyfaceMesh.faces[{index}] references vertex {} but only {count} exist",
+                    value.abs()
+                ));
+            }
+        }
+        if indices.iter().filter(|value| **value != 0).count() < 3 {
+            return Err(format!("PolyfaceMesh.faces[{index}] needs at least 3 vertex indices"));
+        }
+    }
+    Ok(())
+}
+
+/// Mesh (subdivision): faces and edges index the vertex list (0-based).
+#[cfg(feature = "host")]
+fn validate_mesh(
+    old: Option<&crate::host::acadrust::entities::Mesh>,
+    new: &crate::host::acadrust::entities::Mesh,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    if new.subdivision_level < 0 {
+        return Err("Mesh.subdivision_level must be non-negative".into());
+    }
+    if new.vertices.len() < 3 {
+        return Err("Mesh.vertices requires at least 3 vertices".into());
+    }
+    for (index, vertex) in new.vertices.iter().enumerate() {
+        finite_vector(&format!("Mesh.vertices[{index}]"), vertex)?;
+    }
+    for (index, face) in new.faces.iter().enumerate() {
+        if face.vertices.len() < 3 {
+            return Err(format!("Mesh.faces[{index}] needs at least 3 vertices"));
+        }
+        if let Some(bad) = face.vertices.iter().find(|vertex| **vertex >= new.vertices.len()) {
+            return Err(format!(
+                "Mesh.faces[{index}] references vertex {bad} but only {} exist",
+                new.vertices.len()
+            ));
+        }
+    }
+    for (index, edge) in new.edges.iter().enumerate() {
+        if edge.start >= new.vertices.len() || edge.end >= new.vertices.len() {
+            return Err(format!("Mesh.edges[{index}] references a vertex out of range"));
+        }
+        if edge.start == edge.end {
+            return Err(format!("Mesh.edges[{index}] has identical endpoints"));
+        }
+        if edge.crease.is_some_and(|crease| !crease.is_finite() || crease < 0.0) {
+            return Err(format!("Mesh.edges[{index}].crease must be finite and non-negative"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -718,6 +839,9 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::Dimension(value) => validate_dimension(None, value)?,
         EntityType::MultiLeader(value) => validate_multileader(None, value)?,
         EntityType::Table(value) => validate_table(None, value)?,
+        EntityType::PolygonMesh(value) => validate_polygon_mesh(None, value)?,
+        EntityType::PolyfaceMesh(value) => validate_polyface_mesh(None, value)?,
+        EntityType::Mesh(value) => validate_mesh(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1075,6 +1199,9 @@ pub fn validate_entity_mutation(
         (EntityType::Dimension(old), EntityType::Dimension(new)) => validate_dimension(Some(old), new)?,
         (EntityType::MultiLeader(old), EntityType::MultiLeader(new)) => validate_multileader(Some(old), new)?,
         (EntityType::Table(old), EntityType::Table(new)) => validate_table(Some(old), new)?,
+        (EntityType::PolygonMesh(old), EntityType::PolygonMesh(new)) => validate_polygon_mesh(Some(old), new)?,
+        (EntityType::PolyfaceMesh(old), EntityType::PolyfaceMesh(new)) => validate_polyface_mesh(Some(old), new)?,
+        (EntityType::Mesh(old), EntityType::Mesh(new)) => validate_mesh(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1749,6 +1876,9 @@ mod tests {
                         | "Dimension"
                         | "MultiLeader"
                         | "Table"
+                        | "PolygonMesh"
+                        | "PolyfaceMesh"
+                        | "Mesh"
                 )
             {
                 assert!(
@@ -1980,6 +2110,30 @@ mod tests {
                 "Table.break_spacing".to_owned(),
                 "Table.break_flow_direction".to_owned(),
                 "Table.break_options".to_owned(),
+                "PolygonMesh.flags".to_owned(),
+                "PolygonMesh.m_vertex_count".to_owned(),
+                "PolygonMesh.n_vertex_count".to_owned(),
+                "PolygonMesh.m_smooth_density".to_owned(),
+                "PolygonMesh.n_smooth_density".to_owned(),
+                "PolygonMesh.smooth_type".to_owned(),
+                "PolygonMesh.elevation".to_owned(),
+                "PolygonMesh.normal".to_owned(),
+                "PolygonMesh.vertices".to_owned(),
+                "PolyfaceMesh.elevation".to_owned(),
+                "PolyfaceMesh.flags".to_owned(),
+                "PolyfaceMesh.normal".to_owned(),
+                "PolyfaceMesh.start_width".to_owned(),
+                "PolyfaceMesh.end_width".to_owned(),
+                "PolyfaceMesh.smooth_surface".to_owned(),
+                "PolyfaceMesh.thickness".to_owned(),
+                "PolyfaceMesh.vertices".to_owned(),
+                "PolyfaceMesh.faces".to_owned(),
+                "Mesh.blend_crease".to_owned(),
+                "Mesh.subdivision_level".to_owned(),
+                "Mesh.vertices".to_owned(),
+                "Mesh.faces".to_owned(),
+                "Mesh.edges".to_owned(),
+                "Mesh.override_option".to_owned(),
             ])
         );
     }

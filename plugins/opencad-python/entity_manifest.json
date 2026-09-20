@@ -26,7 +26,10 @@
     "MLine",
     "Dimension",
     "MultiLeader",
-    "Table"
+    "Table",
+    "PolygonMesh",
+    "PolyfaceMesh",
+    "Mesh"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -309,6 +312,24 @@
         "legacy_border_colors": { "exclude": true, "_comment": "Generic LegacyBorderOverrides<T> is not expressible by the generator; legacy R13-R2000 border overrides are preserved untouched." },
         "legacy_border_line_weights": { "exclude": true },
         "legacy_border_visibility": { "exclude": true }
+      }
+    },
+    "PolygonMesh": {
+      "rust_constructor": "acadrust::entities::PolygonMeshEntity::default()",
+      "fields": { "vertices": { "required": true } }
+    },
+    "PolyfaceMesh": {
+      "fields": {
+        "vertices": { "required": true },
+        "faces": { "required": true },
+        "seqend_handle": { "read_only": true }
+      }
+    },
+    "Mesh": {
+      "fields": {
+        "vertices": { "required": true },
+        "faces": { "required": true },
+        "version": { "read_only": true }
       }
     }
   }

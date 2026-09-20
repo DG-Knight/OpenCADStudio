@@ -3100,6 +3100,242 @@ mod tests {
         assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
     }
 
+    /// One scripted lifecycle shared by the mesh kinds: create, edit,
+    /// reject, save/reopen both formats, re-edit, delete, undo/redo.
+    struct MeshCase {
+        create: &'static str,
+        edit: &'static str,
+        rejects: &'static [(&'static str, &'static str)],
+        is_kind: fn(&EntityType) -> bool,
+        digest: fn(&EntityType) -> String,
+        reedit: fn(&mut EntityType),
+        expect_created: &'static str,
+        expect_edited: &'static str,
+        expect_reedited: &'static str,
+    }
+
+    fn run_mesh_lifecycle(case: &MeshCase) {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let run_script = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+            let path = std::env::temp_dir().join(format!("ocs_mesh_{tag}_{}.py", std::process::id()));
+            std::fs::write(&path, format!("def P(x, y, z): return {{'x': x, 'y': y, 'z': z}}\ndoc = ocs.active_document\n{body}")).unwrap();
+            dispatch(host, &format!("PY_RUN {}", path.display()));
+            let _ = std::fs::remove_file(&path);
+        };
+
+        run_script(&mut host, "create", case.create);
+        let handle = host.document().entities().find(|entity| (case.is_kind)(entity))
+            .map(|entity| entity.common().handle)
+            .unwrap_or_else(|| panic!("Python did not create the mesh: {}", last_output(&host)));
+        let created = host.document().get_entity(handle).unwrap().clone();
+        assert_eq!((case.digest)(&created), case.expect_created);
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+
+        run_script(&mut host, "edit", &case.edit.replace("HANDLE", &handle.value().to_string()));
+        let expected = host.document().get_entity(handle).unwrap().clone();
+        assert_eq!((case.digest)(&expected), case.expect_edited, "edit failed: {}", last_output(&host));
+        assert_eq!(expected.common(), created.common());
+        assert_eq!(host.selection(), vec![handle]);
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty());
+
+        for (patch, message) in case.rejects {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many('Reject mesh', [{{'handle':{}, {patch}}}])", handle.value()));
+            assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
+            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+        }
+        let (first_patch, _) = case.rejects[0];
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{h}, 'layer':'Other'}}, {{'handle':{h}, {first_patch}}}])",
+            h = handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+
+        let dwg = crate::io::load_bytes("mesh.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("mesh.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let mut gaps = Vec::new();
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            match document.get_entity(handle) {
+                Some(entity) if (case.digest)(entity) == case.expect_edited => {}
+                Some(entity) => gaps.push(format!("{format}: {}", (case.digest)(entity))),
+                None => gaps.push(format!("{format}: entity missing")),
+            }
+        }
+        assert!(gaps.is_empty(), "persistence gaps (expected {}): {gaps:#?}", case.expect_edited);
+        for (name, mut document) in [("mesh-reedit.dwg", dwg), ("mesh-reedit.dxf", dxf)] {
+            let before = document.get_entity(handle).unwrap().clone();
+            let mut after = before.clone();
+            (case.reedit)(&mut after);
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            *document.get_entity_mut(handle).unwrap() = after;
+            let bytes = if name.ends_with("dwg") {
+                acadrust::DwgWriter::write_to_vec(&document).unwrap()
+            } else {
+                acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
+            };
+            let reopened = crate::io::load_bytes(name, bytes).unwrap();
+            assert_eq!((case.digest)(reopened.get_entity(handle).unwrap()), case.expect_reedited, "{name}");
+        }
+
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none());
+        for (name, bytes) in [
+            ("mesh-deleted.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()),
+            ("mesh-deleted.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+        ] {
+            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+        }
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
+    fn staged_python_polygon_mesh_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "verts = [{'location': P(i, j, 0.0)} for i in range(3) for j in range(3)]\n",
+                "doc.create_entity('PolygonMesh', m_vertex_count=3, n_vertex_count=3, vertices=verts)\n"),
+            edit: concat!(
+                "mesh = doc.entities[HANDLE]\n",
+                "verts = mesh.vertices\n",
+                "verts[4]['location'] = P(1.0, 1.0, 2.5)\n",
+                "with doc.transaction('Edit mesh'):\n",
+                "    mesh.vertices = verts\n",
+                "    mesh.m_smooth_density = 6\n",
+                "    mesh.n_smooth_density = 6\n",
+                "    mesh.smooth_type = 'Cubic'\n",
+                "doc.selection = [mesh]\n"),
+            rejects: &[
+                ("'m_vertex_count':4", "requires 12"),
+                ("'n_vertex_count':1", "at least 2"),
+                ("'m_smooth_density':-1", "non-negative"),
+                ("'elevation':float('nan')", "finite"),
+                ("'normal':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
+                ("'vertices':[{'location':{'x':float('nan'),'y':0.0,'z':0.0}}]*9", "finite"),
+                ("'smooth_type':'Spline'", "unsupported"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::PolygonMesh(_)),
+            digest: |entity| match entity {
+                EntityType::PolygonMesh(m) => format!("{}x{} v{} z{} d{}/{} {:?}", m.m_vertex_count, m.n_vertex_count,
+                    m.vertices.len(), m.vertices[4].location.z, m.m_smooth_density, m.n_smooth_density, m.smooth_type),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::PolygonMesh(m) = entity { m.vertices[0].location.z = 1.0; },
+            expect_created: "3x3 v9 z0 d0/0 NoSmooth",
+            expect_edited: "3x3 v9 z2.5 d6/6 Cubic",
+            expect_reedited: "3x3 v9 z2.5 d6/6 Cubic",
+        });
+    }
+
+    #[test]
+    fn staged_python_polyface_mesh_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "verts = [{'location': P(0.0, 0.0, 0.0)}, {'location': P(4.0, 0.0, 0.0)},\n",
+                "         {'location': P(4.0, 4.0, 0.0)}, {'location': P(0.0, 4.0, 0.0)}]\n",
+                "faces = [{'index1': 1, 'index2': 2, 'index3': 3}, {'index1': 1, 'index2': 3, 'index3': 4}]\n",
+                "doc.create_entity('PolyfaceMesh', vertices=verts, faces=faces)\n"),
+            edit: concat!(
+                "mesh = doc.entities[HANDLE]\n",
+                "verts = mesh.vertices\n",
+                "verts[2]['location'] = P(4.0, 4.0, 3.0)\n",
+                "verts.append({'location': P(2.0, 6.0, 0.0)})\n",
+                "faces = mesh.faces\n",
+                "faces.append({'index1': 3, 'index2': -4, 'index3': 5})\n",
+                "with doc.transaction('Edit mesh'):\n",
+                "    mesh.vertices = verts\n",
+                "    mesh.faces = faces\n",
+                "doc.selection = [mesh]\n"),
+            rejects: &[
+                ("'faces':[{'index1':1,'index2':2,'index3':9}]", "references vertex 9"),
+                ("'faces':[{'index1':1,'index2':2}]", "at least 3 vertex indices"),
+                ("'faces':[]", "at least 1 face"),
+                ("'vertices':[{'location':{'x':0.0,'y':0.0,'z':0.0}}]", "at least 3"),
+                ("'thickness':float('inf')", "finite"),
+                ("'seqend_handle':5", "read-only"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::PolyfaceMesh(_)),
+            digest: |entity| match entity {
+                EntityType::PolyfaceMesh(m) => format!("v{} f{} z{} last {:?}", m.vertices.len(), m.faces.len(),
+                    m.vertices[2].location.z,
+                    m.faces.last().map(|f| (f.index1, f.index2, f.index3))),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::PolyfaceMesh(m) = entity { m.vertices[0].location.z = 1.0; },
+            expect_created: "v4 f2 z0 last Some((1, 3, 4))",
+            expect_edited: "v5 f3 z3 last Some((3, -4, 5))",
+            expect_reedited: "v5 f3 z3 last Some((3, -4, 5))",
+        });
+    }
+
+    #[test]
+    fn staged_python_mesh_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "verts = [P(0.0, 0.0, 0.0), P(4.0, 0.0, 0.0), P(4.0, 4.0, 0.0), P(0.0, 4.0, 0.0)]\n",
+                "doc.create_entity('Mesh', vertices=verts, faces=[{'vertices': [0, 1, 2, 3]}],\n",
+                "    edges=[{'start': 0, 'end': 1, 'crease': 1.5}])\n"),
+            edit: concat!(
+                "mesh = doc.entities[HANDLE]\n",
+                "verts = mesh.vertices\n",
+                "verts.append(P(2.0, 6.0, 0.0))\n",
+                "faces = mesh.faces\n",
+                "faces.append({'vertices': [3, 2, 4]})\n",
+                "with doc.transaction('Edit mesh'):\n",
+                "    mesh.vertices = verts\n",
+                "    mesh.faces = faces\n",
+                "    mesh.subdivision_level = 1\n",
+                "doc.selection = [mesh]\n"),
+            rejects: &[
+                ("'faces':[{'vertices':[0,1,9]}]", "references vertex 9"),
+                ("'faces':[{'vertices':[0,1]}]", "at least 3 vertices"),
+                ("'edges':[{'start':0,'end':9}]", "out of range"),
+                ("'edges':[{'start':2,'end':2}]", "identical endpoints"),
+                ("'edges':[{'start':0,'end':1,'crease':-1.0}]", "non-negative"),
+                ("'subdivision_level':-1", "non-negative"),
+                ("'version':3", "read-only"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::Mesh(_)),
+            digest: |entity| match entity {
+                EntityType::Mesh(m) => format!("v{} f{} e{} sub{} crease {:?}", m.vertices.len(), m.faces.len(),
+                    m.edges.len(), m.subdivision_level, m.edges.first().and_then(|e| e.crease)),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::Mesh(m) = entity { m.vertices[0].z = 1.0; },
+            expect_created: "v4 f1 e1 sub0 crease Some(1.5)",
+            expect_edited: "v5 f2 e1 sub1 crease Some(1.5)",
+            expect_reedited: "v5 f2 e1 sub1 crease Some(1.5)",
+        });
+    }
+
     #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
