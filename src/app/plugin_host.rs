@@ -4449,6 +4449,115 @@ mod tests {
         });
     }
 
+    /// Evidence for docs/cadkernel-body-path.md: primitive, transform and
+    /// boolean bodies become Solid3D/Body payloads that lift back losslessly
+    /// and survive DWG and DXF. Slow in a debug build (booleans take ~23 s).
+    #[test]
+    #[ignore = "kernel spike; slow in debug builds"]
+    fn spike_kernel_body_round_trip() {
+        use crate::scene::model::solid_model as sm;
+        use crate::scene::convert::solid3d_tess::{kernel_acis_body, kernel_body};
+        let make = |body: &cadkernel::brep::Body| -> acadrust::entities::Solid3D {
+            let sat = crate::scene::convert::acis_export::solid_to_sat(body).expect("solid_to_sat");
+            let mut solid = acadrust::entities::Solid3D::new();
+            solid.wires = sm::edge_wires(body);
+            solid.set_sat_document(&sat);
+            solid
+        };
+        let report = |label: &str, solid: &acadrust::entities::Solid3D| {
+            let body = kernel_body(solid);
+            eprintln!("SPIKE {label}: lift={} volume={:?} wires={} sat_bytes={} binary={}",
+                body.is_some(), body.as_ref().map(sm::volume), solid.wires.len(),
+                solid.acis_data.sat_data.len(), solid.acis_data.is_binary);
+            body
+        };
+        let boxed = sm::box_solid([0.0, 0.0, 0.0], 10.0, 6.0, 4.0).unwrap();
+        let mut doc = acadrust::CadDocument::new();
+        let solid = make(&boxed);
+        report("created box", &solid);
+        let handle = doc.add_entity(EntityType::Solid3D(solid.clone())).unwrap();
+
+        // Round trip both formats and compare payloads.
+        let dwg = crate::io::load_bytes("s.dwg", acadrust::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("s.dxf", acadrust::DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
+        for (label, reopened) in [("DWG", &dwg), ("DXF", &dxf)] {
+            let Some(EntityType::Solid3D(back)) = reopened.get_entity(handle) else { panic!("{label} lost the solid") };
+            report(&format!("{label} reopen"), back);
+            eprintln!("SPIKE {label}: acis_data equal={} wires equal={} silhouettes {}", back.acis_data == solid.acis_data,
+                back.wires.len() == solid.wires.len(), back.silhouettes.len());
+        }
+
+        // Transforms: translate, rotate, mirror, matrix.
+        let moved = sm::by_matrix(&boxed, [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 5.,5.,5.,1.]).unwrap();
+        let turned = sm::turned(&boxed, 2, std::f64::consts::FRAC_PI_4, [0.0, 0.0, 0.0]).unwrap();
+        let mirrored = sm::mirrored(&boxed, 0, [0.0, 0.0, 0.0]).unwrap();
+        for (label, body) in [("moved", &moved), ("turned", &turned), ("mirrored", &mirrored)] {
+            let solid = make(body);
+            let extent = sm::extent(body);
+            eprintln!("SPIKE {label}: volume={:.3} extent={:?} lifts_back={}", sm::volume(body), extent, kernel_body(&solid).is_some());
+        }
+
+        // Booleans and primitives.
+        let cyl = sm::cylinder_solid([0.0, 0.0, -3.0], 2.0, 10.0).unwrap();
+        for (label, op) in [("union", sm::Bool::Union), ("subtract", sm::Bool::Subtract), ("intersect", sm::Bool::Intersect)] {
+            match sm::boolean_result(op, &boxed, &cyl) {
+                Ok(result) => { let solid = make(&result); eprintln!("SPIKE box {label} cylinder: volume={:.3} faces_wires={} lifts_back={}", sm::volume(&result), solid.wires.len(), kernel_body(&solid).is_some()); }
+                Err(snag) => eprintln!("SPIKE box {label} cylinder: refused {snag:?}"),
+            }
+        }
+        for (label, body) in [
+            ("sphere", sm::sphere_solid([0.0; 3], 3.0)), ("torus", sm::torus_solid([0.0; 3], 5.0, 1.0)),
+            ("wedge", sm::wedge_solid([0.0; 3], 4.0, 3.0, 2.0)), ("pyramid", sm::pyramid_solid([0.0; 3], 3.0, 4.0, 5)),
+        ] {
+            match body {
+                Some(body) => { let solid = make(&body); eprintln!("SPIKE {label}: volume={:.3} lifts_back={}", sm::volume(&body), kernel_body(&solid).is_some()); }
+                None => eprintln!("SPIKE {label}: kernel returned None"),
+            }
+        }
+
+        // The same payload inside a Body entity and a Region-like container.
+        let mut body_entity = acadrust::entities::Body::new();
+        body_entity.set_sat_document(&crate::scene::convert::acis_export::solid_to_sat(&boxed).unwrap());
+        let lifted = kernel_acis_body(&body_entity.acis_data);
+        eprintln!("SPIKE Body entity: lift={} volume={:?}", lifted.is_some(), lifted.as_ref().map(sm::volume));
+        let bh = doc.add_entity(EntityType::Body(body_entity)).unwrap();
+        let dwg = crate::io::load_bytes("b.dwg", acadrust::DwgWriter::write_to_vec(&doc).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("b.dxf", acadrust::DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
+        for (label, reopened) in [("DWG", &dwg), ("DXF", &dxf)] {
+            match reopened.get_entity(bh) {
+                Some(EntityType::Body(back)) => eprintln!("SPIKE Body {label}: lift={}", kernel_acis_body(&back.acis_data).is_some()),
+                other => eprintln!("SPIKE Body {label}: came back as {:?}", other.map(|e| format!("{e:?}").chars().take(30).collect::<String>())),
+            }
+        }
+    }
+
+    /// Per-operation kernel timings for docs/cadkernel-body-path.md.
+    #[test]
+    #[ignore = "kernel spike; slow in debug builds"]
+    fn spike_kernel_timings() {
+        use crate::scene::model::solid_model as sm;
+        use std::time::Instant;
+        let time = |label: &str, f: &mut dyn FnMut() -> String| {
+            let start = Instant::now();
+            let note = f();
+            eprintln!("TIMING {label}: {:.2}s {note}", start.elapsed().as_secs_f64());
+        };
+        let boxed = sm::box_solid([0.0; 3], 10.0, 6.0, 4.0).unwrap();
+        let cyl = sm::cylinder_solid([0.0, 0.0, -3.0], 2.0, 10.0).unwrap();
+        time("box primitive", &mut || format!("{}", sm::box_solid([0.0; 3], 10.0, 6.0, 4.0).is_some()));
+        time("sphere primitive", &mut || format!("{}", sm::sphere_solid([0.0; 3], 3.0).is_some()));
+        time("solid_to_sat(box)", &mut || format!("{}", crate::scene::convert::acis_export::solid_to_sat(&boxed).is_some()));
+        time("edge_wires(box)", &mut || format!("{}", sm::edge_wires(&boxed).len()));
+        time("transform (matrix)", &mut || format!("{}", sm::by_matrix(&boxed, [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 5.,5.,5.,1.]).is_some()));
+        time("union", &mut || format!("{}", sm::boolean_result(sm::Bool::Union, &boxed, &cyl).is_ok()));
+        time("subtract", &mut || format!("{}", sm::boolean_result(sm::Bool::Subtract, &boxed, &cyl).is_ok()));
+        time("intersect", &mut || format!("{}", sm::boolean_result(sm::Bool::Intersect, &boxed, &cyl).is_ok()));
+        let result = sm::boolean_result(sm::Bool::Union, &boxed, &cyl).unwrap();
+        time("solid_to_sat(union)", &mut || format!("{}", crate::scene::convert::acis_export::solid_to_sat(&result).is_some()));
+        time("edge_wires(union)", &mut || format!("{}", sm::edge_wires(&result).len()));
+        time("volume(union)", &mut || format!("{:.1}", sm::volume(&result)));
+    }
+
     #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
