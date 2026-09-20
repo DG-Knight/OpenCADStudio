@@ -1849,6 +1849,9 @@ impl OpenCADStudio {
             .active_cmd
             .as_ref()
             .is_some_and(|command| command.preserve_commit_layer());
+        // Task produced by a command the arm dispatches; it must reach the
+        // runtime or messages such as a chosen render mode are dropped.
+        let mut dispatched = Task::none();
         match result {
             CmdResult::OpenAutoConstrainSettings => {
                 self.auto_constrain_saved = Some(self.auto_constrain_settings.clone());
@@ -4754,7 +4757,7 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
-                let _ = self.dispatch_command(&cmd);
+                dispatched = self.dispatch_command(&cmd);
             }
             CmdResult::Dispatch(cmd) => {
                 // End this interactive front-end, then run the assembled command
@@ -4763,7 +4766,7 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
-                let _ = self.dispatch_command(&cmd);
+                dispatched = self.dispatch_command(&cmd);
             }
             CmdResult::EditTableCell { handle, point } => {
                 // TABLEDIT's pick: end the pick phase and hand (table, point)
@@ -7494,16 +7497,15 @@ impl OpenCADStudio {
         // The rich text canvas owns keyboard editing itself. Leaving the
         // hidden command input focused would make it consume Left/Right before
         // the editor can handle them.
-        if self.mtext_editor.is_some() {
-            return self.unfocus_widgets();
-        }
-        // The in-place TEXT editor needs keyboard focus on its own field.
-        if self.text_inline.is_some() {
-            return iced::widget::operation::focus(iced::widget::Id::new(
-                super::view::TEXT_INLINE_ID,
-            ));
-        }
-        self.focus_cmd_input()
+        let focus = if self.mtext_editor.is_some() {
+            self.unfocus_widgets()
+        } else if self.text_inline.is_some() {
+            // The in-place TEXT editor needs keyboard focus on its own field.
+            iced::widget::operation::focus(iced::widget::Id::new(super::view::TEXT_INLINE_ID))
+        } else {
+            self.focus_cmd_input()
+        };
+        Task::batch([dispatched, focus])
     }
 
     /// Restore the tangent-snap / ortho state that was in effect before the command started.
@@ -10099,5 +10101,44 @@ mod thicken_tests {
             .solid_history_operation(solids[0])
             .is_some());
         assert!(app.tabs[i].scene.document.get_entity(source).is_some());
+    }
+}
+
+#[cfg(test)]
+mod dispatched_command_task_tests {
+    use super::*;
+    use crate::command::CmdResult;
+    use acadrust::entities::ViewportRenderMode as Mode;
+
+    /// `CmdResult::Dispatch` and `CmdResult::Relaunch` run the assembled line
+    /// through `dispatch_command`, and the Task it returns must reach the
+    /// runtime: the render mode a VSCURRENT keyword picker chooses is applied
+    /// by a message that Task carries.
+    #[test]
+    fn dispatch_and_relaunch_keep_the_task_the_command_returns() {
+        let mut app = OpenCADStudio::new_for_test();
+        let _ = app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+
+        app.tabs[i].render_mode = Mode::Wireframe2D;
+        let task = app.apply_cmd_result(CmdResult::Dispatch("VSCURRENT GOURAUDSHADED".into()));
+        app.drive_headless_task(task).unwrap();
+        assert_eq!(
+            app.tabs[i].render_mode,
+            Mode::GouraudShaded,
+            "Dispatch dropped the dispatched command's task"
+        );
+
+        app.tabs[i].render_mode = Mode::Wireframe2D;
+        let task = app.apply_cmd_result(CmdResult::Relaunch(
+            "VSCURRENT GOURAUDSHADED".into(),
+            Vec::new(),
+        ));
+        app.drive_headless_task(task).unwrap();
+        assert_eq!(
+            app.tabs[i].render_mode,
+            Mode::GouraudShaded,
+            "Relaunch dropped the dispatched command's task"
+        );
     }
 }
