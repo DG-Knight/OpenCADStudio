@@ -20,11 +20,39 @@ use crate::scene::view::render;
 const ATTRIBUTE_GRIP_BASE: usize = 1;
 
 /// Whether an attribute is one the user can pick up and reposition. A constant
-/// attribute belongs to the block definition rather than this insert, and an
-/// invisible one is not drawn, so neither has a grip to offer. The attribute
-/// itself declines a locked position.
+/// attribute belongs to the block definition rather than this insert, and a
+/// locked position cannot be dragged. Visibility is a separate question: an
+/// invisible attribute that ATTMODE 2 displays is grippable while it shows.
 fn attribute_is_movable(att: &acadrust::entities::AttributeEntity) -> bool {
-    !att.flags.constant && !att.flags.invisible
+    !att.flags.constant && !att.lock_position && !att.flags.locked_position
+}
+
+/// A dragged attribute grip, mapped back to the attribute's stored position.
+/// The grip is placed on the displayed attribute, which an annotative insert
+/// scales about its insertion point; the target has to be unscaled the same
+/// way or the attribute lands `scale` times too far and the grip jumps.
+pub(crate) fn unscale_attribute_grip(
+    insert: &Insert,
+    annotation_scale: f32,
+    grip_id: usize,
+    apply: GripApply,
+) -> GripApply {
+    if grip_id < ATTRIBUTE_GRIP_BASE {
+        return apply;
+    }
+    let block_scale = insert_attribute_block_scale(
+        insert,
+        annotation_scale,
+        crate::scene::BlockScalePolicy::FromInsert,
+    );
+    if (block_scale - 1.0).abs() <= 1.0e-6 {
+        return apply;
+    }
+    let origin = glam::DVec3::new(insert.insert_point.x, insert.insert_point.y, insert.insert_point.z);
+    match apply {
+        GripApply::Absolute(target) => GripApply::Absolute(origin + (target - origin) / block_scale),
+        GripApply::Translate(delta) => GripApply::Translate(delta / block_scale),
+    }
 }
 
 fn attribute_is_render_visible(
@@ -89,8 +117,11 @@ fn grips(ins: &Insert) -> Vec<GripDef> {
     // block definition put it without dragging the whole block (#1259).
     // Attributes are stored beside the block in world space — the same space
     // `apply_grip` already translates them in.
+    // Without the document there is no ATTMODE to consult, so only an
+    // attribute that is drawn on its own terms gets a grip here;
+    // `visible_attribute_grips` is the display-aware list.
     out.extend(ins.attributes.iter().enumerate().filter_map(|(i, att)| {
-        if !attribute_is_movable(att) {
+        if !attribute_is_movable(att) || att.flags.invisible || att.common.invisible {
             return None;
         }
         let grip = Grippable::grips(att).into_iter().next()?;
@@ -121,9 +152,7 @@ pub(crate) fn visible_attribute_grips(
             .iter()
             .enumerate()
             .filter_map(|(i, attribute)| {
-                if attribute.flags.constant
-                    || attribute.lock_position
-                    || attribute.flags.locked_position
+                if !attribute_is_movable(attribute)
                     || !attribute_is_render_visible(document, visibility, attribute)
                 {
                     return None;
