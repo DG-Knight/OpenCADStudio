@@ -1330,6 +1330,24 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::Viewport(value) => validate_viewport(None, value)?,
         EntityType::ViewBorder(value) => validate_view_border(None, value)?,
         EntityType::Light(value) => validate_light(None, value)?,
+        EntityType::Insert(value) => {
+            if value.block_name.trim().is_empty() {
+                return Err("Insert.block_name is empty".into());
+            }
+            finite_vector("Insert.insert_point", &value.insert_point)?;
+            solid_normal("Insert.normal", &value.normal)?;
+            for (name, scale) in [("x_scale", value.x_scale()), ("y_scale", value.y_scale()), ("z_scale", value.z_scale())] {
+                insert_scale(&format!("Insert.{name}"), scale)?;
+            }
+            for (name, number) in [("rotation", value.rotation), ("column_spacing", value.column_spacing), ("row_spacing", value.row_spacing)] {
+                if !number.is_finite() {
+                    return Err(format!("Insert.{name} must be finite"));
+                }
+            }
+            if value.column_count == 0 || value.row_count == 0 {
+                return Err("Insert array counts must be greater than zero".into());
+            }
+        }
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1959,6 +1977,53 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    // An edit that keeps the block name is left alone so a legacy insert of a
+    // missing block stays editable; creation and renames must name a real,
+    // ordinary block that does not create a cycle.
+    let insert_is_unchanged_edit = |value: &crate::host::acadrust::entities::Insert| {
+        matches!(document.get_entity(value.common.handle),
+            Some(EntityType::Insert(existing)) if existing.block_name == value.block_name)
+    };
+    if let Some(value) = match entity {
+        EntityType::Insert(value) if !insert_is_unchanged_edit(value) => Some(value),
+        _ => None,
+    } {
+        let name = value.block_name.trim();
+        let record = document.block_records.get(name).ok_or_else(|| {
+            format!("Insert block {:?} does not exist", value.block_name)
+        })?;
+        if record.is_model_space() || record.is_paper_space() {
+            return Err("Insert cannot reference a model-space or paper-space block".into());
+        }
+        // A block cannot (transitively) contain an insert of itself.
+        let owner_name = document
+            .block_records
+            .iter()
+            .find(|candidate| candidate.handle == value.common.owner_handle)
+            .map(|candidate| candidate.name.clone());
+        if let Some(owner_name) = owner_name {
+            let mut pending = vec![record.name.clone()];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(current) = pending.pop() {
+                if current.eq_ignore_ascii_case(&owner_name) {
+                    return Err(format!(
+                        "inserting block {:?} into {owner_name:?} would make the block contain itself",
+                        value.block_name
+                    ));
+                }
+                if !seen.insert(current.to_ascii_lowercase()) {
+                    continue;
+                }
+                if let Some(block) = document.block_records.get(&current) {
+                    for handle in &block.entity_handles {
+                        if let Some(EntityType::Insert(nested)) = document.get_entity(*handle) {
+                            pending.push(nested.block_name.clone());
+                        }
+                    }
+                }
+            }
         }
     }
     if let EntityType::ViewBorder(value) = entity {
@@ -2984,8 +3049,9 @@ mod tests {
             .iter()
             .find(|property| property.name == "block_name")
             .unwrap();
-        assert_eq!(block_name.model_access, ModelAccess::ReadOnly);
-        assert_eq!(block_name.validation, "none");
+        // Named at creation; a geometry transaction can never change it (the
+        // mutation check rejects a different block).
+        assert_eq!(block_name.model_access, ModelAccess::ReadWrite);
         assert!(
             insert
                 .properties

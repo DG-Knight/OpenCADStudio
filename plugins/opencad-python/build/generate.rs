@@ -55,6 +55,9 @@ pub struct EntityOverride {
     /// create one without host-side reference setup.
     #[serde(default)]
     pub update_only: bool,
+    /// Message returned when a script tries to create an update-only kind.
+    #[serde(default)]
+    pub update_only_message: Option<String>,
     #[serde(default)]
     pub fields: std::collections::BTreeMap<String, FieldOverride>,
 }
@@ -874,7 +877,13 @@ pub(crate) fn entity_to_dict(vm: &VirtualMachine, entity: &acadrust::EntityType)
 fn gen_dict_to_entity(manifest: &Manifest, registry: &TypeRegistry) -> String {
     let mut arms = String::new();
     for kind in &manifest.type_filter {
-        if manifest.overrides.get(kind).is_some_and(|override_def| override_def.update_only) {
+        if let Some(override_def) = manifest.overrides.get(kind).filter(|o| o.update_only) {
+            let message = override_def.update_only_message.clone().unwrap_or_else(|| {
+                format!("{kind} cannot be created through the generic API; only existing {kind} entities can be edited")
+            });
+            arms.push_str(&format!(
+                "        \"{kind}\" => {{ return Err(vm.new_value_error({message:?}.to_owned())); }}\n"
+            ));
             continue;
         }
         if manifest.manual_kinds.contains(kind) {

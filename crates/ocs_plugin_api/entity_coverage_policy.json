@@ -175,6 +175,7 @@
     ],
     "Insert": [
       "layer",
+      "block_name",
       "insert_point",
       "x_scale",
       "y_scale",
@@ -488,9 +489,6 @@
     ]
   },
   "readable": {
-    "Insert": [
-      "block_name"
-    ],
     "Tolerance": [
       "dimension_style_handle"
     ],

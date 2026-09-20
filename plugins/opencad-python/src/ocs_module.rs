@@ -3851,7 +3851,7 @@ mod ocs {
 
         #[cfg(feature = "experimental-host-model")]
         #[test]
-        fn insert_is_update_only_and_preserves_block_identity() {
+        fn insert_is_created_by_block_name_and_preserves_block_identity() {
             with_vm(|vm| {
                 let mut insert =
                     acadrust::entities::Insert::new("DOOR", Vector3::new(1.0, 2.0, 0.0));
@@ -3877,7 +3877,14 @@ mod ocs {
                         .unwrap(),
                     2.0
                 );
-                assert!(dict_to_entity(&rendered, vm).is_err());
+                // A round-tripped dict names an existing block, so it creates one.
+                let recreated = dict_to_entity(&rendered, vm).unwrap();
+                assert!(matches!(&recreated, EntityType::Insert(value)
+                    if value.block_name == "DOOR" && value.x_scale() == 2.0));
+                // Creation must name the block.
+                let unnamed = vm.ctx.new_dict();
+                unnamed.set_item("kind", vm.new_pyobj("Insert"), vm).unwrap();
+                assert!(dict_to_entity(&unnamed, vm).is_err());
 
                 let patch = vm.ctx.new_dict();
                 set_vector3(vm, &patch, "insert_point", 4.0, 5.0, 0.0);
@@ -3896,7 +3903,10 @@ mod ocs {
                 patch
                     .set_item("block_name", vm.new_pyobj("OTHER"), vm)
                     .unwrap();
-                assert!(apply_dict_to_entity(&original, &patch, vm).is_err());
+                // The adapter only converts; the host mutation check refuses a
+                // different block, so an edit cannot swap block identity.
+                let renamed = apply_dict_to_entity(&original, &patch, vm).unwrap();
+                assert!(ocs_plugin_api::entity_coverage::validate_entity_mutation(&original, &renamed).is_err());
                 patch.del_item("block_name", vm).unwrap();
                 patch.set_item("z_scale", vm.new_pyobj(0.0), vm).unwrap();
                 assert!(apply_dict_to_entity(&original, &patch, vm).is_err());
@@ -4387,7 +4397,7 @@ mod ocs {
                 );
 
                 let dict = vm.ctx.new_dict();
-                dict.set_item("kind", vm.new_pyobj("Polyline"), vm).unwrap();
+                dict.set_item("kind", vm.new_pyobj("Polyline2D"), vm).unwrap();
                 let err = dict_to_entity(&dict, vm).expect_err("missing vertices must error");
                 let message = err.args().as_slice()[0]
                     .clone()
@@ -4401,7 +4411,7 @@ mod ocs {
                 // An explicitly empty vertex list is exactly as invalid as an
                 // absent one — both parse to the same empty Vec.
                 let dict = vm.ctx.new_dict();
-                dict.set_item("kind", vm.new_pyobj("Polyline"), vm).unwrap();
+                dict.set_item("kind", vm.new_pyobj("Polyline2D"), vm).unwrap();
                 dict.set_item("vertices", vm.ctx.new_list(vec![]).into(), vm)
                     .unwrap();
                 assert!(dict_to_entity(&dict, vm).is_err());
@@ -4409,10 +4419,24 @@ mod ocs {
         }
 
         #[test]
-        fn polyline_flags_override_exposes_closed_as_a_plain_bool() {
+        fn legacy_polyline_creation_is_refused_with_a_hint() {
             with_vm(|vm| {
                 let dict = vm.ctx.new_dict();
                 dict.set_item("kind", vm.new_pyobj("Polyline"), vm).unwrap();
+                let err = dict_to_entity(&dict, vm).expect_err("legacy Polyline is update-only");
+                let message = err.args().as_slice()[0]
+                    .clone()
+                    .try_into_value::<String>(vm)
+                    .unwrap();
+                assert!(message.contains("Polyline2D or Polyline3D"), "{message}");
+            });
+        }
+
+        #[test]
+        fn polyline_flags_override_exposes_closed_as_a_plain_bool() {
+            with_vm(|vm| {
+                let dict = vm.ctx.new_dict();
+                dict.set_item("kind", vm.new_pyobj("Polyline2D"), vm).unwrap();
                 dict.set_item("closed", vm.new_pyobj(true), vm).unwrap();
                 let vertex = vm.ctx.new_dict();
                 let location = vm.ctx.new_dict();
@@ -4424,8 +4448,8 @@ mod ocs {
                     .unwrap();
 
                 let entity = dict_to_entity(&dict, vm).expect("dict_to_entity");
-                let acadrust::EntityType::Polyline(polyline) = &entity else {
-                    panic!("expected Polyline, got {entity:?}");
+                let acadrust::EntityType::Polyline2D(polyline) = &entity else {
+                    panic!("expected Polyline2D, got {entity:?}");
                 };
                 assert!(polyline.flags.is_closed());
                 assert_eq!(polyline.vertices.len(), 1);

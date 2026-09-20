@@ -3200,7 +3200,14 @@ mod tests {
         let mut create_script = case.create.replace("TMPDIR", &tmp);
         // Insert is update-only: the host makes a block and one insert, and the
         // "create" script only has to exist.
-        let update_only = create_script.contains("MAKEINSERT");
+        let make_polyline = create_script.contains("MAKEPOLYLINE");
+        if make_polyline {
+            // The legacy Polyline is update-only: the host makes one to edit.
+            let points = [(0.0, 0.0, 0.0), (10.0, 0.0, 2.0), (10.0, 5.0, 4.0)]
+                .map(|(x, y, z)| acadrust::types::Vector3::new(x, y, z));
+            host.add_entity(EntityType::Polyline(acadrust::entities::Polyline::from_points(points.to_vec())));
+        }
+        let update_only = create_script.contains("MAKEINSERT") || make_polyline;
         if update_only || create_script.contains("MAKEBLOCK") {
             let next = host.document().next_handle();
             let (record_handle, block_handle, end_handle) = (Handle::new(next), Handle::new(next + 1), Handle::new(next + 2));
@@ -4127,7 +4134,8 @@ mod tests {
     #[test]
     fn audit_python_polyline_lifecycle_over_real_ipc() {
         run_mesh_lifecycle(&MeshCase {
-            create: concat!("doc.create_entity('Polyline', vertices=[{'location': {'x': 0.0, 'y': 0.0, 'z': 0.0}}, {'location': {'x': 10.0, 'y': 0.0, 'z': 2.0}}, {'location': {'x': 10.0, 'y': 5.0, 'z': 4.0}}])\n"),
+            create: "# MAKEPOLYLINE
+",
             edit: concat!("e = doc.entities[HANDLE]\n", "with doc.transaction('Edit'):\n", "    e.vertices = [{'location': {'x': 0.0, 'y': 0.0, 'z': 0.0}}, {'location': {'x': 10.0, 'y': 0.0, 'z': 2.0}}, {'location': {'x': 10.0, 'y': 8.0, 'z': 6.0}}, {'location': {'x': 0.0, 'y': 8.0, 'z': 6.0}}]\n", "    e.closed = True\n", "doc.selection = [e]\n"),
             rejects: &[
                 ("'vertices':[{'location':{'x':0.0,'y':0.0,'z':0.0}}]", "at least 2"),
@@ -4208,7 +4216,7 @@ mod tests {
     #[test]
     fn audit_python_insert_lifecycle_over_real_ipc() {
         run_mesh_lifecycle(&MeshCase {
-            create: "# MAKEINSERT\n",
+            create: concat!("# MAKEBLOCK\n", "doc.create_entity('Insert', block_name='AUDITBLK', insert_point=P(1.0, 2.0, 0.0))\n"),
             edit: concat!(
                 "e = doc.entities[HANDLE]\n",
                 "with doc.transaction('Edit'):\n",
@@ -4224,7 +4232,7 @@ mod tests {
                 ("'rotation':float('nan')", "finite"),
                 ("'column_count':0", "greater than zero"),
                 ("'insert_point':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
-                ("'block_name':'OTHER'", "read-only"),
+                ("'block_name':'OTHER'", "does not exist"),
                 ("'normal':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
             ],
             is_kind: |entity| matches!(entity, EntityType::Insert(_)),
@@ -4304,6 +4312,74 @@ mod tests {
             expect_edited_dwg: "",
             expect_reedited_dwg: "",
         });
+    }
+
+    #[test]
+    fn audit_python_insert_creation_rules_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let mut records = std::collections::BTreeMap::new();
+        for name in ["OUTER", "INNER"] {
+            let next = host.document().next_handle();
+            let (record_handle, block_handle, end_handle) = (Handle::new(next), Handle::new(next + 1), Handle::new(next + 2));
+            let mut record = acadrust::tables::BlockRecord::new(name);
+            record.handle = record_handle;
+            record.block_entity_handle = block_handle;
+            record.block_end_handle = end_handle;
+            host.document_mut().block_records.add(record).unwrap();
+            let mut block = acadrust::entities::Block::new(name, acadrust::types::Vector3::ZERO);
+            block.common.handle = block_handle;
+            block.common.owner_handle = record_handle;
+            host.document_mut().add_entity(EntityType::Block(block)).unwrap();
+            let mut end = acadrust::entities::BlockEnd::new();
+            end.common.handle = end_handle;
+            end.common.owner_handle = record_handle;
+            host.document_mut().add_entity(EntityType::BlockEnd(end)).unwrap();
+            records.insert(name, record_handle);
+        }
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let count = |host: &HostSession<'_>| host.document().entities().filter(|e| matches!(e, EntityType::Insert(_))).count();
+        let create = |name: &str, extra: &str| format!(
+            "PY_EVAL ocs.active_document.create_entity('Insert', block_name='{name}', insert_point={{'x':0.0,'y':0.0,'z':0.0}}{extra})");
+
+        // A valid insert of INNER into the drawing works.
+        dispatch(&mut host, &create("INNER", ""));
+        assert_eq!(count(&host), 1, "{}", last(&host));
+        // Refused: unknown block, model space, bad scale, zero array count.
+        for (command, message) in [
+            (create("MISSING", ""), "does not exist"),
+            (create("*Model_Space", ""), "model-space or paper-space"),
+            (create("INNER", ", x_scale=0.0"), "nonzero"),
+            (create("INNER", ", column_count=0"), "greater than zero"),
+            (create("", ""), "empty"),
+        ] {
+            dispatch(&mut host, &command);
+            assert_eq!(count(&host), 1, "{command}");
+            assert!(last(&host).contains(message), "{command}: {}", last(&host));
+        }
+        // A block cannot contain itself, directly or through another block.
+        let owner = |name: &str| format!(", owner_handle={}", records[name].value());
+        dispatch(&mut host, &create("OUTER", &owner("OUTER")));
+        assert_eq!(count(&host), 1);
+        assert!(last(&host).contains("contain itself"), "{}", last(&host));
+        dispatch(&mut host, &create("INNER", &owner("OUTER")));
+        assert_eq!(count(&host), 2, "{}", last(&host));
+        dispatch(&mut host, &create("OUTER", &owner("INNER")));
+        assert_eq!(count(&host), 2);
+        assert!(last(&host).contains("contain itself"), "{}", last(&host));
+        // The legacy Polyline cannot be created and says what to use instead.
+        dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Polyline', vertices=[])");
+        assert!(last(&host).contains("Polyline2D or Polyline3D"), "{}", last(&host));
     }
 
     #[test]
