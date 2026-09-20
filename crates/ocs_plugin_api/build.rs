@@ -796,6 +796,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                     | ("Underlay", _)
                     | ("Viewport", _)
                     | ("ViewBorder", _)
+                    | ("Light", _)
                     | (
                         "MLine",
                         "flags"

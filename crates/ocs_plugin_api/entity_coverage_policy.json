@@ -462,6 +462,29 @@
       "rotation_angle",
       "active_viewport",
       "scale_handle"
+    ],
+    "Light": [
+      "layer",
+      "name",
+      "light_type",
+      "position",
+      "target",
+      "status",
+      "light_color",
+      "plot_glyph",
+      "intensity",
+      "attenuation_type",
+      "use_attenuation_limits",
+      "attenuation_start_limit",
+      "attenuation_end_limit",
+      "hotspot_angle",
+      "falloff_angle",
+      "cast_shadows",
+      "shadow_type",
+      "shadow_map_size",
+      "shadow_map_softness",
+      "photometric_mode",
+      "photometric_data"
     ]
   },
   "readable": {
@@ -566,6 +589,9 @@
     ],
     "ViewBorder": [
       "version"
+    ],
+    "Light": [
+      "class_version"
     ]
   },
   "aliases": {

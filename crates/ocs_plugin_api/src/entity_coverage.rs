@@ -975,6 +975,51 @@ fn validate_view_border(
     Ok(())
 }
 
+/// Light: type, placement, intensity, attenuation and shadow settings.
+#[cfg(feature = "host")]
+fn validate_light(
+    old: Option<&crate::host::acadrust::entities::Light>,
+    new: &crate::host::acadrust::entities::Light,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    if new.name.trim().is_empty() {
+        return Err("Light.name is empty".into());
+    }
+    if !(1..=3).contains(&new.light_type) {
+        return Err("Light.light_type must be 1 (distant), 2 (point) or 3 (spot)".into());
+    }
+    finite_vector("Light.position", &new.position)?;
+    finite_vector("Light.target", &new.target)?;
+    if new.light_type != 2 && new.position == new.target {
+        return Err("a distant or spot Light needs a target different from its position".into());
+    }
+    if !new.intensity.is_finite() || new.intensity < 0.0 {
+        return Err("Light.intensity must be finite and non-negative".into());
+    }
+    for (name, value) in [
+        ("attenuation_start_limit", new.attenuation_start_limit),
+        ("attenuation_end_limit", new.attenuation_end_limit),
+        ("hotspot_angle", new.hotspot_angle),
+        ("falloff_angle", new.falloff_angle),
+    ] {
+        if !value.is_finite() || value < 0.0 {
+            return Err(format!("Light.{name} must be finite and non-negative"));
+        }
+    }
+    if new.use_attenuation_limits && new.attenuation_start_limit > new.attenuation_end_limit {
+        return Err("Light attenuation start limit must not exceed the end limit".into());
+    }
+    if new.light_type == 3 && new.hotspot_angle > new.falloff_angle {
+        return Err("Light.hotspot_angle must not exceed falloff_angle".into());
+    }
+    if new.shadow_map_size < 0 {
+        return Err("Light.shadow_map_size must be non-negative".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -1080,6 +1125,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::Underlay(value) => validate_underlay(None, value)?,
         EntityType::Viewport(value) => validate_viewport(None, value)?,
         EntityType::ViewBorder(value) => validate_view_border(None, value)?,
+        EntityType::Light(value) => validate_light(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1446,6 +1492,7 @@ pub fn validate_entity_mutation(
         (EntityType::Underlay(old), EntityType::Underlay(new)) => validate_underlay(Some(old), new)?,
         (EntityType::Viewport(old), EntityType::Viewport(new)) => validate_viewport(Some(old), new)?,
         (EntityType::ViewBorder(old), EntityType::ViewBorder(new)) => validate_view_border(Some(old), new)?,
+        (EntityType::Light(old), EntityType::Light(new)) => validate_light(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -2184,6 +2231,7 @@ mod tests {
                         | "Underlay"
                         | "Viewport"
                         | "ViewBorder"
+                        | "Light"
                 )
             {
                 assert!(
@@ -2506,6 +2554,26 @@ mod tests {
                 "ViewBorder.rotation_angle".to_owned(),
                 "ViewBorder.active_viewport".to_owned(),
                 "ViewBorder.scale_handle".to_owned(),
+                "Light.name".to_owned(),
+                "Light.light_type".to_owned(),
+                "Light.position".to_owned(),
+                "Light.target".to_owned(),
+                "Light.status".to_owned(),
+                "Light.light_color".to_owned(),
+                "Light.plot_glyph".to_owned(),
+                "Light.intensity".to_owned(),
+                "Light.attenuation_type".to_owned(),
+                "Light.use_attenuation_limits".to_owned(),
+                "Light.attenuation_start_limit".to_owned(),
+                "Light.attenuation_end_limit".to_owned(),
+                "Light.hotspot_angle".to_owned(),
+                "Light.falloff_angle".to_owned(),
+                "Light.cast_shadows".to_owned(),
+                "Light.shadow_type".to_owned(),
+                "Light.shadow_map_size".to_owned(),
+                "Light.shadow_map_softness".to_owned(),
+                "Light.photometric_mode".to_owned(),
+                "Light.photometric_data".to_owned(),
             ])
         );
     }

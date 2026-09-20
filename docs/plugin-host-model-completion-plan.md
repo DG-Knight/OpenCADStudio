@@ -7,13 +7,13 @@ Build a general Python document model over the OCS host API for all **43 canvas 
 As of 20 September 2026, the working branch is `plugin/host-model-api` at
 `a8dd3640` plus the Leader increment, published as draft PR
 [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391). Host API is
-v7. The Python feature has explicit writes for **36 of 43** canvas kinds: 35
-are creatable and `Insert` remains update-only. This is **not** 36 completed
+v7. The Python feature has explicit writes for **37 of 43** canvas kinds: 36
+are creatable and `Insert` remains update-only. This is **not** 37 completed
 kinds: Tolerance, Shape, AttributeEntity, Hatch, MLine, Dimension, MultiLeader, Table, PolygonMesh, PolyfaceMesh, Mesh and Wipeout pass every completion gate.
 AttributeDefinition passes its host and real IPC lifecycle but remains short of
 `Complete` because the previously pinned CAD codec dropped optional ATTDEF
 fields during DXF reads; revalidate that blocker against the current
-`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). Leader, Helix, Underlay and ViewBorder are mapped and integration-tested but blocked at W by acadrust persistence gaps, and RasterImage and Viewport are held short of `Complete` by unverifiable or missing oracles (see the ledger). RasterImage is mapped and integration-tested, held short of `Complete` by unverifiable image-dictionary linkage. The other 7 canvas kinds have only `layer`
+`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). Leader, Helix, Underlay, ViewBorder and Light are mapped and integration-tested but blocked at W by acadrust persistence gaps, and RasterImage and Viewport are held short of `Complete` by unverifiable or missing oracles (see the ledger). RasterImage is mapped and integration-tested, held short of `Complete` by unverifiable image-dictionary linkage. The other 6 canvas kinds have only `layer` (SectionSymbol is recorded as blocked)
 writes through the document model. All 43 have raw typed snapshots. There are
 three internal records and two opaque fallbacks outside the 43 canvas kinds.
 
@@ -123,7 +123,7 @@ The last five may require new engine capabilities rather than only Python conver
 
 ## Handoff start point
 
-Continue with **SectionSymbol** (queue item 15). Leader is done except for its W
+Continue with **Region** (queue item 17). SectionSymbol (item 15) is blocked; see the ledger. Leader is done except for its W
 gate; when the engine writes DXF group 340, reads group 213 and the DWG
 R2010+ text-size question is decided, flip the canary assertions in
 `staged_python_leader_lifecycle_over_real_ipc` and mark it `Complete`.
@@ -169,3 +169,4 @@ exact queue above and update statuses with evidence after each increment.
 - Mapped `Underlay` against a fixture PDF `UnderlayDefinition`. All gates pass except DXF W: the reader does not convert the degree-valued rotation back to radians, and repeated DXF round trips compound the error (pinned by a canary). The queue now continues with `Viewport`.
 - Mapped `Viewport` with a paper-space owner rule and frozen-layer reference validation. Every gate except a paper-space canvas oracle passes through the shared driver; the kind stays integration-tested. The queue now continues with `ViewBorder`.
 - Mapped `ViewBorder` with viewport and scale reference rules. All gates pass in DWG; DXF loading does not restore the typed entity (pinned by a canary). The queue now continues with `SectionSymbol`.
+- Recorded `SectionSymbol` (queue item 15) as **blocked**: it needs a section view style and view representation the host cannot create, and its raw point-count fields have no documented derivation. Mapped `Light` (item 16); every gate passes except DXF `cast_shadows`, which the reader drops (pinned by a canary). The queue now continues with `Region`.

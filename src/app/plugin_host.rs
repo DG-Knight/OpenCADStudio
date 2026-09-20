@@ -3692,6 +3692,48 @@ mod tests {
     }
 
     #[test]
+    fn staged_python_light_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('Light', name='Key', light_type=3, position=P(10.0, 10.0, 10.0),\n",
+                "    target=P(0.0, 0.0, 0.0), intensity=1.5, hotspot_angle=0.4, falloff_angle=0.8,\n",
+                "    light_color={'kind': 'Rgb', 'value': {'r': 255, 'g': 240, 'b': 200}})\n"),
+            edit: concat!(
+                "lt = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit light'):\n",
+                "    lt.intensity = 3.0\n",
+                "    lt.target = (5.0, 5.0, 0.0)\n",
+                "    lt.position = (12.0, 8.0, 10.0)\n",
+                "    lt.cast_shadows = True\n",
+                "doc.selection = [lt]\n"),
+            rejects: &[
+                ("'light_type':9", "must be 1 (distant)"),
+                ("'intensity':-1.0", "non-negative"),
+                ("'target':{'x':12.0,'y':8.0,'z':10.0}", "different from its position"),
+                ("'hotspot_angle':2.0", "must not exceed falloff_angle"),
+                ("'position':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
+                ("'name':''", "empty"),
+                ("'class_version':2", "read-only"),
+                ("'light_color':{'kind':'Index','value':300}", "Color"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::Light(_)),
+            digest: |entity| match entity {
+                EntityType::Light(l) => format!("{} t{} i{:.1} pos{:.0},{:.0},{:.0} tgt{:.0},{:.0} sh{} {:?}", l.name, l.light_type,
+                    l.intensity, l.position.x, l.position.y, l.position.z, l.target.x, l.target.y, l.cast_shadows, l.light_color),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::Light(l) = entity { l.intensity = 4.0; },
+            expect_created: "Key t3 i1.5 pos10,10,10 tgt0,0 shfalse Rgb { r: 255, g: 240, b: 200 }",
+            expect_edited: "Key t3 i3.0 pos12,8,10 tgt5,5 shtrue Rgb { r: 255, g: 240, b: 200 }",
+            expect_reedited: "Key t3 i4.0 pos12,8,10 tgt5,5 shtrue Rgb { r: 255, g: 240, b: 200 }",
+            // BLOCKER: DXF does not restore `cast_shadows` (it reopens false),
+            // like the other boolean groups the reader parses as integers.
+            expect_edited_dxf: "Key t3 i3.0 pos12,8,10 tgt5,5 shfalse Rgb { r: 255, g: 240, b: 200 }",
+            expect_reedited_dxf: "Key t3 i4.0 pos12,8,10 tgt5,5 shfalse Rgb { r: 255, g: 240, b: 200 }",
+        });
+    }
+
+    #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
             return;

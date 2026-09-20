@@ -35,7 +35,8 @@
     "Wipeout",
     "Underlay",
     "Viewport",
-    "ViewBorder"
+    "ViewBorder",
+    "Light"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -412,6 +413,13 @@
         "max": { "required": true },
         "active_viewport": { "required": true },
         "scale_handle": { "required": true }
+      }
+    },
+    "Light": {
+      "fields": {
+        "class_version": { "read_only": true },
+        "position": { "required": true },
+        "name": { "required": true }
       }
     }
   }

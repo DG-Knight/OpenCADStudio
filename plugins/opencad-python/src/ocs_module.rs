@@ -4756,7 +4756,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(emitted.len(), 36);
+        assert_eq!(emitted.len(), 37);
     }
 
     #[cfg(feature = "experimental-host-model")]
