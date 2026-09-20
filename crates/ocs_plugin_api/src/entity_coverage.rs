@@ -377,6 +377,94 @@ fn validate_mline(
     Ok(())
 }
 
+/// Field checks for every Dimension subtype. Derived fields (base definition
+/// point, `actual_measurement`) are recomputed by the host, so they are not
+/// validated as inputs; the measurement the geometry implies must be finite.
+#[cfg(feature = "host")]
+fn validate_dimension(
+    old: Option<&crate::host::acadrust::entities::Dimension>,
+    new: &crate::host::acadrust::entities::Dimension,
+) -> Result<(), String> {
+    use crate::host::acadrust::entities::Dimension as D;
+    if old == Some(new) {
+        return Ok(());
+    }
+    let base = new.base();
+    solid_normal("Dimension.normal", &base.normal)?;
+    finite_vector("Dimension.text_middle_point", &base.text_middle_point)?;
+    if !base.text_rotation.is_finite() || !base.horizontal_direction.is_finite() {
+        return Err("Dimension.text_rotation and horizontal_direction must be finite".into());
+    }
+    if base.style_name.trim().is_empty() {
+        return Err("Dimension.style_name is empty".into());
+    }
+    let (points, scalars, distinct): (Vec<(&str, &crate::host::acadrust::types::Vector3)>, Vec<(&str, f64)>, Vec<(&str, &str)>) = match new {
+        D::Aligned(d) => (
+            vec![("definition_point", &d.definition_point), ("first_point", &d.first_point), ("second_point", &d.second_point)],
+            vec![("ext_line_rotation", d.ext_line_rotation)],
+            vec![("first_point", "second_point")],
+        ),
+        D::Linear(d) => (
+            vec![("definition_point", &d.definition_point), ("first_point", &d.first_point), ("second_point", &d.second_point)],
+            vec![("rotation", d.rotation), ("ext_line_rotation", d.ext_line_rotation)],
+            vec![("first_point", "second_point")],
+        ),
+        D::Radius(d) => (
+            vec![("definition_point", &d.definition_point), ("angle_vertex", &d.angle_vertex)],
+            vec![("leader_length", d.leader_length)],
+            vec![("definition_point", "angle_vertex")],
+        ),
+        D::Diameter(d) => (
+            vec![("definition_point", &d.definition_point), ("angle_vertex", &d.angle_vertex)],
+            vec![("leader_length", d.leader_length)],
+            vec![("definition_point", "angle_vertex")],
+        ),
+        D::Angular2Ln(d) => (
+            vec![("definition_point", &d.definition_point), ("dimension_arc", &d.dimension_arc), ("first_point", &d.first_point), ("second_point", &d.second_point), ("angle_vertex", &d.angle_vertex)],
+            vec![],
+            vec![],
+        ),
+        D::Angular3Pt(d) => (
+            vec![("definition_point", &d.definition_point), ("first_point", &d.first_point), ("second_point", &d.second_point), ("angle_vertex", &d.angle_vertex)],
+            vec![],
+            vec![("first_point", "angle_vertex"), ("second_point", "angle_vertex")],
+        ),
+        D::Ordinate(d) => (
+            vec![("definition_point", &d.definition_point), ("feature_location", &d.feature_location), ("leader_endpoint", &d.leader_endpoint)],
+            vec![],
+            vec![],
+        ),
+        D::Arc(d) => (
+            vec![("definition_point", &d.definition_point), ("first_extension_point", &d.first_extension_point), ("second_extension_point", &d.second_extension_point), ("center_point", &d.center_point), ("first_leader_point", &d.first_leader_point), ("second_leader_point", &d.second_leader_point)],
+            vec![("arc_start_parameter", d.arc_start_parameter), ("arc_end_parameter", d.arc_end_parameter)],
+            vec![("first_extension_point", "second_extension_point")],
+        ),
+        D::LargeRadial(d) => (
+            vec![("definition_point", &d.definition_point), ("chord_point", &d.chord_point), ("override_center", &d.override_center), ("jog_point", &d.jog_point)],
+            vec![("jog_angle", d.jog_angle)],
+            vec![("definition_point", "chord_point")],
+        ),
+    };
+    for (name, point) in &points {
+        finite_vector(&format!("Dimension.{name}"), point)?;
+    }
+    for (name, value) in &scalars {
+        if !value.is_finite() {
+            return Err(format!("Dimension.{name} must be finite"));
+        }
+    }
+    let find = |name: &str| points.iter().find(|(n, _)| *n == name).map(|(_, p)| **p);
+    for (a, b) in distinct {
+        if find(a) == find(b) {
+            return Err(format!("Dimension.{a} and {b} must not coincide"));
+        }
+    }
+    if !new.measurement().is_finite() {
+        return Err("Dimension geometry does not define a finite measurement".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -470,6 +558,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         }
         EntityType::Leader(value) => validate_leader(None, value)?,
         EntityType::MLine(value) => validate_mline(None, value)?,
+        EntityType::Dimension(value) => validate_dimension(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -824,6 +913,7 @@ pub fn validate_entity_mutation(
                 return Err("Shape.style_handle is read-only".into());
             }
         }
+        (EntityType::Dimension(old), EntityType::Dimension(new)) => validate_dimension(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1085,6 +1175,12 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    if let EntityType::Dimension(value) = entity {
+        let name = value.base().style_name.trim();
+        if !document.dim_styles.iter().any(|style| style.name.eq_ignore_ascii_case(name)) {
+            return Err(format!("Dimension style {:?} does not exist", value.base().style_name));
         }
     }
     if let EntityType::MLine(value) = entity {
@@ -1443,6 +1539,7 @@ mod tests {
                         | "Hatch"
                         | "Leader"
                         | "MLine"
+                        | "Dimension"
                 )
             {
                 assert!(
@@ -1597,6 +1694,40 @@ mod tests {
                 "MLine.scale_factor".to_owned(),
                 "MLine.style_name".to_owned(),
                 "MLine.vertices".to_owned(),
+                "Dimension.text".to_owned(),
+                "Dimension.style_name".to_owned(),
+                "Dimension.normal".to_owned(),
+                "Dimension.text_middle_point".to_owned(),
+                "Dimension.attachment_point".to_owned(),
+                "Dimension.text_rotation".to_owned(),
+                "Dimension.horizontal_direction".to_owned(),
+                "Dimension.flip_arrow1".to_owned(),
+                "Dimension.flip_arrow2".to_owned(),
+                "Dimension.text_user_positioned".to_owned(),
+                "Dimension.definition_point".to_owned(),
+                "Dimension.first_point".to_owned(),
+                "Dimension.second_point".to_owned(),
+                "Dimension.angle_vertex".to_owned(),
+                "Dimension.dimension_arc".to_owned(),
+                "Dimension.feature_location".to_owned(),
+                "Dimension.leader_endpoint".to_owned(),
+                "Dimension.first_extension_point".to_owned(),
+                "Dimension.second_extension_point".to_owned(),
+                "Dimension.center_point".to_owned(),
+                "Dimension.first_leader_point".to_owned(),
+                "Dimension.second_leader_point".to_owned(),
+                "Dimension.chord_point".to_owned(),
+                "Dimension.override_center".to_owned(),
+                "Dimension.jog_point".to_owned(),
+                "Dimension.rotation".to_owned(),
+                "Dimension.ext_line_rotation".to_owned(),
+                "Dimension.leader_length".to_owned(),
+                "Dimension.arc_start_parameter".to_owned(),
+                "Dimension.arc_end_parameter".to_owned(),
+                "Dimension.jog_angle".to_owned(),
+                "Dimension.is_ordinate_type_x".to_owned(),
+                "Dimension.is_partial".to_owned(),
+                "Dimension.has_leader".to_owned(),
             ])
         );
     }

@@ -22,12 +22,23 @@ use entity_coverage_schema::{
 };
 
 #[derive(serde::Deserialize)]
+struct SyntheticProperty {
+    name: String,
+    type_id: String,
+    access: String,
+}
+
+#[derive(serde::Deserialize)]
 struct EntityCoveragePolicy {
     internal_kinds: Vec<String>,
     opaque_kinds: Vec<String>,
     editable: BTreeMap<String, Vec<String>>,
     readable: BTreeMap<String, Vec<String>>,
     aliases: BTreeMap<String, BTreeMap<String, String>>,
+    /// Properties for kinds whose payload is a nested enum (Dimension), where
+    /// the traced variant has no single field list to map.
+    #[serde(default)]
+    synthetic: BTreeMap<String, Vec<SyntheticProperty>>,
 }
 
 fn main() {
@@ -800,6 +811,19 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                 snapshot_readable: true,
                 validation: validation.into(),
                 model_access: access,
+            });
+        }
+        for synthetic in policy.synthetic.get(kind).into_iter().flatten() {
+            let writable = synthetic.access == "read_write";
+            properties.push(PropertyCoverage {
+                name: synthetic.name.clone(),
+                source_path: format!("<subtype>.{}", synthetic.name),
+                type_id: synthetic.type_id.clone(),
+                optional: false,
+                is_sequence: false,
+                snapshot_readable: true,
+                validation: if writable { "transaction_geometry" } else { "none" }.into(),
+                model_access: if writable { ModelAccess::ReadWrite } else { ModelAccess::ReadOnly },
             });
         }
         assert!(

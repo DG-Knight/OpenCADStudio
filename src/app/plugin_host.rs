@@ -155,6 +155,9 @@ impl<'a> HostSession<'a> {
         old: Option<&EntityType>,
         entity: &mut EntityType,
     ) -> Result<(), String> {
+        if let EntityType::Dimension(dimension) = entity {
+            crate::entities::dimension::normalize_scripted_dimension(dimension);
+        }
         if let EntityType::MLine(new) = entity {
             let old = match old {
                 Some(EntityType::MLine(old)) => Some(old),
@@ -2570,6 +2573,209 @@ mod tests {
         assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
         app.redo_steps(3);
         assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
+    fn staged_python_dimension_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+
+        // (subtype, python fields, expected measurement)
+        let fixtures: [(&str, &str, f64); 9] = [
+            ("Linear", "definition_point=P(10,5), first_point=P(0,0), second_point=P(10,0)", 10.0),
+            ("Aligned", "definition_point=P(1,5.5), first_point=P(0,0), second_point=P(3,4)", 5.0),
+            ("Radius", "definition_point=P(5,0), angle_vertex=P(0,0)", 5.0),
+            ("Diameter", "definition_point=P(10,0), angle_vertex=P(0,0)", 10.0),
+            ("Angular3Pt", "definition_point=P(3,3), first_point=P(5,0), second_point=P(0,5), angle_vertex=P(0,0)", 90.0),
+            ("Angular2Ln", "definition_point=P(0,5), dimension_arc=P(3,3), first_point=P(0,0), second_point=P(5,0), angle_vertex=P(0,0)", 90.0),
+            ("Ordinate", "feature_location=P(5,3), leader_endpoint=P(5,8), is_ordinate_type_x=True", 5.0),
+            ("Arc", "definition_point=P(3.5,3.5), first_extension_point=P(5,0), second_extension_point=P(0,5), center_point=P(0,0), arc_start_parameter=0.0, arc_end_parameter=1.5707963267948966", 5.0 * std::f64::consts::FRAC_PI_2),
+            ("LargeRadial", "definition_point=P(10,0), chord_point=P(4,0)", 6.0),
+        ];
+        let mut script = String::from("def P(x, y): return {'x': x, 'y': y, 'z': 0.0}\ndoc = ocs.active_document\n");
+        for (subtype, fields, _) in &fixtures {
+            script.push_str(&format!("doc.create_entity('Dimension', subtype='{subtype}', {fields})\n"));
+        }
+        let path = std::env::temp_dir().join(format!("ocs_dimension_create_{}.py", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", path.display()));
+        let _ = std::fs::remove_file(&path);
+        let subtype_of = |dimension: &acadrust::entities::Dimension| -> &'static str {
+            use acadrust::entities::Dimension as D;
+            match dimension {
+                D::Aligned(_) => "Aligned", D::Linear(_) => "Linear", D::Radius(_) => "Radius",
+                D::Diameter(_) => "Diameter", D::Angular2Ln(_) => "Angular2Ln",
+                D::Angular3Pt(_) => "Angular3Pt", D::Ordinate(_) => "Ordinate",
+                D::Arc(_) => "Arc", D::LargeRadial(_) => "LargeRadial",
+            }
+        };
+        let handles_by_subtype = |document: &CadDocument| {
+            let mut map = std::collections::BTreeMap::new();
+            for entity in document.entities() {
+                if let EntityType::Dimension(dimension) = entity {
+                    map.insert(subtype_of(dimension), dimension.base().common.handle);
+                }
+            }
+            map
+        };
+        let handles = handles_by_subtype(host.document());
+        assert_eq!(handles.len(), 9, "created: {handles:?}; {}", last_output(&host));
+        let measured = |document: &CadDocument, handle: Handle| -> f64 {
+            let Some(EntityType::Dimension(dimension)) = document.get_entity(handle) else {
+                panic!("Dimension missing");
+            };
+            dimension.base().actual_measurement
+        };
+        for (subtype, _, expected) in &fixtures {
+            let value = measured(host.document(), handles[subtype]);
+            assert!((value - expected).abs() < 1e-6, "{subtype}: measured {value}, expected {expected}");
+            let Some(EntityType::Dimension(dimension)) = host.document().get_entity(handles[subtype]) else { unreachable!() };
+            assert_eq!(dimension.measurement(), value, "{subtype}: stored measurement is derived");
+            let wires = host.app.tabs[0].scene.wire_models_for(&[handles[subtype]]);
+            assert!(!wires.is_empty(), "{subtype}: dimension produced no canvas geometry");
+        }
+        let linear = handles["Linear"];
+        let created_linear = host.document().get_entity(linear).unwrap().clone();
+
+        // Edit: move a defining point (the measurement follows), change text
+        // and style-independent placement; untouched fields survive.
+        let script = std::env::temp_dir().join(format!("ocs_dimension_edit_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "doc = ocs.active_document\n",
+            "linear = doc.entities[{}]\n",
+            "radius = doc.entities[{}]\n",
+            "with doc.transaction('Edit dimensions'):\n",
+            "    linear.second_point = (20.0, 0.0, 0.0)\n",
+            "    linear.text = '<> mm'\n",
+            "    linear.attachment_point = 'TopCenter'\n",
+            "    radius.definition_point = (8.0, 0.0, 0.0)\n",
+            "doc.selection = [linear]\n"
+        ), linear.value(), handles["Radius"].value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let expected_linear = host.document().get_entity(linear).unwrap().clone();
+        let EntityType::Dimension(edited) = &expected_linear else { unreachable!() };
+        let EntityType::Dimension(before) = &created_linear else { unreachable!() };
+        assert!((edited.base().actual_measurement - 20.0).abs() < 1e-9, "edit failed: {}", last_output(&host));
+        assert!((measured(host.document(), handles["Radius"]) - 8.0).abs() < 1e-9);
+        assert_eq!(edited.base().text, "<> mm");
+        assert_eq!(edited.base().attachment_point, acadrust::entities::AttachmentPointType::TopCenter);
+        assert_eq!(edited.base().common, before.base().common);
+        assert_eq!(edited.base().style_name, before.base().style_name);
+        assert_eq!(edited.base().normal, before.base().normal);
+        assert_eq!(host.selection(), vec![linear]);
+        let expected_radius = host.document().get_entity(handles["Radius"]).unwrap().clone();
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[linear]).is_empty());
+
+        let reject_cases: [(&str, &str, &str); 9] = [
+            ("Linear", "'leader_length':2.0", "does not apply to the Linear subtype"),
+            ("Linear", "'subtype':'Radius'", "read-only"),
+            ("Linear", "'actual_measurement':5.0", "read-only"),
+            ("Linear", "'style_name':'Missing'", "does not exist"),
+            ("Linear", "'first_point':{'x':20.0,'y':0.0,'z':0.0}", "must not coincide"),
+            ("Linear", "'first_point':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
+            ("Linear", "'normal':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
+            ("Radius", "'angle_vertex':{'x':8.0,'y':0.0,'z':0.0}", "must not coincide"),
+            ("Linear", "'attachment_point':'Nowhere'", "unsupported AttachmentPointType"),
+        ];
+        for (subtype, patch, message) in reject_cases {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many('Reject dimension', [{{'handle':{}, {patch}}}])",
+                handles[subtype].value()));
+            assert_eq!(host.document().get_entity(linear), Some(&expected_linear), "{patch}");
+            assert_eq!(host.document().get_entity(handles["Radius"]), Some(&expected_radius), "{patch}");
+            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+        }
+        dispatch(&mut host, &format!(concat!(
+            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'text':'changed'}},",
+            "{{'handle':{},'style_name':'Missing'}}])"
+        ), linear.value(), handles["Radius"].value()));
+        assert_eq!(host.document().get_entity(linear), Some(&expected_linear));
+        for (patch, message) in [
+            ("ocs.active_document.create_entity('Dimension', definition_point=P(0,0))", "requires subtype"),
+            ("ocs.active_document.create_entity('Dimension', subtype='Cone')", "unsupported Dimension subtype"),
+            ("ocs.active_document.create_entity('Dimension', subtype='Linear', first_point=P(0,0), second_point=P(1,0))", "requires definition_point"),
+        ] {
+            dispatch(&mut host, &format!("PY_EVAL (lambda P: {patch})(lambda x, y: {{'x': x, 'y': y, 'z': 0.0}})"));
+            assert_eq!(handles_by_subtype(host.document()).len(), 9, "{patch}");
+            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+        }
+
+        // DWG and DXF: every subtype is recorded separately.
+        let mut failures = Vec::new();
+        let dwg = crate::io::load_bytes("dimension.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("dimension.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            let reopened = handles_by_subtype(document);
+            for (subtype, _, expected) in &fixtures {
+                let expected = match *subtype { "Linear" => 20.0, "Radius" => 8.0, _ => *expected };
+                match reopened.get(subtype) {
+                    None => failures.push(format!("{format} {subtype}: missing")),
+                    Some(handle) => {
+                        let value = measured(document, *handle);
+                        if (value - expected).abs() > 1e-6 {
+                            failures.push(format!("{format} {subtype}: measurement {value} != {expected}"));
+                        }
+                    }
+                }
+            }
+            let Some(EntityType::Dimension(dimension)) = document.get_entity(linear) else {
+                failures.push(format!("{format} Linear handle lost"));
+                continue;
+            };
+            if dimension.base().text != "<> mm" { failures.push(format!("{format} Linear text {:?}", dimension.base().text)); }
+        }
+        assert!(failures.is_empty(), "persistence gaps: {failures:#?}");
+        for (name, mut document) in [("dimension-reedit.dwg", dwg), ("dimension-reedit.dxf", dxf)] {
+            let before = document.get_entity(linear).unwrap().clone();
+            let mut after = before.clone();
+            let EntityType::Dimension(dimension) = &mut after else { unreachable!() };
+            if let acadrust::entities::Dimension::Linear(value) = dimension { value.second_point.x = 30.0; }
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            let EntityType::Dimension(dimension) = &mut after else { unreachable!() };
+            crate::entities::dimension::normalize_scripted_dimension(dimension);
+            *document.get_entity_mut(linear).unwrap() = after;
+            let bytes = if name.ends_with("dwg") {
+                acadrust::DwgWriter::write_to_vec(&document).unwrap()
+            } else {
+                acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
+            };
+            let reopened = crate::io::load_bytes(name, bytes).unwrap();
+            assert!((measured(&reopened, linear) - 30.0).abs() < 1e-6, "{name}");
+        }
+
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", linear.value()));
+        assert!(host.document().get_entity(linear).is_none());
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(linear), Some(&expected_linear));
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(linear), Some(&created_linear));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(linear).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(linear).is_none());
     }
 
     #[test]

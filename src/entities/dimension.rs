@@ -25,6 +25,14 @@ pub(crate) fn set_dimension_text_override(base: &mut DimensionBase, text: Option
     base.user_text = text;
 }
 
+/// Recompute the fields a script cannot set: the base definition point and
+/// the stored measurement, exactly as grip edits do.
+pub(crate) fn normalize_scripted_dimension(dim: &mut Dimension) {
+    let definition_point = dimension_definition_point(dim);
+    dim.base_mut().definition_point = definition_point;
+    dim.base_mut().actual_measurement = dim.measurement();
+}
+
 fn dimension_definition_point(dim: &Dimension) -> acadrust::types::Vector3 {
     match dim {
         Dimension::Aligned(d) => d.definition_point,

@@ -25,6 +25,10 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Manifest {
+    /// Kinds whose payload is a nested enum: converted by hand-written
+    /// `<snake>_to_dict`/`<snake>_from_dict`/`<snake>_apply` functions.
+    #[serde(default)]
+    pub manual_kinds: Vec<String>,
     /// Entity kinds exposed to `ocs.add`/`ocs.update`/`entity_to_dict`. The
     /// central, easy-to-widen filter for Phase 2 (see the plan doc).
     pub type_filter: Vec<String>,
@@ -164,6 +168,9 @@ fn helper_closure(manifest: &Manifest, registry: &TypeRegistry) -> Vec<String> {
     let mut queue: Vec<String> = Vec::new();
 
     for kind in &manifest.type_filter {
+        if manifest.manual_kinds.contains(kind) {
+            continue;
+        }
         let Some(info) = get(registry, kind) else {
             panic!("entity_manifest.json: unknown entity kind {kind}");
         };
@@ -683,6 +690,13 @@ fn resolve_entity_fields(
 fn gen_entity_to_dict(manifest: &Manifest, registry: &TypeRegistry) -> String {
     let mut arms = String::new();
     for kind in &manifest.type_filter {
+        if manifest.manual_kinds.contains(kind) {
+            arms.push_str(&format!(
+                "        acadrust::EntityType::{kind}(value) => {}_to_dict(vm, value),\n",
+                snake_case(kind)
+            ));
+            continue;
+        }
         let info = get(registry, kind).unwrap();
         let var = "value";
         let fields = resolve_entity_fields(manifest, registry, kind, info, var, Mode::Add);
@@ -732,6 +746,13 @@ fn gen_dict_to_entity(manifest: &Manifest, registry: &TypeRegistry) -> String {
     let mut arms = String::new();
     for kind in &manifest.type_filter {
         if manifest.overrides.get(kind).is_some_and(|override_def| override_def.update_only) {
+            continue;
+        }
+        if manifest.manual_kinds.contains(kind) {
+            arms.push_str(&format!(
+                "        \"{kind}\" => acadrust::EntityType::{kind}({}_from_dict(dict, vm)?),\n",
+                snake_case(kind)
+            ));
             continue;
         }
         let info = get(registry, kind).unwrap();
@@ -792,6 +813,13 @@ pub(crate) fn dict_to_entity(dict: &rustpython_vm::builtins::PyDictRef, vm: &Vir
 fn gen_apply_dict_to_entity(manifest: &Manifest, registry: &TypeRegistry) -> String {
     let mut arms = String::new();
     for kind in &manifest.type_filter {
+        if manifest.manual_kinds.contains(kind) {
+            arms.push_str(&format!(
+                "        acadrust::EntityType::{kind}(existing_value) => acadrust::EntityType::{kind}({}_apply(existing_value, dict, vm)?),\n",
+                snake_case(kind)
+            ));
+            continue;
+        }
         let info = get(registry, kind).unwrap();
         let var = "value";
         let fields = resolve_entity_fields(manifest, registry, kind, info, var, Mode::Update);

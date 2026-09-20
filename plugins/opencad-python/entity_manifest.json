@@ -23,8 +23,10 @@
     "AttributeEntity",
     "Hatch",
     "Leader",
-    "MLine"
+    "MLine",
+    "Dimension"
   ],
+  "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
   "overrides": {
     "Point": {

@@ -3127,8 +3127,13 @@ mod ocs {
         match dict.get_item_opt(key, vm)? {
             None => Ok(0.0),
             Some(v) if vm.is_none(&v) => Ok(0.0),
-            Some(v) => v.try_into_value::<f64>(vm),
+            Some(v) => py_number_to_f64(v, vm),
         }
+    }
+
+    /// Accept a Python int or float; `try_into_value::<f64>` rejects ints.
+    fn py_number_to_f64(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<f64> {
+        Ok(value.try_float(vm)?.to_f64())
     }
 
     fn get_opt_bool(
@@ -3186,6 +3191,7 @@ mod ocs {
     }
 
     include!(concat!(env!("OUT_DIR"), "/entity_crud.rs"));
+    include!("dimension_model.rs.inc");
 
     // ════════════════════════════════════════════════════════════════════
     // Phase 1 — wiring the generic conversion functions above into `ocs`.
@@ -4640,6 +4646,23 @@ mod tests {
                 current = None;
             }
         }
+        // Hand-written kinds: keys come from the include file's dict writes
+        // and per-subtype field table.
+        let manual = include_str!("dimension_model.rs.inc");
+        let dimension_keys = emitted.entry("Dimension".to_owned()).or_default();
+        for line in manual.lines() {
+            let line = line.trim();
+            let key = line
+                .strip_prefix("dict.set_item(\"")
+                .or_else(|| {
+                    (line.contains("\", V(") || line.contains("\", F(") || line.contains("\", B("))
+                        .then(|| line.strip_prefix("(\""))
+                        .flatten()
+                });
+            if let Some(key) = key {
+                dimension_keys.insert(key.split('"').next().unwrap().to_owned());
+            }
+        }
         for entry in &catalog.entity_kinds {
             let expected: BTreeSet<_> = entry
                 .properties
@@ -4663,7 +4686,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(emitted.len(), 24);
+        assert_eq!(emitted.len(), 25);
     }
 
     #[cfg(feature = "experimental-host-model")]
