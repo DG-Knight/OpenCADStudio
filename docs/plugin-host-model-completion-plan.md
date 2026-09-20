@@ -5,15 +5,15 @@
 Build a general Python document model over the OCS host API for all **43 canvas kinds**. A kind is **complete** only after the per-kind gate below passes. Merely appearing in a converter or allowing a `layer` edit is partial coverage. Keep a property-level record of read/write, read-only, snapshot-only, and unsupported fields in the [43-kind coverage ledger](plugin-host-model-coverage-ledger.md). Do not resume the separate Lisp-to-Python conversion work.
 
 As of 20 September 2026, the working branch is `plugin/host-model-api` at
-`8648225a`, published as draft PR
+`a8dd3640` plus the Leader increment, published as draft PR
 [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391). Host API is
-v7. The Python feature has explicit writes for **22 of 43** canvas kinds: 21
-are creatable and `Insert` remains update-only. This is **not** 22 completed
+v7. The Python feature has explicit writes for **23 of 43** canvas kinds: 22
+are creatable and `Insert` remains update-only. This is **not** 23 completed
 kinds: Tolerance, Shape, AttributeEntity and Hatch pass every completion gate.
 AttributeDefinition passes its host and real IPC lifecycle but remains short of
 `Complete` because the previously pinned CAD codec dropped optional ATTDEF
 fields during DXF reads; revalidate that blocker against the current
-`acadrust` revision `7ea4247`. The other 21 canvas kinds have only `layer`
+`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). The other 20 canvas kinds have only `layer`
 writes through the document model. All 43 have raw typed snapshots. There are
 three internal records and two opaque fallbacks outside the 43 canvas kinds.
 
@@ -123,14 +123,14 @@ The last five may require new engine capabilities rather than only Python conver
 
 ## Handoff start point
 
-Continue with **Leader**. Build a valid vertex path and annotation-linked
-fixture, map geometry separately from annotation/object handles, and verify
-path rendering, selection, reference preservation, deletion, undo/redo and
-both file formats through real IPC. AttributeDefinition remains mapped and
-integration-tested but open at W. First rerun its DXF regression against
-current acadrust `7ea4247`; do not mark it complete until the full optional
-property state passes DXF save/reopen. Keep the exact queue above and update
-statuses with evidence after each increment.
+Continue with **MLine** (queue item 2). Leader is done except for its W
+gate; when the engine writes DXF group 340, reads group 213 and the DWG
+R2010+ text-size question is decided, flip the canary assertions in
+`staged_python_leader_lifecycle_over_real_ipc` and mark it `Complete`.
+AttributeDefinition remains mapped and integration-tested but open at W; its
+real IPC lifecycle now passes against acadrust `7ea4247`, so audit the full
+optional-property DXF round trip and close or retain the blocker. Keep the
+exact queue above and update statuses with evidence after each increment.
 
 ## Phase 8 progress log
 
@@ -157,3 +157,4 @@ statuses with evidence after each increment.
 - `staged_python_attribute_entity_lifecycle_over_real_ipc` passes C/R/E/D/U/I/W/V/P with the actual v7 adapter. It creates a linked attribute from its block's ATTDEF, reads and edits value/placement/rotation, selects the parent Insert, renders text, rejects invalid tag/height/owner edits atomically, reopens edited and deleted state in DWG and DXF, and proves three-step undo/redo. AttributeEntity is **Complete**; the queue now continues with `Hatch`.
 - Completed `Hatch` with full solid/pattern definitions and typed nested boundary paths. The adapter generator now handles single-payload tagged enums as `{kind, value}` dictionaries, which covers every Hatch edge variant and is reusable by later nested entity models. Unknown adapter properties are rejected instead of being silently ignored.
 - `staged_python_hatch_lifecycle_over_real_ipc` passes C/R/E/D/U/I/W/V/P with closed line-loop fixtures: solid creation, conversion to a stored-line pattern, boundary replacement, selection and live render-cache checks, atomic invalid scale/association/open-loop/unmapped-payload rejection, edited/deleted DWG and DXF reopen, post-reopen edits, and three-step undo/redo. Hatch is **Complete**; the queue now continues with `Leader`.
+- Mapped `Leader` (host validation and reference binding in `entity_coverage.rs`, policy/build.rs/manifest entries, adapter count 23). `staged_python_leader_lifecycle_over_real_ipc` passes C/R/E/D/U/I/V/P through the real runner. W is blocked by acadrust: the DXF writer omits the annotation handle (340), DXF reads lose `annotation_offset` (213), and DWG R2010+ does not store text size or hookline flag. Each gap is pinned by a canary assertion so it fails loudly once fixed. The queue now continues with `MLine`.

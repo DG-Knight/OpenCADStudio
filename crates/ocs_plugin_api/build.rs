@@ -756,6 +756,23 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                             | "paths"
                             | "seed_points"
                     )
+                    | (
+                        "Leader",
+                        "dimension_style"
+                            | "arrow_enabled"
+                            | "path_type"
+                            | "creation_type"
+                            | "hookline_direction"
+                            | "hookline_enabled"
+                            | "text_height"
+                            | "text_width"
+                            | "vertices"
+                            | "annotation_handle"
+                            | "normal"
+                            | "horizontal_direction"
+                            | "block_offset"
+                            | "annotation_offset"
+                    )
             ) {
                     "transaction_geometry"
             } else {

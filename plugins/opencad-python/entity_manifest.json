@@ -21,7 +21,8 @@
     "Shape",
     "AttributeDefinition",
     "AttributeEntity",
-    "Hatch"
+    "Hatch",
+    "Leader"
   ],
   "base_fields": ["handle", "layer", "owner_handle"],
   "overrides": {
@@ -227,6 +228,26 @@
         "mpolygon_hatch_color": { "exclude": true },
         "mpolygon_x_direction": { "exclude": true },
         "mpolygon_boundary_handle_count": { "exclude": true }
+      }
+    },
+    "Leader": {
+      "fields": {
+        "vertices": { "required": true },
+        "origin": { "read_only": true },
+        "dimension_gap": { "read_only": true },
+        "arrowhead_type": { "read_only": true },
+        "arrow_size": { "read_only": true },
+        "byblock_color": { "read_only": true },
+        "dwg_unknown_bit1": { "exclude": true },
+        "dwg_unknown_bit2": { "exclude": true },
+        "dwg_unknown_bit3": { "exclude": true },
+        "dwg_unknown_bit4": { "exclude": true },
+        "dwg_unknown_bit5": { "exclude": true },
+        "dwg_unknown_short1": { "exclude": true },
+        "override_color": {
+          "exclude": true,
+          "_comment": "Color is a multi-payload tagged enum the generator cannot express yet. It stays snapshot-readable and is preserved untouched by Python edits."
+        }
       }
     }
   }

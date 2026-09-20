@@ -231,6 +231,93 @@ fn validate_hatch_pattern(value: &crate::host::acadrust::entities::Hatch) -> Res
     Ok(())
 }
 
+/// Field checks shared by Leader creation and mutation. `old` limits the
+/// checks to fields the edit touched so legacy DWG leaders stay editable.
+#[cfg(feature = "host")]
+fn validate_leader(
+    old: Option<&crate::host::acadrust::entities::Leader>,
+    new: &crate::host::acadrust::entities::Leader,
+) -> Result<(), String> {
+    use crate::host::acadrust::entities::LeaderCreationType;
+    let vec_changed = |a: &crate::host::acadrust::types::Vector3,
+                       b: &crate::host::acadrust::types::Vector3| {
+        old.is_none()
+            || a.x.to_bits() != b.x.to_bits()
+            || a.y.to_bits() != b.y.to_bits()
+            || a.z.to_bits() != b.z.to_bits()
+    };
+    if old.is_none_or(|old| old.vertices != new.vertices) {
+        if new.vertices.len() < 2 {
+            return Err("Leader.vertices requires at least 2 points".into());
+        }
+        for (index, vertex) in new.vertices.iter().enumerate() {
+            finite_vector(&format!("Leader.vertices[{index}]"), vertex)?;
+        }
+        if new.vertices.windows(2).all(|pair| pair[0] == pair[1]) {
+            return Err("Leader.vertices must not all coincide".into());
+        }
+    }
+    if let Some(old_leader) = old {
+        if vec_changed(&old_leader.normal, &new.normal) {
+            solid_normal("Leader.normal", &new.normal)?;
+        }
+    } else {
+        solid_normal("Leader.normal", &new.normal)?;
+    }
+    if vec_changed(
+        old.map_or(&new.horizontal_direction, |o| &o.horizontal_direction),
+        &new.horizontal_direction,
+    ) {
+        solid_normal("Leader.horizontal_direction", &new.horizontal_direction)?;
+    }
+    for (name, before, after) in [
+        (
+            "block_offset",
+            old.map_or(&new.block_offset, |o| &o.block_offset),
+            &new.block_offset,
+        ),
+        (
+            "annotation_offset",
+            old.map_or(&new.annotation_offset, |o| &o.annotation_offset),
+            &new.annotation_offset,
+        ),
+    ] {
+        if vec_changed(before, after) {
+            finite_vector(&format!("Leader.{name}"), after)?;
+        }
+    }
+    for (name, before, after) in [
+        (
+            "text_height",
+            old.map_or(new.text_height, |o| o.text_height),
+            new.text_height,
+        ),
+        (
+            "text_width",
+            old.map_or(new.text_width, |o| o.text_width),
+            new.text_width,
+        ),
+    ] {
+        if (old.is_none() || before.to_bits() != after.to_bits())
+            && (!after.is_finite() || after < 0.0 || (name == "text_height" && after == 0.0))
+        {
+            return Err(format!(
+                "Leader.{name} must be finite and {}",
+                if name == "text_height" { "greater than zero" } else { "non-negative" }
+            ));
+        }
+    }
+    if old.is_none_or(|o| o.dimension_style != new.dimension_style)
+        && new.dimension_style.trim().is_empty()
+    {
+        return Err("Leader.dimension_style is empty".into());
+    }
+    if new.creation_type == LeaderCreationType::NoAnnotation && !new.annotation_handle.is_null() {
+        return Err("Leader with no annotation cannot carry an annotation handle".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -322,6 +409,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
                 return Err("Shape.style_name is empty".into());
             }
         }
+        EntityType::Leader(value) => validate_leader(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -676,6 +764,7 @@ pub fn validate_entity_mutation(
                 return Err("Shape.style_handle is read-only".into());
             }
         }
+        (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
             changed3(
                 "AttributeDefinition.insertion_point",
@@ -935,6 +1024,48 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    if let EntityType::Leader(value) = entity {
+        use crate::host::acadrust::entities::LeaderCreationType;
+        if !document
+            .dim_styles
+            .iter()
+            .any(|style| style.name.eq_ignore_ascii_case(value.dimension_style.trim()))
+        {
+            return Err(format!(
+                "Leader dimension style {:?} does not exist",
+                value.dimension_style
+            ));
+        }
+        if !value.annotation_handle.is_null() {
+            if value.creation_type == LeaderCreationType::NoAnnotation {
+                return Err("Leader with no annotation cannot carry an annotation handle".into());
+            }
+            let annotation = document
+                .get_entity(value.annotation_handle)
+                .filter(|_| value.annotation_handle != value.common.handle)
+                .ok_or_else(|| {
+                    format!(
+                        "Leader annotation handle {:?} does not exist",
+                        value.annotation_handle
+                    )
+                })?;
+            let expected = match value.creation_type {
+                LeaderCreationType::WithText => matches!(
+                    annotation,
+                    EntityType::Text(_) | EntityType::MText(_)
+                ),
+                LeaderCreationType::WithTolerance => matches!(annotation, EntityType::Tolerance(_)),
+                LeaderCreationType::WithBlock => matches!(annotation, EntityType::Insert(_)),
+                LeaderCreationType::NoAnnotation => unreachable!(),
+            };
+            if !expected {
+                return Err(format!(
+                    "Leader annotation {:?} does not match creation_type {:?}",
+                    value.annotation_handle, value.creation_type
+                ));
+            }
         }
     }
     if let EntityType::AttributeDefinition(value) = entity {
@@ -1202,6 +1333,7 @@ mod tests {
                         | "AttributeDefinition"
                         | "AttributeEntity"
                         | "Hatch"
+                        | "Leader"
                 )
             {
                 assert!(
@@ -1336,6 +1468,20 @@ mod tests {
                 "Hatch.pixel_size".to_owned(),
                 "Hatch.paths".to_owned(),
                 "Hatch.seed_points".to_owned(),
+                "Leader.dimension_style".to_owned(),
+                "Leader.arrow_enabled".to_owned(),
+                "Leader.path_type".to_owned(),
+                "Leader.creation_type".to_owned(),
+                "Leader.hookline_direction".to_owned(),
+                "Leader.hookline_enabled".to_owned(),
+                "Leader.text_height".to_owned(),
+                "Leader.text_width".to_owned(),
+                "Leader.vertices".to_owned(),
+                "Leader.annotation_handle".to_owned(),
+                "Leader.normal".to_owned(),
+                "Leader.horizontal_direction".to_owned(),
+                "Leader.block_offset".to_owned(),
+                "Leader.annotation_offset".to_owned(),
             ])
         );
     }
@@ -1366,6 +1512,69 @@ mod tests {
         )
         .unwrap_err()
         .contains("does not exist"));
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn leader_geometry_and_annotation_references_are_validated() {
+        use crate::host::acadrust::{self, entities::LeaderCreationType, types::Vector3};
+        let mut document = acadrust::CadDocument::new();
+        let mut text = acadrust::entities::Text::new();
+        text.common.handle = document.allocate_handle();
+        let text_handle = text.common.handle;
+        document.add_entity(acadrust::EntityType::Text(text)).unwrap();
+        let mut leader = acadrust::entities::Leader::two_point(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 5.0, 0.0),
+        );
+        leader.annotation_handle = text_handle;
+        let entity = acadrust::EntityType::Leader(leader.clone());
+        validate_new_canvas_entity(&entity).unwrap();
+        validate_canvas_entity_references(&document, &entity).unwrap();
+
+        let mut wrong_kind = leader.clone();
+        wrong_kind.creation_type = LeaderCreationType::WithTolerance;
+        assert!(validate_canvas_entity_references(
+            &document,
+            &acadrust::EntityType::Leader(wrong_kind)
+        )
+        .unwrap_err()
+        .contains("does not match"));
+        let mut missing = leader.clone();
+        missing.annotation_handle = acadrust::Handle::new(0xdead);
+        assert!(validate_canvas_entity_references(
+            &document,
+            &acadrust::EntityType::Leader(missing)
+        )
+        .unwrap_err()
+        .contains("does not exist"));
+        let mut none_with_handle = leader.clone();
+        none_with_handle.creation_type = LeaderCreationType::NoAnnotation;
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::Leader(none_with_handle))
+            .unwrap_err()
+            .contains("no annotation"));
+        let mut one_point = leader.clone();
+        one_point.vertices.truncate(1);
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::Leader(one_point))
+            .unwrap_err()
+            .contains("at least 2"));
+        let mut bad_style = leader.clone();
+        bad_style.dimension_style = "Missing".into();
+        assert!(validate_canvas_entity_references(
+            &document,
+            &acadrust::EntityType::Leader(bad_style)
+        )
+        .unwrap_err()
+        .contains("dimension style"));
+
+        let mut edited = leader.clone();
+        edited.vertices[1] = Vector3::new(f64::NAN, 0.0, 0.0);
+        assert!(validate_entity_mutation(
+            &acadrust::EntityType::Leader(leader.clone()),
+            &acadrust::EntityType::Leader(edited)
+        )
+        .unwrap_err()
+        .contains("finite"));
     }
 
     #[cfg(feature = "host")]

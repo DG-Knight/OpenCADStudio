@@ -2153,6 +2153,222 @@ mod tests {
     }
 
     #[test]
+    fn staged_python_leader_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+
+        dispatch(&mut host, concat!(
+            "PY_EVAL ocs.active_document.create_entity('Text', text='NOTE', ",
+            "insertion={'x':20.0,'y':10.0,'z':0.0}, height=2.5).handle"
+        ));
+        let text_handle = host.document().entities().find_map(|entity| match entity {
+            EntityType::Text(text) => Some(text.common.handle),
+            _ => None,
+        }).unwrap_or_else(|| panic!("Python did not create Text: {}", last_output(&host)));
+        let script = std::env::temp_dir().join(format!("ocs_leader_create_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "doc = ocs.active_document\n",
+            "doc.create_entity('Leader', vertices=[{{'x':0.0,'y':0.0,'z':0.0}},",
+            "{{'x':10.0,'y':10.0,'z':0.0}},{{'x':20.0,'y':10.0,'z':0.0}}], ",
+            "annotation_handle={}, hookline_enabled=True)\n"
+        ), text_handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let leader_handle = host.document().entities().find_map(|entity| match entity {
+            EntityType::Leader(leader) => Some(leader.common.handle),
+            _ => None,
+        }).unwrap_or_else(|| panic!("Python did not create Leader: {}", last_output(&host)));
+        let created = host.document().get_entity(leader_handle).unwrap().clone();
+        let EntityType::Leader(created_leader) = &created else { unreachable!() };
+        assert_eq!(created_leader.annotation_handle, text_handle);
+        assert_eq!(created_leader.vertices.len(), 3);
+
+        let assert_geometry = |entity: &EntityType, document: &CadDocument| {
+            let EntityType::Leader(leader) = entity else { panic!("expected Leader") };
+            let render = leader.to_render(document).expect("leader render");
+            let crate::scene::convert::acad_to_render::RenderObject::Lines(points) = render.object else {
+                panic!("expected leader linework");
+            };
+            assert!(points.len() >= leader.vertices.len());
+            assert!(points.iter().flatten().all(|value| value.is_nan() || value.is_finite()));
+        };
+        assert_geometry(&created, host.document());
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.active_document.entities[{}].annotation_handle", leader_handle.value()));
+        assert!(last_output(&host).contains(&text_handle.value().to_string()));
+
+        // GUI picking groups a leader with its annotation, while scripted
+        // selection stays exact.
+        host.app.tabs[0].scene.select_entities(&[leader_handle]);
+        let mut grouped = host.selection();
+        grouped.sort_by_key(|handle| handle.value());
+        assert_eq!(grouped, vec![text_handle, leader_handle]);
+        host.app.tabs[0].scene.replace_selection_exact(&[]);
+
+        let script = std::env::temp_dir().join(format!("ocs_leader_edit_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "doc = ocs.active_document\n",
+            "leader = doc.entities[{}]\n",
+            "with doc.transaction('Edit leader'):\n",
+            "    leader.vertices = [{{'x':1.0,'y':1.0,'z':0.0}},{{'x':11.0,'y':12.0,'z':0.0}},",
+            "{{'x':22.0,'y':12.0,'z':0.0}},{{'x':30.0,'y':12.0,'z':0.0}}]\n",
+            "    leader.text_height = 4.0\n",
+            "    leader.arrow_enabled = False\n",
+            "    leader.annotation_offset = (1.0, 2.0, 0.0)\n",
+            "doc.selection = [leader]\n"
+        ), leader_handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let expected = host.document().get_entity(leader_handle).unwrap().clone();
+        let EntityType::Leader(edited) = &expected else { unreachable!() };
+        assert_eq!(edited.vertices.len(), 4, "edit failed: {}", last_output(&host));
+        assert_eq!(edited.text_height, 4.0);
+        assert!(!edited.arrow_enabled);
+        assert_eq!(edited.annotation_offset, acadrust::types::Vector3::new(1.0, 2.0, 0.0));
+        assert_eq!(edited.annotation_handle, text_handle);
+        assert_eq!(edited.common, created_leader.common);
+        assert_eq!(edited.dimension_style, created_leader.dimension_style);
+        assert_eq!(edited.hookline_enabled, created_leader.hookline_enabled);
+        assert_eq!(edited.normal, created_leader.normal);
+        assert_eq!(edited.origin, created_leader.origin);
+        assert_eq!(edited.override_color, created_leader.override_color);
+        assert_eq!(host.selection(), vec![leader_handle]);
+        assert_geometry(&expected, host.document());
+
+        for (patch, message) in [
+            ("'annotation_handle':999999", "does not exist"),
+            ("'creation_type':'WithTolerance'", "does not match creation_type"),
+            ("'creation_type':'NoAnnotation'", "no annotation"),
+            ("'vertices':[{'x':0.0,'y':0.0,'z':0.0}]", "at least 2"),
+            ("'text_height':0.0", "greater than zero"),
+            ("'dimension_style':'Missing'", "dimension style"),
+            ("'override_color':{}", "outside the editable schema"),
+        ] {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many('Reject leader', [{{'handle':{}, {patch}}}])",
+                leader_handle.value()));
+            assert_eq!(host.document().get_entity(leader_handle), Some(&expected), "{patch}");
+            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+        }
+        // A valid edit paired with an invalid one is atomic across entities.
+        dispatch(&mut host, &format!(concat!(
+            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'text_width':5.0}},",
+            "{{'handle':{},'text_height':0.0}}])"
+        ), leader_handle.value(), text_handle.value()));
+        assert_eq!(host.document().get_entity(leader_handle), Some(&expected));
+
+        // Both formats keep the path, annotation link, arrow flag and offset.
+        // DWG R2010+ derives text_height/text_width/hookline_enabled instead of
+        // storing them (acadrust writes them for R13-R2007/R13-R14 only), so
+        // only DXF must round-trip those three.
+        let assert_saved = |document: &CadDocument, is_dxf: bool| {
+            let Some(EntityType::Leader(leader)) = document.get_entity(leader_handle) else {
+                panic!("Leader missing after reopen");
+            };
+            assert_eq!(leader.vertices.len(), 4);
+            if is_dxf {
+                // BLOCKER: acadrust's DXF writer never emits group 340, so a
+                // DXF save unlinks the annotation. Flip this to
+                // `assert_eq!(.., text_handle)` once the engine writes it.
+                assert!(leader.annotation_handle.is_null(), "acadrust now writes DXF 340; drop the blocker");
+            } else {
+                assert_eq!(leader.annotation_handle, text_handle);
+            }
+            assert!(!leader.arrow_enabled);
+            if is_dxf {
+                // BLOCKER: the DXF writer emits group 213 but the reader's
+                // coordinate mapping does not reassemble it.
+                assert_eq!(leader.annotation_offset, acadrust::types::Vector3::ZERO,
+                    "acadrust now reads DXF 213; drop the blocker");
+            } else {
+                assert_eq!(leader.annotation_offset, acadrust::types::Vector3::new(1.0, 2.0, 0.0));
+            }
+            assert_eq!(leader.dimension_style, "Standard");
+            if is_dxf {
+                assert!((leader.text_height - 4.0).abs() < 1e-12);
+                assert!(leader.hookline_enabled);
+            } else {
+                assert_eq!(leader.text_height, 2.5, "DWG R2010+ does not store text_height");
+                assert!(!leader.hookline_enabled, "DWG R2010+ does not store hookline_enabled");
+            }
+            assert!(matches!(document.get_entity(text_handle), Some(EntityType::Text(_))));
+        };
+        let reopened_dwg = crate::io::load_bytes("leader.dwg",
+            acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let reopened_dxf = crate::io::load_bytes("leader.dxf",
+            acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        assert_saved(&reopened_dwg, false);
+        assert_saved(&reopened_dxf, true);
+        for (name, mut document) in [("leader-reedit.dwg", reopened_dwg),
+            ("leader-reedit.dxf", reopened_dxf)] {
+            assert_geometry(document.get_entity(leader_handle).unwrap(), &document);
+            let before = document.get_entity(leader_handle).unwrap().clone();
+            let mut after = before.clone();
+            let EntityType::Leader(leader) = &mut after else { unreachable!() };
+            leader.vertices[3] = acadrust::types::Vector3::new(35.0, 12.0, 0.0);
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            *document.get_entity_mut(leader_handle).unwrap() = after;
+            let bytes = if name.ends_with("dwg") {
+                acadrust::DwgWriter::write_to_vec(&document).unwrap()
+            } else {
+                acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
+            };
+            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(leader_handle),
+                Some(EntityType::Leader(leader)) if (leader.vertices[3].x - 35.0).abs() < 1e-9));
+        }
+
+        // Erasing a leader also erases its annotation (scene leader grouping).
+        dispatch(&mut host, &format!(
+            "PY_EVAL ocs.active_document.delete_entity({})", leader_handle.value()));
+        assert!(host.document().get_entity(leader_handle).is_none());
+        assert!(host.document().get_entity(text_handle).is_none());
+        for (name, bytes) in [
+            ("leader-deleted.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()),
+            ("leader-deleted.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+        ] {
+            let document = crate::io::load_bytes(name, bytes).unwrap();
+            assert!(document.get_entity(leader_handle).is_none());
+            assert!(document.get_entity(text_handle).is_none());
+        }
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        // Text create, Leader create, edit transaction, Leader delete.
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 4);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(leader_handle), Some(&expected));
+        assert!(app.tabs[0].scene.document.get_entity(text_handle).is_some());
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(leader_handle), Some(&created));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(leader_handle).is_none());
+        assert!(app.tabs[0].scene.document.get_entity(text_handle).is_some());
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(text_handle).is_none());
+        app.redo_steps(4);
+        assert!(app.tabs[0].scene.document.get_entity(leader_handle).is_none());
+        assert!(app.tabs[0].scene.document.get_entity(text_handle).is_none());
+    }
+
+    #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
             return;
