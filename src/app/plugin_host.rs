@@ -220,6 +220,30 @@ impl<'a> HostSession<'a> {
         Ok(())
     }
 
+    /// The `ACAD_IMAGE_DICT` dictionary under the named-objects root, created
+    /// when the drawing has none. `None` when the drawing has no root dictionary.
+    fn ensure_image_dictionary(&mut self) -> Option<Handle> {
+        use acadrust::objects::{Dictionary, ObjectType};
+        let root = self.document().header.named_objects_dict_handle;
+        let Some(ObjectType::Dictionary(root_dictionary)) = self.document().objects.get(&root) else {
+            return None;
+        };
+        if let Some(existing) = root_dictionary.get("ACAD_IMAGE_DICT") {
+            if matches!(self.document().objects.get(&existing), Some(ObjectType::Dictionary(_))) {
+                return Some(existing);
+            }
+        }
+        let handle = self.document_mut().allocate_handle();
+        let mut dictionary = Dictionary::new();
+        dictionary.handle = handle;
+        dictionary.owner = root;
+        self.document_mut().objects.insert(handle, ObjectType::Dictionary(dictionary));
+        if let Some(ObjectType::Dictionary(root_dictionary)) = self.document_mut().objects.get_mut(&root) {
+            root_dictionary.add_entry("ACAD_IMAGE_DICT", handle);
+        }
+        Some(handle)
+    }
+
     /// A scripted RasterImage names a file; the host creates the image
     /// definition object it needs (pixel size read from the file) and links it.
     fn prepare_scripted_raster_image(&mut self, entity: &mut EntityType) -> Result<(), String> {
@@ -231,17 +255,51 @@ impl<'a> HostSession<'a> {
         }
         let (width, height) = image::image_dimensions(&image.file_path)
             .map_err(|error| format!("cannot read image {:?}: {error}", image.file_path))?;
-        let handle = self.document_mut().allocate_handle();
-        let mut definition = acadrust::objects::ImageDefinition::with_dimensions(
-            image.file_path.clone(),
-            width,
-            height,
-        );
-        definition.handle = handle;
-        definition.is_loaded = true;
-        self.document_mut()
-            .objects
-            .insert(handle, acadrust::objects::ObjectType::ImageDefinition(definition));
+        // One definition per file, as AutoCAD keeps it: reuse an existing one.
+        let existing = self.document().objects.iter().find_map(|(handle, object)| match object {
+            acadrust::objects::ObjectType::ImageDefinition(definition)
+                if definition.file_name == image.file_path => Some(*handle),
+            _ => None,
+        });
+        let handle = match existing {
+            Some(handle) => handle,
+            None => {
+                let handle = self.document_mut().allocate_handle();
+                let mut definition = acadrust::objects::ImageDefinition::with_dimensions(
+                    image.file_path.clone(),
+                    width,
+                    height,
+                );
+                definition.handle = handle;
+                definition.is_loaded = true;
+                // Register it in ACAD_IMAGE_DICT under the file's name, and let
+                // that dictionary own it, like an image AutoCAD attached.
+                let stem = std::path::Path::new(&image.file_path)
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("IMAGE")
+                    .to_owned();
+                if let Some(dictionary) = self.ensure_image_dictionary() {
+                    definition.owner = dictionary;
+                    if let Some(acadrust::objects::ObjectType::Dictionary(entries)) =
+                        self.document_mut().objects.get_mut(&dictionary)
+                    {
+                        let mut key = stem.clone();
+                        let mut suffix = 1;
+                        while entries.get(&key).is_some() {
+                            suffix += 1;
+                            key = format!("{stem}_{suffix}");
+                        }
+                        entries.add_entry(key, handle);
+                    }
+                }
+                self.document_mut()
+                    .objects
+                    .insert(handle, acadrust::objects::ObjectType::ImageDefinition(definition));
+                handle
+            }
+        };
         image.definition_handle = Some(handle);
         // `size` is the image's pixel size, and an untouched clip boundary
         // covers the whole image, so both follow the file.
@@ -5865,6 +5923,124 @@ mod tests {
         let bare = host.document_mut().add_entity(EntityType::Viewport(bare)).unwrap();
         assert_eq!(host.document().get_entity(bare).map(|e| match e { EntityType::Viewport(v) => v.id, _ => -1 }), Some(0));
         assert!(!host.app.tabs[0].scene.wire_models_for(&[bare]).is_empty());
+    }
+
+    /// Evidence for the RasterImage ledger row: what a save does with a bare
+    /// image (OCS's native IMAGE command) and with a definition-linked one.
+    #[test]
+    #[ignore = "exploratory evidence"]
+    fn spike_raster_image_definition_persistence() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ocs_spike_image.png").to_string_lossy().into_owned();
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([1, 2, 3, 255])).save(&path).unwrap();
+        for linked in [false, true] {
+            let mut doc = acadrust::CadDocument::new();
+            let mut img = acadrust::entities::RasterImage::with_size(&path, acadrust::types::Vector3::ZERO, 8.0, 4.0, 16.0, 8.0);
+            if linked {
+                let h = doc.allocate_handle();
+                let mut def = acadrust::objects::ImageDefinition::with_dimensions(path.clone(), 8, 4);
+                def.handle = h;
+                def.is_loaded = true;
+                doc.objects.insert(h, acadrust::objects::ObjectType::ImageDefinition(def));
+                img.definition_handle = Some(h);
+            }
+            let handle = doc.add_entity(EntityType::RasterImage(img)).unwrap();
+            for (label, document) in [
+                ("DWG", crate::io::load_bytes("i.dwg", acadrust::DwgWriter::write_to_vec(&doc).unwrap()).unwrap()),
+                ("DXF", crate::io::load_bytes("i.dxf", acadrust::DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap()),
+            ] {
+                let entity = document.get_entity(handle);
+                let defs = document.objects.values().filter(|o| matches!(o, acadrust::objects::ObjectType::ImageDefinition(_))).count();
+                let reactors = document.objects.values().filter(|o| matches!(o, acadrust::objects::ObjectType::ImageDefinitionReactor(_))).count();
+                let dicts = document.objects.values().filter(|o| matches!(o, acadrust::objects::ObjectType::Dictionary(d) if d.entries.iter().any(|(k, _)| k.contains("IMAGE")))).count();
+                match entity {
+                    Some(EntityType::RasterImage(i)) => eprintln!("SPIKE linked={linked} {label}: file_path_ok={} definition={:?} reactor={:?} defs={defs} reactors={reactors} image_dicts={dicts}",
+                        i.file_path == path, i.definition_handle.map(|h| h.value()), i.definition_reactor_handle.map(|h| h.value())),
+                    other => eprintln!("SPIKE linked={linked} {label}: came back as {:?}", other.map(|e| format!("{e:?}").chars().take(24).collect::<String>())),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audit_python_raster_image_definition_linkage_over_real_ipc() {
+        use acadrust::objects::ObjectType;
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let dir = std::env::temp_dir();
+        let (a, b) = (dir.join("ocs_link_a.png"), dir.join("ocs_link_b.png"));
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([9, 9, 9, 255])).save(&a).unwrap();
+        image::RgbaImage::from_pixel(6, 6, image::Rgba([90, 9, 9, 255])).save(&b).unwrap();
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let script = dir.join(format!("ocs_link_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "doc = ocs.active_document\n",
+            "doc.create_entity('RasterImage', file_path={a:?}, insertion_point=(0, 0, 0))\n",
+            "doc.create_entity('RasterImage', file_path={a:?}, insertion_point=(20, 0, 0))\n",
+            "doc.create_entity('RasterImage', file_path={b:?}, insertion_point=(40, 0, 0))\n",
+        ), a = a.display().to_string(), b = b.display().to_string())).unwrap();
+        assert!(process.dispatch(&mut host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+        let _ = std::fs::remove_file(&script);
+
+        // The structure: one definition per file, registered and owned by ACAD_IMAGE_DICT.
+        let structure = |document: &CadDocument| {
+            let root = document.header.named_objects_dict_handle;
+            let Some(ObjectType::Dictionary(root_dict)) = document.objects.get(&root) else { panic!("no root dictionary") };
+            let dict_handle = root_dict.get("ACAD_IMAGE_DICT");
+            let entries = dict_handle.and_then(|h| match document.objects.get(&h) {
+                Some(ObjectType::Dictionary(d)) => Some(d.entries.clone()), _ => None }).unwrap_or_default();
+            let defs: Vec<_> = document.objects.iter().filter_map(|(h, o)| match o {
+                ObjectType::ImageDefinition(d) => Some((*h, d.owner, d.file_name.clone())), _ => None }).collect();
+            let mut images: Vec<_> = document.entities().filter_map(|e| match e {
+                EntityType::RasterImage(i) => Some((i.common.handle, i.definition_handle, i.file_path.clone())), _ => None }).collect();
+            images.sort_by_key(|(h, _, _)| h.value());
+            (dict_handle, entries, defs, images)
+        };
+        let check = |label: &str, document: &CadDocument| {
+            let (dict, entries, defs, images) = structure(document);
+            let dict = dict.unwrap_or_else(|| panic!("{label}: no ACAD_IMAGE_DICT"));
+            assert_eq!(defs.len(), 2, "{label}: one definition per file");
+            let mut keys: Vec<_> = entries.iter().map(|(k, _)| k.as_str()).collect();
+            keys.sort();
+            assert_eq!(keys, vec!["ocs_link_a", "ocs_link_b"], "{label}");
+            for (key, handle) in &entries {
+                let (_, owner, file) = defs.iter().find(|(h, _, _)| h == handle).unwrap_or_else(|| panic!("{label}: dangling entry {key}"));
+                assert_eq!(*owner, dict, "{label}: {key} is owned by ACAD_IMAGE_DICT");
+                assert!(file.contains(key.as_str()), "{label}: {key} -> {file}");
+            }
+            assert_eq!(images.len(), 3, "{label}");
+            assert_eq!(images[0].1, images[1].1, "{label}: images of one file share a definition");
+            assert_ne!(images[0].1, images[2].1, "{label}");
+            for (_, definition, path) in &images {
+                assert!(defs.iter().any(|(h, _, _)| Some(*h) == *definition), "{label}: definition resolves");
+                assert!(path.contains("ocs_link_"), "{label}: file path kept: {path}");
+            }
+        };
+        check("live", host.document());
+        let dwg = crate::io::load_bytes("link.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("link.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        check("DWG", &dwg);
+        check("DXF", &dxf);
+
+        // U: undoing the last image leaves no dangling dictionary entry.
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(1);
+        let (_, entries, defs, images) = structure(&app.tabs[0].scene.document);
+        assert!(images.len() < 3);
+        for (key, handle) in &entries {
+            assert!(defs.iter().any(|(h, _, _)| h == handle), "undo left a dangling entry {key}");
+        }
+        for file in [&a, &b] {
+            let _ = std::fs::remove_file(file);
+        }
     }
 
     #[test]
