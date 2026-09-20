@@ -17,6 +17,10 @@ The server provides four tools:
 - `ocs_execute` performs one operation, an atomic record update, or a sequential batch against the real editor.
 - `ocs_capture` returns a bounded PNG of the drawing viewport or complete window.
 
+Native builds also accept a second, headless entry point (`OpenCADStudio --serve`, one
+JSON request per line) for scripts and CI; the two native channels, their startup dialogs
+and their limits are described in [native.md](native.md).
+
 The normal flow is to call `ocs_sessions`, pass its returned `session_id` as `ocs_session_id` to the other tools, read the chosen session with `ocs_read`, then pass the returned document state into `ocs_execute`. For example, an undo request has this shape:
 
 ```json
