@@ -850,6 +850,8 @@ impl OpenCADStudio {
                         .swap_structure(std::mem::replace(stored, acadrust::CadDocument::new()));
                     *stored = inverse;
                     self.tabs[i].scene.invalidate_dependency_index();
+                    self.tabs[i].scene.bump_layout_epoch();
+                    self.tabs[i].scene.bump_scale_epoch();
                 }
                 StructureSnapshot::Layers(entries) => {
                     let names: Vec<String> =
@@ -911,12 +913,31 @@ impl OpenCADStudio {
                     }
                 }
                 StructureSnapshot::Objects(entries) => {
+                    let mut layout_touched = false;
+                    let mut scale_touched = false;
                     for entry in entries {
                         let value = if undo {
                             entry.before.clone()
                         } else {
                             entry.after.clone()
                         };
+                        // Either direction can add/remove a layout: undoing
+                        // an insert removes it (`before` is `None`), redoing
+                        // re-inserts it — so both sides must be inspected.
+                        layout_touched |= matches!(
+                            entry.before,
+                            Some(acadrust::objects::ObjectType::Layout(_))
+                        ) || matches!(
+                            entry.after,
+                            Some(acadrust::objects::ObjectType::Layout(_))
+                        );
+                        scale_touched |= matches!(
+                            entry.before,
+                            Some(acadrust::objects::ObjectType::Scale(_))
+                        ) || matches!(
+                            entry.after,
+                            Some(acadrust::objects::ObjectType::Scale(_))
+                        );
                         if let Some(object) = value {
                             self.tabs[i]
                                 .scene
@@ -926,6 +947,12 @@ impl OpenCADStudio {
                         } else {
                             self.tabs[i].scene.document.objects.remove(&entry.handle);
                         }
+                    }
+                    if layout_touched {
+                        self.tabs[i].scene.bump_layout_epoch();
+                    }
+                    if scale_touched {
+                        self.tabs[i].scene.bump_scale_epoch();
                     }
                 }
                 StructureSnapshot::Styles {

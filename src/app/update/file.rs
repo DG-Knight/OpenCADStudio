@@ -1697,6 +1697,8 @@ impl OpenCADStudio {
         self.install_native_edit_guard(i, &path, opened_fingerprint);
         self.tabs[i].scene.material_base_dir = path.parent().map(std::path::Path::to_path_buf);
         self.tabs[i].scene.document = doc;
+        self.tabs[i].scene.bump_layout_epoch();
+        self.tabs[i].scene.bump_scale_epoch();
         // Load parameters first so imported dimensional constraints
         // can resolve their named driving values.
         self.tabs[i].scene.load_named_parameters_from_document();

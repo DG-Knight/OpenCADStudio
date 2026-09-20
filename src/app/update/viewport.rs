@@ -6028,7 +6028,7 @@ properties={:.1}ms picked={}",
             idx += 1;
         };
         self.push_undo_snapshot(i, "LAYOUT");
-        match self.tabs[i].scene.document.add_layout(&new_name) {
+        match self.tabs[i].scene.add_layout(&new_name) {
             Ok(_) => {
                 let layout_flags = i16::from(
                     self.tabs[i]

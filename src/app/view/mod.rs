@@ -15,6 +15,7 @@ use iced::widget::{
 use iced::window;
 use iced::{keyboard, Background, Border, Color, Element, Fill, Length, Subscription, Task, Theme};
 use iced_aw::ContextMenu;
+use std::sync::Arc;
 
 mod controls;
 mod modal;
@@ -2165,8 +2166,17 @@ bg={bg_ms:.1}ms n={view_count}"
                     let last_coord = self.last_point.map(to_readout);
                     let coords_mode = tab.scene.document.header.coords_mode;
                     let picking = tab.active_cmd.is_some();
-                    let layout_names = tab.scene.layout_names();
-                    let block_tabs = tab
+                    // Cached Arcs are moved (refcount bump only), never deep-cloned:
+                    // `StatusBar::view` / `StatusMenuData` take ownership of the
+                    // `Arc`s and borrow them internally. `current_layout` is the
+                    // one true borrow — it anchors to `tab`, which outlives the
+                    // call — because a call-site slice over an `Arc` temporary
+                    // cannot outlive this block (E0515).
+                    let layout_names = tab.scene.cached_layout_names();
+                    let scale_list = tab.scene.cached_scale_picker_list();
+                    let selection_types = tab.scene.entity_type_names_in_layout();
+                    let current_scale_name = tab.scene.displayed_annotation_scale_name();
+                    let block_tabs: Vec<String> = tab
                         .block_edits
                         .iter()
                         .map(|session| session.block_name.clone())
@@ -2185,13 +2195,13 @@ bg={bg_ms:.1}ms n={view_count}"
                         ),
                     );
                     let status_menu_data = crate::ui::statusbar::StatusMenuData {
-                        layout_names: layout_names.clone(),
+                        layout_names: Arc::clone(&layout_names),
                         polar_custom_input: &self.polar_custom_input,
                         scale_is_model: is_model,
-                        current_scale_name: tab.scene.displayed_annotation_scale_name(),
-                        scale_list: tab.scene.scale_picker_list(),
+                        current_scale_name,
+                        scale_list,
                         has_selection: !tab.scene.selected.is_empty(),
-                        selection_types: tab.scene.entity_type_names_in_layout().as_ref().clone(),
+                        selection_types,
                         selection_filter: &tab.scene.selection_filter,
                         tooltip_hidden: self.status_menu_tooltip_hidden,
                     };
@@ -2204,10 +2214,9 @@ bg={bg_ms:.1}ms n={view_count}"
                         self.snapper.otrack_enabled,
                         self.isometric_drafting,
                         self.iso_plane,
-                        layout_names.clone(),
+                        layout_names,
                         block_tabs,
-                        layout_names.into_iter().skip(1).collect(),
-                        tab.scene.current_layout.clone(),
+                        &tab.scene.current_layout,
                         active_block,
                         tab.is_start,
                         self.layout_rename_state.as_ref(),
@@ -2266,11 +2275,27 @@ bg={bg_ms:.1}ms n={view_count}"
         .width(Fill)
         .height(Fill);
 
+        // History labels are built only when their dropdown is actually open;
+        // otherwise an empty slice short-circuits the overlay gate
+        // (`dropdown_overlay` returns `None` for empty labels anyway).
+        let open_dropdown = self.ribbon.open_dropdown.as_deref();
+        let undo_labels: Vec<String> =
+            if open_dropdown == Some(crate::ui::ribbon::UNDO_HISTORY_ID) {
+                history_dropdown_labels(&self.tabs[self.active_tab].history.undo_stack)
+            } else {
+                Vec::new()
+            };
+        let redo_labels: Vec<String> =
+            if open_dropdown == Some(crate::ui::ribbon::REDO_HISTORY_ID) {
+                history_dropdown_labels(&self.tabs[self.active_tab].history.redo_stack)
+            } else {
+                Vec::new()
+            };
         let dropdown_layer: Element<'_, Message> = self
             .ribbon
             .dropdown_overlay(
-                &history_dropdown_labels(&self.tabs[self.active_tab].history.undo_stack),
-                &history_dropdown_labels(&self.tabs[self.active_tab].history.redo_stack),
+                &undo_labels,
+                &redo_labels,
                 self.win_size,
                 self.tabs[self.active_tab].is_start,
                 &self.recent_colors,

@@ -1408,6 +1408,72 @@ fn bench_ui_plotstyle_layer_usage(runner: &mut BenchmarkRunner) {
     );
 }
 
+// ── 12c. UI Status Bar Derived-Data Cache Hit ─────────────────────────────────
+// Covers the per-frame status-bar path (`cached_layout_names` +
+// `cached_scale_picker_list`): layout names and the annotation-scale picker
+// list are served as shared `Arc` clones instead of full doc scans.
+
+fn bench_ui_statusbar_derived_data(runner: &mut BenchmarkRunner) {
+    if !runner.should_run("ui_statusbar_derived_data") {
+        return;
+    }
+
+    // Scene shaped like a working drawing: several thousand entities,
+    // multiple paper layouts, and a populated annotation-scale list.
+    let mut scene = Scene::new();
+    for i in 0..3_000 {
+        let x = (i % 100) as f64 * 20.0;
+        let y = (i / 100) as f64 * 20.0;
+        let mut line = Line::new();
+        line.start = Vector3::new(x, y, 0.0);
+        line.end = Vector3::new(x + 15.0, y + 15.0, 0.0);
+        scene.add_entity(EntityType::Line(line));
+    }
+    for i in 0..8 {
+        let _ = scene.add_layout(&format!("SB_BENCH_{i}"));
+    }
+    for (i, (paper, drawing)) in [(1.0, 50.0), (1.0, 100.0), (0.5, 12.0), (1.0, 48.0)]
+        .iter()
+        .enumerate()
+    {
+        let _ = scene.add_scale(&format!("SB_SCALE_{i}"), *paper, *drawing);
+    }
+
+    // Warm-up: populate both caches and settle the allocator.
+    for _ in 0..10 {
+        let layouts = scene.cached_layout_names();
+        let scales = scene.cached_scale_picker_list();
+        black_box(layouts);
+        black_box(scales);
+    }
+
+    let n = if runner.quick_mode { 20 } else { 100 };
+    let runs = 5;
+    let mut samples = Vec::with_capacity(runs);
+
+    for _ in 0..runs {
+        let t0 = Instant::now();
+        for _ in 0..n {
+            let layouts = scene.cached_layout_names();
+            let scales = scene.cached_scale_picker_list();
+            black_box(layouts);
+            black_box(scales);
+        }
+        let per_us = (t0.elapsed().as_micros() as f64) / (n as f64);
+        samples.push(per_us);
+    }
+
+    let median_us = samples[samples.len() / 2];
+    runner.record(
+        "ui_statusbar_derived_data",
+        "Status-bar cached derived data hit (layout names + scale picker Arc clones)",
+        "µs",
+        samples,
+        Some((1_000_000.0 / median_us, "hits/s")),
+        Some(50.0), // Target threshold < 50 µs
+    );
+}
+
 // ── 13. Wide & Tapered Arc + Donut Tessellation ─────────────────────────────
 
 fn bench_wide_and_tapered_arc_tessellation(runner: &mut BenchmarkRunner) {
@@ -1811,6 +1877,7 @@ fn main() {
     bench_ui_grid_geometry(&mut runner);
     bench_ui_icon_caching(&mut runner);
     bench_ui_plotstyle_layer_usage(&mut runner);
+    bench_ui_statusbar_derived_data(&mut runner);
     bench_wide_and_tapered_arc_tessellation(&mut runner);
     bench_zoom_extents_calculation(&mut runner);
     bench_batch_entity_mutation(&mut runner);

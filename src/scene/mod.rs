@@ -2282,6 +2282,13 @@ pub struct Scene {
             std::sync::Arc<Vec<String>>,
         )>,
     >,
+    /// Bump on any Layout object insert/remove/rename/reorder.
+    layout_epoch: u64,
+    layout_names_cache: RefCell<Option<(u64, std::sync::Arc<Vec<String>>)>>,
+    /// Bump on any annotation-scale list mutation.
+    scale_epoch: u64,
+    scale_picker_cache:
+        RefCell<Option<(u64, f64, Option<bool>, String, std::sync::Arc<Vec<(String, f32, f64)>>)>>,
     /// Reverse dependencies from layer/style/block definitions to the top-level
     /// entities whose resident wire runs actually change. Kept independent from
     /// `geometry_epoch`: a layer colour toggle can reuse the index, invalidate
@@ -2636,6 +2643,10 @@ impl Scene {
             leaders_by_annotation_cache: RefCell::new(None),
             unindexable_cache: RefCell::new(None),
             layout_type_names_cache: RefCell::new(None),
+            layout_epoch: 0,
+            layout_names_cache: RefCell::new(None),
+            scale_epoch: 0,
+            scale_picker_cache: RefCell::new(None),
             dependency_index_cache: RefCell::new(None),
             associative_hatch_source_cache: RefCell::new(None),
             parametric_constraints: Vec::new(),
@@ -4855,6 +4866,7 @@ impl Scene {
                 .unwrap_or((1.0, 1.0 / factor));
             self.add_scale(label, paper, drawing);
         }
+        self.bump_scale_epoch();
         true
     }
 
@@ -5333,6 +5345,7 @@ impl Scene {
                 (drawing > 0.0).then_some((1.0, drawing))
             })?;
         let (paper, drawing) = self.scale_paper_drawing(name).unwrap_or(fallback);
+        // `add_scale` already bumps `scale_epoch`; no extra bump here.
         self.add_scale(name, paper, drawing);
         self.scale_object_handle(name)
     }
@@ -5375,6 +5388,7 @@ impl Scene {
         if let Some(ObjectType::Dictionary(sl)) = self.document.objects.get_mut(&scalelist_h) {
             sl.add_entry(name, sh);
         }
+        self.bump_scale_epoch();
         true
     }
 
@@ -5452,6 +5466,7 @@ impl Scene {
             }
         }
         self.invalidate_annotation_dependencies();
+        self.bump_scale_epoch();
         true
     }
 
@@ -5484,6 +5499,7 @@ impl Scene {
                 }
             }
         }
+        self.bump_scale_epoch();
         true
     }
 
@@ -5990,6 +6006,51 @@ impl Scene {
         paper.sort_by_key(|(order, _)| *order);
         names.extend(paper.into_iter().map(|(_, n)| n));
         names
+    }
+
+    pub fn bump_layout_epoch(&mut self) {
+        self.layout_epoch += 1;
+    }
+
+    pub fn cached_layout_names(&self) -> std::sync::Arc<Vec<String>> {
+        if let Some((epoch, names)) = self.layout_names_cache.borrow().as_ref() {
+            if *epoch == self.layout_epoch {
+                return std::sync::Arc::clone(names);
+            }
+        }
+        let names = std::sync::Arc::new(self.layout_names());
+        *self.layout_names_cache.borrow_mut() = Some((self.layout_epoch, std::sync::Arc::clone(&names)));
+        names
+    }
+
+    pub fn bump_scale_epoch(&mut self) {
+        self.scale_epoch += 1;
+    }
+
+    pub fn cached_scale_picker_list(&self) -> std::sync::Arc<Vec<(String, f32, f64)>> {
+        let factor = self.annotation_scale_unit_factor();
+        let imperial = self.prefers_imperial_scales();
+        let current = self.document.header.current_annotation_scale.clone();
+        if let Some((epoch, cached_factor, cached_imperial, cached_current, list)) =
+            self.scale_picker_cache.borrow().as_ref()
+        {
+            if *epoch == self.scale_epoch
+                && *cached_factor == factor
+                && *cached_imperial == imperial
+                && *cached_current == current
+            {
+                return std::sync::Arc::clone(list);
+            }
+        }
+        let list = std::sync::Arc::new(self.scale_picker_list());
+        *self.scale_picker_cache.borrow_mut() = Some((
+            self.scale_epoch,
+            factor,
+            imperial,
+            current,
+            std::sync::Arc::clone(&list),
+        ));
+        list
     }
 
     /// Wire set for the Model layout, shared by every tile.
@@ -13349,5 +13410,80 @@ mod layout_cache_tests {
             2,
             "Mixed polyline should have its 2 bulge arcs routed to analytical CircleGpu"
         );
+    }
+
+    #[test]
+    fn cached_layout_names_returns_same_arc_until_bump() {
+        let mut scene = Scene::new();
+        let first = scene.cached_layout_names();
+        let second = scene.cached_layout_names();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        // Fresh `CadDocument::new()` ships a default "Layout1" paper layout.
+        assert_eq!(&first[..], &["Model".to_string(), "Layout1".to_string()]);
+    }
+
+    #[test]
+    fn cached_layout_names_invalidated_by_add_layout() {
+        let mut scene = Scene::new();
+        let before = scene.cached_layout_names();
+        scene.add_layout("EXTRA").unwrap();
+        let after = scene.cached_layout_names();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "add_layout must bump the epoch so the cached Arc is replaced"
+        );
+        assert!(after.iter().any(|n| n == "EXTRA"));
+    }
+
+    #[test]
+    fn cached_scale_picker_returns_same_arc_until_bump() {
+        let scene = Scene::new();
+        let first = scene.cached_scale_picker_list();
+        let second = scene.cached_scale_picker_list();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn cached_scale_picker_invalidated_by_add_scale() {
+        let mut scene = Scene::new();
+        let before = scene.cached_scale_picker_list();
+        assert!(scene.add_scale("TEST_CACHED_SCALE", 1.0, 100.0));
+        let after = scene.cached_scale_picker_list();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "add_scale must bump the epoch so the cached Arc is replaced"
+        );
+        assert!(after.iter().any(|(n, _, _)| n == "TEST_CACHED_SCALE"));
+    }
+
+    #[test]
+    fn cached_scale_picker_invalidated_by_current_scale_change() {
+        let mut scene = Scene::new();
+        // Force the metric family so the architectural entry is filtered out
+        // unless it is the kept-active current scale.
+        scene.document.header.insertion_units = 4;
+        assert!(scene.add_scale("1:50", 1.0, 50.0));
+        assert!(scene.add_scale("1/2\" = 1'-0\"", 0.5, 12.0));
+        // Current = opposite-family entry with no metric equivalent factor, so
+        // the keep-active path appends it to the visible list.
+        assert!(scene.set_annotation_scale_named("1/2\" = 1'-0\"").is_some());
+        let before = scene.cached_scale_picker_list();
+        assert!(
+            before.iter().any(|(n, _, _)| n == "1/2\" = 1'-0\""),
+            "warm cache must contain the active opposite-family entry"
+        );
+        // Production setter: changes `current_annotation_scale` without
+        // bumping `scale_epoch` — the old (epoch, factor) key stayed hit here.
+        assert!(scene.set_annotation_scale_named("1:50").is_some());
+        let after = scene.cached_scale_picker_list();
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "current-scale change must miss the cache (new Arc)"
+        );
+        assert!(
+            !after.iter().any(|(n, _, _)| n == "1/2\" = 1'-0\""),
+            "after switching to 1:50 the architectural entry must drop out"
+        );
+        assert!(after.iter().any(|(n, _, _)| n == "1:50"));
     }
 }

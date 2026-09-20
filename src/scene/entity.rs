@@ -2711,6 +2711,8 @@ impl Scene {
         self.parametric_constraints.clear();
         self.named_parameters = crate::scene::named_parameters::ParameterTable::new();
         self.bump_geometry();
+        self.bump_layout_epoch();
+        self.bump_scale_epoch();
     }
 
     /// Reset to the drawing File → New produces. Every path that starts a
