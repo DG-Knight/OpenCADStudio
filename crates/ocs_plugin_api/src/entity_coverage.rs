@@ -318,6 +318,65 @@ fn validate_leader(
     Ok(())
 }
 
+/// Field checks shared by MLine creation and mutation. Vertex `direction`,
+/// `miter` and segment cut parameters are derived by the host, so only their
+/// finiteness is checked here.
+#[cfg(feature = "host")]
+fn validate_mline(
+    old: Option<&crate::host::acadrust::entities::MLine>,
+    new: &crate::host::acadrust::entities::MLine,
+) -> Result<(), String> {
+    if old.is_none_or(|old| old.flags != new.flags) && new.flags.bits() & !0x0f != 0 {
+        return Err("MLine.flags has unknown bits".into());
+    }
+    if old.is_none_or(|old| old.scale_factor.to_bits() != new.scale_factor.to_bits())
+        && (!new.scale_factor.is_finite() || new.scale_factor == 0.0)
+    {
+        return Err("MLine.scale_factor must be finite and nonzero".into());
+    }
+    if old.is_none_or(|old| old.normal != new.normal) {
+        solid_normal("MLine.normal", &new.normal)?;
+    }
+    if old.is_none_or(|old| old.style_name != new.style_name) && new.style_name.trim().is_empty() {
+        return Err("MLine.style_name is empty".into());
+    }
+    if old.is_none_or(|old| old.vertices != new.vertices) {
+        if new.vertices.len() < 2 {
+            return Err("MLine.vertices requires at least 2 points".into());
+        }
+        for (vi, vertex) in new.vertices.iter().enumerate() {
+            finite_vector(&format!("MLine.vertices[{vi}].position"), &vertex.position)?;
+            finite_vector(&format!("MLine.vertices[{vi}].direction"), &vertex.direction)?;
+            finite_vector(&format!("MLine.vertices[{vi}].miter"), &vertex.miter)?;
+            for (si, segment) in vertex.segments.iter().enumerate() {
+                if segment
+                    .parameters
+                    .iter()
+                    .chain(&segment.area_fill_parameters)
+                    .any(|value| !value.is_finite())
+                {
+                    return Err(format!(
+                        "MLine.vertices[{vi}].segments[{si}] contains non-finite parameters"
+                    ));
+                }
+            }
+        }
+        if new
+            .vertices
+            .windows(2)
+            .all(|pair| pair[0].position == pair[1].position)
+        {
+            return Err("MLine.vertices must not all coincide".into());
+        }
+    }
+    if new.flags.contains(crate::host::acadrust::entities::MLineFlags::CLOSED)
+        && new.vertices.len() < 3
+    {
+        return Err("closed MLine requires at least 3 vertices".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -410,6 +469,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             }
         }
         EntityType::Leader(value) => validate_leader(None, value)?,
+        EntityType::MLine(value) => validate_mline(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -764,6 +824,7 @@ pub fn validate_entity_mutation(
                 return Err("Shape.style_handle is read-only".into());
             }
         }
+        (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
             changed3(
@@ -1026,6 +1087,24 @@ pub fn validate_canvas_entity_references(
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
         }
     }
+    if let EntityType::MLine(value) = entity {
+        let style = resolve_mline_style(document, value).ok_or_else(|| {
+            format!("MLine style {:?} does not exist", value.style_name)
+        })?;
+        if style.elements.is_empty() {
+            return Err(format!("MLine style {:?} has no elements", style.name));
+        }
+        for (index, vertex) in value.vertices.iter().enumerate() {
+            if !vertex.segments.is_empty() && vertex.segments.len() != style.elements.len() {
+                return Err(format!(
+                    "MLine.vertices[{index}] has {} segments but style {:?} has {} elements",
+                    vertex.segments.len(),
+                    style.name,
+                    style.elements.len()
+                ));
+            }
+        }
+    }
     if let EntityType::Leader(value) = entity {
         use crate::host::acadrust::entities::LeaderCreationType;
         if !document
@@ -1147,6 +1226,32 @@ pub fn validate_canvas_entity_references(
     Ok(())
 }
 
+/// Stable handle wins; the name is the fallback for legacy entities.
+#[cfg(feature = "host")]
+fn resolve_mline_style<'a>(
+    document: &'a crate::host::CadDocument,
+    mline: &crate::host::acadrust::entities::MLine,
+) -> Option<&'a crate::host::acadrust::objects::MLineStyle> {
+    use crate::host::acadrust::objects::ObjectType;
+    mline
+        .style_handle
+        .filter(|handle| !handle.is_null())
+        .and_then(|handle| match document.objects.get(&handle) {
+            Some(ObjectType::MLineStyle(style)) => Some(style),
+            _ => None,
+        })
+        .or_else(|| {
+            document.objects.values().find_map(|object| match object {
+                ObjectType::MLineStyle(style)
+                    if style.name.eq_ignore_ascii_case(mline.style_name.trim()) =>
+                {
+                    Some(style)
+                }
+                _ => None,
+            })
+        })
+}
+
 /// Fill name-based table references with stable handles before a new entity or
 /// replacement is committed. Existing non-null handles remain authoritative
 /// for legacy DWG entities whose fallback name can be stale.
@@ -1172,6 +1277,9 @@ pub fn bind_canvas_entity_references(
                         .eq_ignore_ascii_case(value.dimension_style_name.trim())
                 })
                 .map(|style| style.handle);
+        }
+        EntityType::MLine(value) if value.style_handle.filter(|h| !h.is_null()).is_none() => {
+            value.style_handle = resolve_mline_style(document, value).map(|style| style.handle);
         }
         EntityType::Shape(value) if value.style_handle.filter(|h| !h.is_null()).is_none() => {
             value.style_handle = document
@@ -1334,6 +1442,7 @@ mod tests {
                         | "AttributeEntity"
                         | "Hatch"
                         | "Leader"
+                        | "MLine"
                 )
             {
                 assert!(
@@ -1482,6 +1591,12 @@ mod tests {
                 "Leader.horizontal_direction".to_owned(),
                 "Leader.block_offset".to_owned(),
                 "Leader.annotation_offset".to_owned(),
+                "MLine.flags".to_owned(),
+                "MLine.justification".to_owned(),
+                "MLine.normal".to_owned(),
+                "MLine.scale_factor".to_owned(),
+                "MLine.style_name".to_owned(),
+                "MLine.vertices".to_owned(),
             ])
         );
     }
@@ -1575,6 +1690,39 @@ mod tests {
         )
         .unwrap_err()
         .contains("finite"));
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn mline_geometry_and_style_references_are_validated_and_bound() {
+        use crate::host::acadrust::{self, entities::MLineVertex, types::Vector3};
+        let document = acadrust::CadDocument::new();
+        let mut mline = acadrust::entities::MLine::new();
+        for x in [0.0, 5.0] {
+            mline.vertices.push(MLineVertex::new(Vector3::new(x, 0.0, 0.0)));
+        }
+        let mut entity = acadrust::EntityType::MLine(mline.clone());
+        validate_new_canvas_entity(&entity).unwrap();
+        bind_canvas_entity_references(&document, &mut entity).unwrap();
+        assert!(matches!(&entity, acadrust::EntityType::MLine(value) if value.style_handle.is_some()));
+
+        let mut missing = mline.clone();
+        missing.style_name = "Missing".into();
+        assert!(bind_canvas_entity_references(&document, &mut acadrust::EntityType::MLine(missing))
+            .unwrap_err().contains("does not exist"));
+        let mut wrong_segments = mline.clone();
+        wrong_segments.vertices[0].init_segments(3);
+        assert!(bind_canvas_entity_references(&document, &mut acadrust::EntityType::MLine(wrong_segments))
+            .unwrap_err().contains("segments but style"));
+        let mut one = mline.clone();
+        one.vertices.truncate(1);
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::MLine(one)).unwrap_err().contains("at least 2"));
+        let mut closed = mline.clone();
+        closed.flags |= acadrust::entities::MLineFlags::CLOSED;
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::MLine(closed)).unwrap_err().contains("at least 3"));
+        let mut scale = mline.clone();
+        scale.scale_factor = 0.0;
+        assert!(validate_new_canvas_entity(&acadrust::EntityType::MLine(scale)).unwrap_err().contains("nonzero"));
     }
 
     #[cfg(feature = "host")]

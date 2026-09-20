@@ -773,6 +773,15 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                             | "block_offset"
                             | "annotation_offset"
                     )
+                    | (
+                        "MLine",
+                        "flags"
+                            | "justification"
+                            | "normal"
+                            | "scale_factor"
+                            | "style_name"
+                            | "vertices"
+                    )
             ) {
                     "transaction_geometry"
             } else {

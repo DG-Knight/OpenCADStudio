@@ -149,7 +149,26 @@ impl<'a> HostSession<'a> {
         }
     }
 
-    pub fn add_entity(&mut self, entity: EntityType) -> Handle {
+    /// Recompute host-derived state for entities a script created or edited.
+    fn normalize_scripted_entity(
+        &self,
+        old: Option<&EntityType>,
+        entity: &mut EntityType,
+    ) -> Result<(), String> {
+        if let EntityType::MLine(new) = entity {
+            let old = match old {
+                Some(EntityType::MLine(old)) => Some(old),
+                _ => None,
+            };
+            crate::entities::mline::normalize_scripted_mline(old, new, self.document())?;
+        }
+        Ok(())
+    }
+
+    pub fn add_entity(&mut self, mut entity: EntityType) -> Handle {
+        if self.normalize_scripted_entity(None, &mut entity).is_err() {
+            return Handle::NULL;
+        }
         if let EntityType::AttributeEntity(mut attribute) = entity {
             let owner = attribute.common.owner_handle;
             let Some(EntityType::Insert(mut insert)) = self.document().get_entity(owner).cloned()
@@ -182,7 +201,12 @@ impl<'a> HostSession<'a> {
         handle
     }
 
-    pub fn add_entities(&mut self, entities: Vec<EntityType>) -> Vec<Handle> {
+    pub fn add_entities(&mut self, mut entities: Vec<EntityType>) -> Vec<Handle> {
+        for entity in &mut entities {
+            // Creation input was validated by the caller; a degenerate MLine
+            // simply keeps its supplied (unnormalized) vertices.
+            let _ = self.normalize_scripted_entity(None, entity);
+        }
         let handles = self.app.tabs[self.tab].scene.add_entities(entities);
         self.publish_document_view();
         handles
@@ -194,7 +218,11 @@ impl<'a> HostSession<'a> {
 
     /// Replace the entity carrying `entity`'s handle in place, refreshing the
     /// scene's derived caches. Returns `false` when no entity has that handle.
-    pub fn update_entity(&mut self, entity: EntityType) -> bool {
+    pub fn update_entity(&mut self, mut entity: EntityType) -> bool {
+        let old = self.document().get_entity(entity.common().handle).cloned();
+        if self.normalize_scripted_entity(old.as_ref(), &mut entity).is_err() {
+            return false;
+        }
         let ok = match entity {
             EntityType::AttributeEntity(attribute) => self.replace_nested_attribute(attribute),
             entity => self.app.tabs[self.tab].scene.update_entity(entity),
@@ -235,6 +263,8 @@ impl<'a> HostSession<'a> {
             ocs_plugin_api::entity_coverage::bind_canvas_entity_references(self.document(), entity)
                 .map_err(|error| format!("entity {handle:?}: {error}"))?;
             ocs_plugin_api::entity_coverage::validate_entity_mutation(&existing, entity)
+                .map_err(|error| format!("entity {handle:?}: {error}"))?;
+            self.normalize_scripted_entity(Some(&existing), entity)
                 .map_err(|error| format!("entity {handle:?}: {error}"))?;
             let lock_handle = if matches!(entity, EntityType::AttributeEntity(_)) {
                 entity.common().owner_handle
@@ -2366,6 +2396,180 @@ mod tests {
         app.redo_steps(4);
         assert!(app.tabs[0].scene.document.get_entity(leader_handle).is_none());
         assert!(app.tabs[0].scene.document.get_entity(text_handle).is_none());
+    }
+
+    #[test]
+    fn staged_python_mline_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let style_handle = host.document().objects.iter().find_map(|(handle, object)| match object {
+            acadrust::objects::ObjectType::MLineStyle(style) if style.name == "Standard" => Some(*handle),
+            _ => None,
+        }).expect("document carries the Standard MLineStyle");
+
+        let script = std::env::temp_dir().join(format!("ocs_mline_create_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "def p(x, y): return {'position': {'x': x, 'y': y, 'z': 0.0}}\n",
+            "doc = ocs.active_document\n",
+            "doc.create_entity('MLine', vertices=[p(0.0, 0.0), p(10.0, 0.0)])\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let handle = host.document().entities().find_map(|entity| match entity {
+            EntityType::MLine(mline) => Some(mline.common.handle),
+            _ => None,
+        }).unwrap_or_else(|| panic!("Python did not create MLine: {}", last_output(&host)));
+        let created = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::MLine(created_mline) = &created else { unreachable!() };
+        assert_eq!(created_mline.style_handle, Some(style_handle));
+        assert_eq!(created_mline.style_element_count, 2);
+        assert_eq!(created_mline.start_point, acadrust::types::Vector3::ZERO);
+        let first_parameters = |mline: &acadrust::entities::MLine, vertex: usize| -> Vec<f64> {
+            mline.vertices[vertex].segments.iter().map(|segment| segment.parameters[0]).collect()
+        };
+        assert_eq!(first_parameters(created_mline, 0), vec![0.5, -0.5]);
+        assert!(created_mline.vertices.iter().all(|vertex| {
+            (vertex.direction.x - 1.0).abs() < 1e-9 && (vertex.miter.y.abs() - 1.0).abs() < 1e-9
+        }));
+        let assert_lines = |entity: &EntityType, document: &CadDocument, expected_vertices: usize| {
+            let EntityType::MLine(mline) = entity else { panic!("expected MLine") };
+            assert_eq!(mline.vertices.len(), expected_vertices);
+            let lines = crate::entities::mline::mline_lines(mline, document);
+            assert!(lines.len() >= 2, "expected styled element lines");
+            assert!(lines.iter().flat_map(|line| &line.points).flatten().all(|v| v.is_finite()));
+        };
+        assert_lines(&created, host.document(), 2);
+
+        let script = std::env::temp_dir().join(format!("ocs_mline_edit_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "def p(x, y): return {{'position': {{'x': x, 'y': y, 'z': 0.0}}}}\n",
+            "doc = ocs.active_document\n",
+            "mline = doc.entities[{}]\n",
+            "with doc.transaction('Edit mline'):\n",
+            "    mline.vertices = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)]\n",
+            "    mline.scale_factor = 2.0\n",
+            "    mline.justification = 'Top'\n",
+            "doc.selection = [mline]\n"
+        ), handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let expected = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::MLine(edited) = &expected else { unreachable!() };
+        assert_eq!(edited.vertices.len(), 3, "edit failed: {}", last_output(&host));
+        assert_eq!(edited.scale_factor, 2.0);
+        assert_eq!(edited.justification, acadrust::entities::MLineJustification::Top);
+        assert_eq!(edited.style_handle, created_mline.style_handle);
+        assert_eq!(edited.common, created_mline.common);
+        assert_eq!(edited.normal, created_mline.normal);
+        assert_eq!(edited.flags.bits() & !1, 0);
+        // Top justification with scale 2: first element sits on the path,
+        // the second 2.0 to the right of travel; the corner miter widens it.
+        let end = first_parameters(edited, 0);
+        assert!(end[0].abs() < 1e-9 && (end[1] + 2.0).abs() < 1e-9, "{end:?}");
+        let corner = first_parameters(edited, 1);
+        assert!(corner[1].abs() > 2.0 && corner[1].is_finite(), "miter must widen at the corner: {corner:?}");
+        assert!((edited.vertices[1].direction.y - edited.vertices[1].direction.x).abs() > 1e-6);
+        assert_lines(&expected, host.document(), 3);
+        assert_eq!(host.selection(), vec![handle]);
+
+        for (patch, message) in [
+            ("'style_name':'Missing'", "does not exist"),
+            ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}}]", "at least 2"),
+            ("'scale_factor':0.0", "nonzero"),
+            ("'flags':64", "unknown bits"),
+            ("'flags':3,'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':1.0,'y':0.0,'z':0.0}}]", "requires at least 3"),
+            ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':0.0,'y':0.0,'z':0.0}}]", "coincide"),
+            ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':1.0,'y':float('nan'),'z':0.0}}]", "finite"),
+            ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0},'segments':[{}]},{'position':{'x':1.0,'y':0.0,'z':0.0}}]", "segments but style"),
+            ("'start_point':{'x':5.0,'y':5.0,'z':0.0}", "read-only"),
+        ] {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many('Reject mline', [{{'handle':{}, {patch}}}])", handle.value()));
+            assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
+            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+        }
+        dispatch(&mut host, &format!(concat!(
+            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'scale_factor':3.0}},",
+            "{{'handle':{},'scale_factor':0.0}}])"
+        ), handle.value(), handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+
+        let assert_saved = |document: &CadDocument| {
+            let Some(EntityType::MLine(mline)) = document.get_entity(handle) else {
+                panic!("MLine missing after reopen");
+            };
+            assert_eq!(mline.vertices.len(), 3);
+            assert_eq!(mline.scale_factor, 2.0);
+            assert_eq!(mline.justification, acadrust::entities::MLineJustification::Top);
+            assert_eq!(mline.style_name, "Standard");
+            assert_eq!(mline.vertices[2].position, acadrust::types::Vector3::new(10.0, 10.0, 0.0));
+            let (a, b) = (first_parameters(mline, 1), first_parameters(edited, 1));
+            assert!(a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-9), "{a:?} vs {b:?}");
+            assert_lines(&document.get_entity(handle).unwrap().clone(), document, 3);
+        };
+        let reopened_dwg = crate::io::load_bytes("mline.dwg",
+            acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let reopened_dxf = crate::io::load_bytes("mline.dxf",
+            acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        assert_saved(&reopened_dwg);
+        assert_saved(&reopened_dxf);
+        for (name, mut document) in [("mline-reedit.dwg", reopened_dwg), ("mline-reedit.dxf", reopened_dxf)] {
+            let before = document.get_entity(handle).unwrap().clone();
+            let mut after = before.clone();
+            let EntityType::MLine(mline) = &mut after else { unreachable!() };
+            mline.vertices[2].position = acadrust::types::Vector3::new(10.0, 12.0, 0.0);
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            let EntityType::MLine(mline) = &mut after else { unreachable!() };
+            let old = match &before { EntityType::MLine(old) => old, _ => unreachable!() };
+            crate::entities::mline::normalize_scripted_mline(Some(old), mline, &document).unwrap();
+            *document.get_entity_mut(handle).unwrap() = after;
+            let bytes = if name.ends_with("dwg") {
+                acadrust::DwgWriter::write_to_vec(&document).unwrap()
+            } else {
+                acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
+            };
+            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
+                Some(EntityType::MLine(mline)) if (mline.vertices[2].position.y - 12.0).abs() < 1e-9));
+        }
+
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none());
+        for (name, bytes) in [
+            ("mline-deleted.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()),
+            ("mline-deleted.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+        ] {
+            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+        }
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
     }
 
     #[test]

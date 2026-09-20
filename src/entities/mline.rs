@@ -418,6 +418,54 @@ fn restore_shifted_mline_segment(
     }
 }
 
+/// Recompute the derived MLine state after a scripted create or edit:
+/// vertex direction/miter, element segment layout and the per-element miter
+/// offsets. Dash/cut parameters survive an edit unless a vertex moved.
+pub(crate) fn normalize_scripted_mline(
+    old: Option<&MLine>,
+    new: &mut MLine,
+    document: &acadrust::CadDocument,
+) -> Result<(), String> {
+    let style = resolved_mline_style(new, document)
+        .ok_or_else(|| format!("MLine style {:?} does not exist", new.style_name))?;
+    let unchanged = old.is_some_and(|old| {
+        old.vertices == new.vertices
+            && old.normal == new.normal
+            && old.flags == new.flags
+            && old.justification == new.justification
+            && old.scale_factor.to_bits() == new.scale_factor.to_bits()
+            && old.style_name == new.style_name
+            && old.style_handle == new.style_handle
+    });
+    if unchanged {
+        return Ok(());
+    }
+    let moved = old.is_none_or(|old| {
+        old.vertices.len() != new.vertices.len()
+            || old
+                .vertices
+                .iter()
+                .zip(&new.vertices)
+                .any(|(a, b)| a.position != b.position)
+    });
+    let elements = style.elements.len().max(1);
+    for vertex in &mut new.vertices {
+        if vertex.segments.is_empty() {
+            vertex.init_segments(elements);
+        } else if moved {
+            for segment in &mut vertex.segments {
+                segment.parameters.truncate(1);
+                segment.area_fill_parameters.clear();
+            }
+        }
+    }
+    if !rebuild_mline_geometry(new) {
+        return Err("MLine vertices are degenerate".into());
+    }
+    crate::modules::draw::draw::mline::sync_mline_element_parameters(new, style);
+    Ok(())
+}
+
 /// Resolve a multiline into styled parallel lines in WCS.
 pub fn resolved_mline_style<'a>(
     m: &MLine,

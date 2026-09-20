@@ -22,7 +22,8 @@
     "AttributeDefinition",
     "AttributeEntity",
     "Hatch",
-    "Leader"
+    "Leader",
+    "MLine"
   ],
   "base_fields": ["handle", "layer", "owner_handle"],
   "overrides": {
@@ -228,6 +229,22 @@
         "mpolygon_hatch_color": { "exclude": true },
         "mpolygon_x_direction": { "exclude": true },
         "mpolygon_boundary_handle_count": { "exclude": true }
+      }
+    },
+    "MLine": {
+      "fields": {
+        "vertices": { "required": true },
+        "flags": {
+          "rust_getter": "(VAR.flags.bits() as i64)",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"flags\", vm)? { let bits = v.try_into_value::<i64>(vm)?; VAR.flags = i16::try_from(bits).ok().and_then(acadrust::entities::MLineFlags::from_bits).ok_or_else(|| vm.new_value_error(\"MLine.flags has unknown bits\".to_owned()))?; }"
+        },
+        "start_point": { "read_only": true },
+        "style_handle": { "read_only": true },
+        "style_element_count": { "read_only": true },
+        "style_name": {
+          "rust_getter": "VAR.style_name.clone()",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"style_name\", vm)? { VAR.style_name = v.try_into_value::<String>(vm)?; VAR.style_handle = None; }"
+        }
       }
     },
     "Leader": {
