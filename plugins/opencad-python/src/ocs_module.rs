@@ -3188,6 +3188,18 @@ mod ocs {
         })
     }
 
+    fn py_to_f64_array<const N: usize>(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<[f64; N]> {
+        let items: Vec<PyObjectRef> = value.try_into_value(vm)?;
+        if items.len() != N {
+            return Err(vm.new_value_error(format!("expected {N} numbers, got {}", items.len())));
+        }
+        let mut out = [0.0; N];
+        for (slot, item) in out.iter_mut().zip(items) {
+            *slot = py_number_to_f64(item, vm)?;
+        }
+        Ok(out)
+    }
+
     /// Accept a Python int or float; `try_into_value::<f64>` rejects ints.
     fn py_number_to_f64(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<f64> {
         Ok(value.try_float(vm)?.to_f64())
@@ -3249,6 +3261,7 @@ mod ocs {
 
     include!(concat!(env!("OUT_DIR"), "/entity_crud.rs"));
     include!("dimension_model.rs.inc");
+    include!("patch_helpers.rs.inc");
 
     // ════════════════════════════════════════════════════════════════════
     // Phase 1 — wiring the generic conversion functions above into `ocs`.
@@ -4743,7 +4756,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(emitted.len(), 25);
+        assert_eq!(emitted.len(), 26);
     }
 
     #[cfg(feature = "experimental-host-model")]

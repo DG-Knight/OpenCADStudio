@@ -2784,6 +2784,160 @@ mod tests {
     }
 
     #[test]
+    fn staged_python_multileader_lifecycle_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let runner_path = std::env::var_os("OCS_PLUGIN_RUNNER_EXE")
+            .expect("set OCS_PLUGIN_RUNNER_EXE to the built OpenCADStudio executable");
+        assert!(std::path::Path::new(&runner_path).is_file());
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path),
+            &mut host,
+            crate::plugin::v4_support::notification_handler(),
+        )
+        .unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last_output = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+
+        let script = std::env::temp_dir().join(format!("ocs_mleader_create_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "def P(x, y): return {'x': x, 'y': y, 'z': 0.0}\n",
+            "doc = ocs.active_document\n",
+            "doc.create_entity('MultiLeader', content_type='MText', context={\n",
+            "    'has_text_contents': True, 'text_string': 'NOTE', 'text_location': P(20, 10),\n",
+            "    'text_height': 2.5,\n",
+            "    'leader_roots': [{'connection_point': P(15, 10), 'direction': P(1, 0), 'landing_distance': 2.0,\n",
+            "        'lines': [{'points': [P(0, 0), P(10, 10), P(15, 10)]}]}]})\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let handle = host.document().entities().find_map(|entity| match entity {
+            EntityType::MultiLeader(value) => Some(value.common.handle),
+            _ => None,
+        }).unwrap_or_else(|| panic!("Python did not create MultiLeader: {}", last_output(&host)));
+        let created = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::MultiLeader(created_ml) = &created else { unreachable!() };
+        assert_eq!(created_ml.context.text_string, "NOTE");
+        assert_eq!(created_ml.context.leader_roots[0].lines[0].points.len(), 3);
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
+
+        let script = std::env::temp_dir().join(format!("ocs_mleader_edit_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "def P(x, y): return {{'x': x, 'y': y, 'z': 0.0}}\n",
+            "doc = ocs.active_document\n",
+            "ml = doc.entities[{}]\n",
+            "roots = ml.context['leader_roots']\n",
+            "roots[0]['lines'][0]['points'] = [P(0, 0), P(12, 12), P(18, 12), P(22, 12)]\n",
+            "with doc.transaction('Edit multileader'):\n",
+            "    ml.context = {{'leader_roots': roots, 'text_string': 'EDITED', 'text_location': P(26, 12), 'text_height': 3.0}}\n",
+            "    ml.dogleg_length = 3.0\n",
+            "    ml.line_color = {{'kind': 'Rgb', 'value': {{'r': 0, 'g': 128, 'b': 255}}}}\n",
+            "doc.selection = [ml]\n"
+        ), handle.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let expected = host.document().get_entity(handle).unwrap().clone();
+        let EntityType::MultiLeader(edited) = &expected else { unreachable!() };
+        assert_eq!(edited.context.text_string, "EDITED", "edit failed: {}", last_output(&host));
+        assert_eq!(edited.context.leader_roots[0].lines[0].points.len(), 4);
+        assert_eq!(edited.dogleg_length, 3.0);
+        assert_eq!(edited.context.text_height, 3.0);
+        assert_eq!(edited.text_height, created_ml.text_height);
+        assert_eq!(edited.line_color, acadrust::types::Color::Rgb { r: 0, g: 128, b: 255 });
+        // Untouched context fields and the entity identity survive a partial patch.
+        assert_eq!(edited.common, created_ml.common);
+        assert_eq!(edited.context.scale_factor, created_ml.context.scale_factor);
+        assert_eq!(edited.content_type, created_ml.content_type);
+        assert_eq!(edited.context.leader_roots[0].connection_point, created_ml.context.leader_roots[0].connection_point);
+        assert_eq!(host.selection(), vec![handle]);
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty());
+
+        for (patch, message) in [
+            ("'text_height':0.0", "read-only"),
+            ("'scale_factor':-1.0", "greater than zero"),
+            ("'context':{'text_height':float('inf')}", "finite"),
+            ("'style_handle':999999", "does not exist"),
+            ("'text_style_handle':999999", "does not exist"),
+            ("'content_type':'None'", "cannot carry"),
+            ("'context':{'nonsense':1}", "outside the editable schema"),
+            ("'context':{'leader_roots':[{'lines':[{'points':[]}]}]}", "has no points"),
+            ("'context':{'text_location':{'x':float('nan'),'y':0.0,'z':0.0}}", "finite"),
+            ("'dwg_version':5", "read-only"),
+            ("'line_color':{'kind':'Index','value':300}", "Color"),
+        ] {
+            dispatch(&mut host, &format!(
+                "PY_EVAL ocs.update_many('Reject multileader', [{{'handle':{}, {patch}}}])", handle.value()));
+            assert_eq!(host.document().get_entity(handle), Some(&expected), "{patch}");
+            assert!(last_output(&host).contains(message), "{patch}: {}", last_output(&host));
+        }
+        dispatch(&mut host, &format!(concat!(
+            "PY_EVAL ocs.update_many('Atomic', [{{'handle':{},'dogleg_length':9.0}},",
+            "{{'handle':{},'scale_factor':-1.0}}])"
+        ), handle.value(), handle.value()));
+        assert_eq!(host.document().get_entity(handle), Some(&expected));
+
+        let mut gaps = Vec::new();
+        let dwg = crate::io::load_bytes("mleader.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("mleader.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            let Some(EntityType::MultiLeader(value)) = document.get_entity(handle) else {
+                gaps.push(format!("{format}: MultiLeader missing"));
+                continue;
+            };
+            if value.context.text_string != "EDITED" { gaps.push(format!("{format}: text {:?}", value.context.text_string)); }
+            let points = value.context.leader_roots.first().and_then(|r| r.lines.first()).map_or(0, |l| l.points.len());
+            if points != 4 { gaps.push(format!("{format}: leader points {points}")); }
+            if value.dogleg_length != 3.0 { gaps.push(format!("{format}: dogleg {}", value.dogleg_length)); }
+            if value.context.text_height != edited.context.text_height { gaps.push(format!("{format}: context.text_height {}", value.context.text_height)); }
+            if value.line_color != edited.line_color { gaps.push(format!("{format}: line_color {:?}", value.line_color)); }
+        }
+        assert!(gaps.is_empty(), "persistence gaps: {gaps:#?}");
+        for (name, mut document) in [("mleader-reedit.dwg", dwg), ("mleader-reedit.dxf", dxf)] {
+            let before = document.get_entity(handle).unwrap().clone();
+            let mut after = before.clone();
+            let EntityType::MultiLeader(value) = &mut after else { unreachable!() };
+            value.dogleg_length = 4.5;
+            ocs_plugin_api::entity_coverage::validate_entity_mutation(&before, &after).unwrap();
+            ocs_plugin_api::entity_coverage::validate_canvas_entity_references(&document, &after).unwrap();
+            *document.get_entity_mut(handle).unwrap() = after;
+            let bytes = if name.ends_with("dwg") {
+                acadrust::DwgWriter::write_to_vec(&document).unwrap()
+            } else {
+                acadrust::DxfWriter::new(&document).write_to_vec().unwrap()
+            };
+            assert!(matches!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle),
+                Some(EntityType::MultiLeader(value)) if value.dogleg_length == 4.5), "{name}");
+        }
+
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", handle.value()));
+        assert!(host.document().get_entity(handle).is_none());
+        for (name, bytes) in [
+            ("mleader-deleted.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()),
+            ("mleader-deleted.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()),
+        ] {
+            assert!(crate::io::load_bytes(name, bytes).unwrap().get_entity(handle).is_none());
+        }
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), 3);
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&expected));
+        app.undo_steps(1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(handle), Some(&created));
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+        app.redo_steps(3);
+        assert!(app.tabs[0].scene.document.get_entity(handle).is_none());
+    }
+
+    #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
             return;

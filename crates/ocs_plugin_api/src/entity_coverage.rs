@@ -465,6 +465,89 @@ fn validate_dimension(
     Ok(())
 }
 
+/// Field checks shared by MultiLeader creation and mutation.
+#[cfg(feature = "host")]
+fn validate_multileader(
+    old: Option<&crate::host::acadrust::entities::MultiLeader>,
+    new: &crate::host::acadrust::entities::MultiLeader,
+) -> Result<(), String> {
+    use crate::host::acadrust::entities::LeaderContentType;
+    if old == Some(new) {
+        return Ok(());
+    }
+    for (name, value, allow_zero) in [
+        ("dogleg_length", new.dogleg_length, true),
+        ("arrowhead_size", new.arrowhead_size, true),
+        ("text_height", new.text_height, false),
+        ("scale_factor", new.scale_factor, false),
+    ] {
+        if !value.is_finite() || value < 0.0 || (!allow_zero && value == 0.0) {
+            return Err(format!(
+                "MultiLeader.{name} must be finite and {}",
+                if allow_zero { "non-negative" } else { "greater than zero" }
+            ));
+        }
+    }
+    if !new.block_rotation.is_finite() {
+        return Err("MultiLeader.block_rotation must be finite".into());
+    }
+    finite_vector("MultiLeader.block_scale", &new.block_scale)?;
+    let context = &new.context;
+    if !context.scale_factor.is_finite() || context.scale_factor <= 0.0 {
+        return Err("MultiLeader.context.scale_factor must be finite and greater than zero".into());
+    }
+    for (name, value) in [
+        ("text_height", context.text_height),
+        ("text_width", context.text_width),
+        ("text_rotation", context.text_rotation),
+        ("landing_gap", context.landing_gap),
+        ("arrowhead_size", context.arrowhead_size),
+    ] {
+        if !value.is_finite() {
+            return Err(format!("MultiLeader.context.{name} must be finite"));
+        }
+    }
+    for (name, point) in [
+        ("content_base_point", &context.content_base_point),
+        ("text_location", &context.text_location),
+        ("block_content_location", &context.block_content_location),
+        ("base_point", &context.base_point),
+    ] {
+        finite_vector(&format!("MultiLeader.context.{name}"), point)?;
+    }
+    if context.transform_matrix.iter().any(|value| !value.is_finite()) {
+        return Err("MultiLeader.context.transform_matrix must be finite".into());
+    }
+    for (ri, root) in context.leader_roots.iter().enumerate() {
+        finite_vector(&format!("MultiLeader.context.leader_roots[{ri}].connection_point"), &root.connection_point)?;
+        finite_vector(&format!("MultiLeader.context.leader_roots[{ri}].direction"), &root.direction)?;
+        if !root.landing_distance.is_finite() {
+            return Err(format!("MultiLeader.context.leader_roots[{ri}].landing_distance must be finite"));
+        }
+        for (li, line) in root.lines.iter().enumerate() {
+            if line.points.is_empty() {
+                return Err(format!("MultiLeader.context.leader_roots[{ri}].lines[{li}] has no points"));
+            }
+            for (pi, point) in line.points.iter().enumerate() {
+                finite_vector(&format!("MultiLeader.context.leader_roots[{ri}].lines[{li}].points[{pi}]"), point)?;
+            }
+        }
+    }
+    match new.content_type {
+        LeaderContentType::MText if !context.has_text_contents => {
+            return Err("MText MultiLeader requires context.has_text_contents".into());
+        }
+        LeaderContentType::Block if !context.has_block_contents => {
+            return Err("Block MultiLeader requires context.has_block_contents".into());
+        }
+        LeaderContentType::None if context.has_text_contents || context.has_block_contents => {
+            return Err("MultiLeader without content cannot carry text or block contents".into());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -559,6 +642,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::Leader(value) => validate_leader(None, value)?,
         EntityType::MLine(value) => validate_mline(None, value)?,
         EntityType::Dimension(value) => validate_dimension(None, value)?,
+        EntityType::MultiLeader(value) => validate_multileader(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -914,6 +998,7 @@ pub fn validate_entity_mutation(
             }
         }
         (EntityType::Dimension(old), EntityType::Dimension(new)) => validate_dimension(Some(old), new)?,
+        (EntityType::MultiLeader(old), EntityType::MultiLeader(new)) => validate_multileader(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1176,6 +1261,26 @@ pub fn validate_canvas_entity_references(
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
         }
+    }
+    if let EntityType::MultiLeader(value) = entity {
+        use crate::host::acadrust::objects::ObjectType;
+        let handle_exists = |handle: Option<crate::host::acadrust::Handle>, what: &str, ok: &dyn Fn(crate::host::acadrust::Handle) -> bool| {
+            match handle.filter(|handle| !handle.is_null()) {
+                Some(handle) if !ok(handle) => Err(format!("MultiLeader {what} handle {handle:?} does not exist")),
+                _ => Ok(()),
+            }
+        };
+        let is_block = |h| document.block_records.iter().any(|record| record.handle == h);
+        let is_text_style = |h| document.text_styles.iter().any(|style| style.handle == h);
+        let is_linetype = |h| document.line_types.iter().any(|ltype| ltype.handle == h);
+        let is_mleader_style = |h| matches!(document.objects.get(&h), Some(ObjectType::MultiLeaderStyle(_)));
+        handle_exists(value.style_handle, "style", &is_mleader_style)?;
+        handle_exists(value.text_style_handle, "text style", &is_text_style)?;
+        handle_exists(value.context.text_style_handle, "context text style", &is_text_style)?;
+        handle_exists(value.line_type_handle, "line type", &is_linetype)?;
+        handle_exists(value.arrowhead_handle, "arrowhead block", &is_block)?;
+        handle_exists(value.block_content_handle, "block content", &is_block)?;
+        handle_exists(value.context.block_content_handle, "context block content", &is_block)?;
     }
     if let EntityType::Dimension(value) = entity {
         let name = value.base().style_name.trim();
@@ -1540,6 +1645,7 @@ mod tests {
                         | "Leader"
                         | "MLine"
                         | "Dimension"
+                        | "MultiLeader"
                 )
             {
                 assert!(
@@ -1729,6 +1835,38 @@ mod tests {
                 "Dimension.is_ordinate_type_x".to_owned(),
                 "Dimension.is_partial".to_owned(),
                 "Dimension.has_leader".to_owned(),
+                "MultiLeader.content_type".to_owned(),
+                "MultiLeader.path_type".to_owned(),
+                "MultiLeader.line_color".to_owned(),
+                "MultiLeader.line_weight".to_owned(),
+                "MultiLeader.enable_landing".to_owned(),
+                "MultiLeader.enable_dogleg".to_owned(),
+                "MultiLeader.dogleg_length".to_owned(),
+                "MultiLeader.arrowhead_size".to_owned(),
+                "MultiLeader.text_color".to_owned(),
+                "MultiLeader.text_frame".to_owned(),
+                "MultiLeader.text_left_attachment".to_owned(),
+                "MultiLeader.text_right_attachment".to_owned(),
+                "MultiLeader.text_top_attachment".to_owned(),
+                "MultiLeader.text_bottom_attachment".to_owned(),
+                "MultiLeader.text_attachment_direction".to_owned(),
+                "MultiLeader.text_attachment_point".to_owned(),
+                "MultiLeader.text_alignment".to_owned(),
+                "MultiLeader.text_angle_type".to_owned(),
+                "MultiLeader.text_direction_negative".to_owned(),
+                "MultiLeader.scale_factor".to_owned(),
+                "MultiLeader.enable_annotation_scale".to_owned(),
+                "MultiLeader.extend_leader_to_text".to_owned(),
+                "MultiLeader.block_content_color".to_owned(),
+                "MultiLeader.block_connection_type".to_owned(),
+                "MultiLeader.block_rotation".to_owned(),
+                "MultiLeader.block_scale".to_owned(),
+                "MultiLeader.context".to_owned(),
+                "MultiLeader.style_handle".to_owned(),
+                "MultiLeader.text_style_handle".to_owned(),
+                "MultiLeader.arrowhead_handle".to_owned(),
+                "MultiLeader.line_type_handle".to_owned(),
+                "MultiLeader.block_content_handle".to_owned(),
             ])
         );
     }

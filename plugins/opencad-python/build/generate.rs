@@ -89,6 +89,11 @@ pub struct FieldOverride {
     /// already-valid entity never needs it re-specified).
     #[serde(default)]
     pub required: bool,
+    /// Still generate this field type's converters although a
+    /// `rust_getter`/`rust_setter` override replaces the generic path (the
+    /// override's hand-written code calls them).
+    #[serde(default)]
+    pub keep_types: bool,
 }
 
 impl Manifest {
@@ -141,7 +146,7 @@ fn classify<'a>(name: &str, info: &'a TypeInfo) -> Classify {
         }
         TypeKind::Enum => {
             if info.variants.iter().any(|v| !v.fields.is_empty()) {
-                if info.variants.iter().all(|v| v.fields.len() == 1) {
+                if info.variants.iter().all(|v| v.fields.len() <= 1) {
                     Classify::TaggedEnum
                 } else {
                     panic!("entity_manifest.json: {name} has a tagged variant without exactly one payload");
@@ -150,6 +155,9 @@ fn classify<'a>(name: &str, info: &'a TypeInfo) -> Classify {
                 Classify::UnitEnum
             }
         }
+        // acadrust `bitflags!` types serialize as a newtype over their integer
+        // bits; they convert exactly like the hand-written `bits` structs.
+        TypeKind::Newtype => Classify::BitFlags,
         other => panic!("entity_manifest.json: {name} has unsupported registry kind {other:?}"),
     }
 }
@@ -181,7 +189,7 @@ fn helper_closure(manifest: &Manifest, registry: &TypeRegistry) -> Vec<String> {
             }
             if override_def
                 .and_then(|o| o.fields.get(&f.name))
-                .map(|o| o.exclude || o.rust_getter.is_some())
+                .map(|o| o.exclude || (o.rust_getter.is_some() && !o.keep_types))
                 .unwrap_or(false)
             {
                 // Excluded, or fully hand-supplied by the override — its
@@ -193,7 +201,10 @@ fn helper_closure(manifest: &Manifest, registry: &TypeRegistry) -> Vec<String> {
     }
 
     while let Some(name) = queue.pop() {
-        if BUILTIN.contains(&name.as_str()) || SPECIAL.contains(&name.as_str()) {
+        if BUILTIN.contains(&name.as_str())
+            || SPECIAL.contains(&name.as_str())
+            || f64_array_len(&name).is_some()
+        {
             continue;
         }
         if !needed.insert(name.clone()) {
@@ -276,11 +287,32 @@ fn native_rust_type(type_id: &str) -> &'static str {
     }
 }
 
+/// Rust path of a traced type; most live in `acadrust::entities`.
+fn type_path(name: &str) -> String {
+    match name {
+        "LineWeight" => "acadrust::types::LineWeight".to_owned(),
+        "LeaderLineBreakInfo" => "acadrust::entities::multileader::LeaderLineBreakInfo".to_owned(),
+        _ => format!("acadrust::entities::{name}"),
+    }
+}
+
 fn is_native(type_id: &str) -> bool {
     BUILTIN.contains(&type_id)
 }
 
+/// `[f64; N]` fixed arrays (e.g. a 4x4 transform) convert as flat float lists.
+fn f64_array_len(type_id: &str) -> Option<usize> {
+    type_id
+        .strip_prefix("[f64; ")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
 fn default_expr(type_id: &str) -> String {
+    if let Some(n) = f64_array_len(type_id) {
+        return format!("[0.0f64; {n}]");
+    }
     match type_id {
         "f64" | "f32" => "0.0".to_string(),
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => "0".to_string(),
@@ -302,6 +334,11 @@ fn leaf_to_py(registry: &TypeRegistry, type_id: &str, item_expr: &str) -> String
     // call or cast directly on `item_expr` (`item_expr.method()`,
     // `item_expr as T`) does, since `&` binds looser than both.
     let parenthesized = format!("({item_expr})");
+    if f64_array_len(type_id).is_some() {
+        return format!(
+            "Ok(vm.ctx.new_list(({item_expr}).iter().map(|item| vm.new_pyobj(*item)).collect()).into())"
+        );
+    }
     match type_id {
         "f64" | "f32" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "bool" => {
             format!("Ok(vm.new_pyobj(*{parenthesized}))")
@@ -331,6 +368,9 @@ fn leaf_from_py(registry: &TypeRegistry, type_id: &str, value_expr: &str) -> Str
     if is_native(type_id) {
         return format!("{value_expr}.try_into_value::<{}>(vm)", native_rust_type(type_id));
     }
+    if let Some(n) = f64_array_len(type_id) {
+        return format!("py_to_f64_array::<{n}>({value_expr}, vm)");
+    }
     match type_id {
         "Vector3" => format!("py_to_vector3_dict({value_expr}, vm)"),
         "Vector2" => format!("py_to_vector2({value_expr}, vm)"),
@@ -346,11 +386,18 @@ fn leaf_from_py(registry: &TypeRegistry, type_id: &str, value_expr: &str) -> Str
                 ),
                 Classify::TaggedEnum => format!("dict_to_{}({value_expr}, vm)", snake_case(other)),
                 Classify::BitFlags => {
-                    let path = format!("acadrust::entities::{other}");
+                    let path = type_path(other);
                     let bits_ty = bits_field_type(info);
-                    format!(
-                        "{value_expr}.try_into_value::<i64>(vm).and_then(|n| <{bits_ty}>::try_from(n).map({path}::from_bits).map_err(|_| vm.new_value_error(\"{other} bits out of range\".to_owned())))"
-                    )
+                    if matches!(info.kind, TypeKind::Newtype) {
+                        // bitflags 2: `from_bits` is fallible and rejects unknown bits.
+                        format!(
+                            "{value_expr}.try_into_value::<i64>(vm).and_then(|n| <{bits_ty}>::try_from(n).ok().and_then({path}::from_bits).ok_or_else(|| vm.new_value_error(\"{other} has unknown or out-of-range bits\".to_owned())))"
+                        )
+                    } else {
+                        format!(
+                            "{value_expr}.try_into_value::<i64>(vm).and_then(|n| <{bits_ty}>::try_from(n).map({path}::from_bits).map_err(|_| vm.new_value_error(\"{other} bits out of range\".to_owned())))"
+                        )
+                    }
                 }
                 Classify::Struct => format!("dict_to_{}({value_expr}, vm)", snake_case(other)),
             }
@@ -371,6 +418,8 @@ fn getter_for_field(
     is_sequence: bool,
     field_place: &str,
 ) -> String {
+    // The registry reports a fixed array as a sequence of itself.
+    let is_sequence = is_sequence && f64_array_len(type_id).is_none();
     if is_sequence {
         let inner = leaf_to_py(registry, type_id, "item");
         format!(
@@ -398,6 +447,7 @@ fn setter_for_field(
     py_name: &str,
     keep_expr: &str,
 ) -> String {
+    let is_sequence = is_sequence && f64_array_len(type_id).is_none();
     if is_sequence {
         let inner = leaf_from_py(registry, type_id, "item");
         format!(
@@ -417,7 +467,7 @@ fn setter_for_field(
 }
 
 fn field_default_expr(f: &FieldInfo) -> String {
-    if f.is_sequence {
+    if f.is_sequence && f64_array_len(f.type_id.as_str()).is_none() {
         "Vec::new()".to_string()
     } else if f.optional {
         "None".to_string()
@@ -451,7 +501,7 @@ fn wrap_required_nonempty(setter_expr: &str, entity_kind: &str, py_name: &str) -
 // ════════════════════════════════════════════════════════════════════════════
 
 fn gen_unit_enum(name: &str, info: &TypeInfo) -> String {
-    let path = format!("acadrust::entities::{name}");
+    let path = type_path(name);
     let snake = snake_case(name);
     let mut name_arms = String::new();
     let mut parse_arms = String::new();
@@ -486,13 +536,14 @@ fn default_{snake}() -> {path} {{
     )
 }
 
-fn gen_bitflags(name: &str) -> String {
-    let path = format!("acadrust::entities::{name}");
+fn gen_bitflags(name: &str, info: &TypeInfo) -> String {
+    let path = type_path(name);
     let snake = snake_case(name);
+    let ctor = if matches!(info.kind, TypeKind::Newtype) { "empty" } else { "new" };
     format!(
         r#"#[allow(dead_code)]
 fn default_{snake}() -> {path} {{
-    {path}::new()
+    {path}::{ctor}()
 }}
 
 "#
@@ -500,11 +551,22 @@ fn default_{snake}() -> {path} {{
 }
 
 fn gen_tagged_enum(name: &str, info: &TypeInfo, registry: &TypeRegistry) -> String {
-    let path = format!("acadrust::entities::{name}");
+    let path = type_path(name);
     let snake = snake_case(name);
     let mut to_arms = String::new();
     let mut from_arms = String::new();
     for variant in &info.variants {
+        if variant.fields.is_empty() {
+            to_arms.push_str(&format!(
+                "        {path}::{variant} => {{ let dict = vm.ctx.new_dict(); dict.set_item(\"kind\", vm.new_pyobj(\"{variant}\"), vm)?; Ok(dict.into()) }}\n",
+                variant = variant.name,
+            ));
+            from_arms.push_str(&format!(
+                "        \"{variant}\" => Ok({path}::{variant}),\n",
+                variant = variant.name,
+            ));
+            continue;
+        }
         let payload = &variant.fields[0];
         let getter = leaf_to_py(registry, payload.type_id.as_str(), "value");
         let setter = leaf_from_py(registry, payload.type_id.as_str(), "payload");
@@ -518,7 +580,10 @@ fn gen_tagged_enum(name: &str, info: &TypeInfo, registry: &TypeRegistry) -> Stri
         ));
     }
     let first = &info.variants[0];
-    let default_payload = default_expr(first.fields[0].type_id.as_str());
+    let default_value = match first.fields.first() {
+        None => format!("{path}::{}", first.name),
+        Some(payload) => format!("{path}::{}({})", first.name, default_expr(payload.type_id.as_str())),
+    };
     format!(
         r#"fn {snake}_to_dict(vm: &VirtualMachine, value: &{path}) -> PyResult<PyObjectRef> {{
     match value {{
@@ -535,16 +600,15 @@ fn dict_to_{snake}(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<{path}> 
 
 #[allow(dead_code)]
 fn default_{snake}() -> {path} {{
-    {path}::{first_variant}({default_payload})
+    {default_value}
 }}
 
-"#,
-        first_variant = first.name,
+"#
     )
 }
 
 fn gen_struct(name: &str, info: &TypeInfo, registry: &TypeRegistry) -> String {
-    let path = format!("acadrust::entities::{name}");
+    let path = type_path(name);
     let snake = snake_case(name);
     let mut to_dict_body = String::new();
     let mut from_dict_fields = String::new();
@@ -910,7 +974,7 @@ pub fn generate_entity_crud(manifest: &Manifest, registry: &TypeRegistry) -> Str
         match classify(&name, info) {
             Classify::UnitEnum => out.push_str(&gen_unit_enum(&name, info)),
             Classify::TaggedEnum => out.push_str(&gen_tagged_enum(&name, info, registry)),
-            Classify::BitFlags => out.push_str(&gen_bitflags(&name)),
+            Classify::BitFlags => out.push_str(&gen_bitflags(&name, info)),
             Classify::Struct => out.push_str(&gen_struct(&name, info, registry)),
         }
     }

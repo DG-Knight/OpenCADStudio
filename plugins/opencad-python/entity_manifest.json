@@ -24,7 +24,8 @@
     "Hatch",
     "Leader",
     "MLine",
-    "Dimension"
+    "Dimension",
+    "MultiLeader"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -263,6 +264,21 @@
         "dwg_unknown_bit4": { "exclude": true },
         "dwg_unknown_bit5": { "exclude": true },
         "dwg_unknown_short1": { "exclude": true }
+      }
+    },
+    "MultiLeader": {
+      "fields": {
+        "arrowhead_overrides": { "exclude": true, "_comment": "Per-arrow override records carry linked block handles; preserved untouched until dedicated validation exists." },
+        "block_attributes": { "exclude": true, "_comment": "Block attribute records carry attribute-definition handles; preserved untouched." },
+        "dwg_version": { "read_only": true },
+        "text_height": { "read_only": true, "_comment": "Neither writer stores the entity-level text height; scripts set the persisted context.text_height." },
+        "property_override_flags": { "read_only": true },
+        "text_align_in_ipe": { "read_only": true },
+        "context": {
+          "keep_types": true,
+          "rust_getter": "multi_leader_annot_context_to_dict(vm, &VAR.context)?",
+          "rust_setter": "if let Some(v) = dict.get_item_opt(\"context\", vm)? { VAR.context = merge_multileader_context(&VAR.context, v, vm)?; }"
+        }
       }
     }
   }

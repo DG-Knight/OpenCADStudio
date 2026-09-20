@@ -296,6 +296,41 @@
       "scale_factor",
       "style_name",
       "vertices"
+    ],
+    "MultiLeader": [
+      "layer",
+      "content_type",
+      "path_type",
+      "line_color",
+      "line_weight",
+      "enable_landing",
+      "enable_dogleg",
+      "dogleg_length",
+      "arrowhead_size",
+      "text_color",
+      "text_frame",
+      "text_left_attachment",
+      "text_right_attachment",
+      "text_top_attachment",
+      "text_bottom_attachment",
+      "text_attachment_direction",
+      "text_attachment_point",
+      "text_alignment",
+      "text_angle_type",
+      "text_direction_negative",
+      "scale_factor",
+      "enable_annotation_scale",
+      "extend_leader_to_text",
+      "block_content_color",
+      "block_connection_type",
+      "block_rotation",
+      "block_scale",
+      "context",
+      "style_handle",
+      "text_style_handle",
+      "arrowhead_handle",
+      "line_type_handle",
+      "block_content_handle"
     ]
   },
   "readable": {
@@ -322,6 +357,12 @@
     ],
     "AttributeEntity": [
       "attdef_handle"
+    ],
+    "MultiLeader": [
+      "dwg_version",
+      "property_override_flags",
+      "text_align_in_ipe",
+      "text_height"
     ]
   },
   "aliases": {
