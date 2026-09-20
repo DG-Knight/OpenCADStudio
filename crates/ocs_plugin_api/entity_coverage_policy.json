@@ -486,6 +486,13 @@
       "shadow_map_softness",
       "photometric_mode",
       "photometric_data"
+    ],
+    "Ole2Frame": [
+      "layer",
+      "upper_left_corner",
+      "lower_right_corner",
+      "lock_aspect",
+      "is_paper_space"
     ]
   },
   "readable": {
@@ -590,6 +597,12 @@
     ],
     "Light": [
       "class_version"
+    ],
+    "Ole2Frame": [
+      "version",
+      "source_application",
+      "ole_object_type",
+      "dwg_mode"
     ]
   },
   "aliases": {

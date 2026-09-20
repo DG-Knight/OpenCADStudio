@@ -36,7 +36,8 @@
     "Underlay",
     "Viewport",
     "ViewBorder",
-    "Light"
+    "Light",
+    "Ole2Frame"
   ],
   "manual_kinds": [
     "Dimension"
@@ -778,6 +779,32 @@
         },
         "name": {
           "required": true
+        }
+      }
+    },
+    "Ole2Frame": {
+      "update_only": true,
+      "update_only_message": "Ole2Frame cannot be created from a script: its embedded object storage is opaque; existing frames can be moved, resized and aspect-locked, and the stored object is preserved untouched",
+      "fields": {
+        "storage": {
+          "exclude": true,
+          "_comment": "Opaque compound-file payload; snapshot-readable and preserved untouched."
+        },
+        "envelope": {
+          "exclude": true,
+          "_comment": "Opaque frame envelope; preserved untouched."
+        },
+        "version": {
+          "read_only": true
+        },
+        "source_application": {
+          "read_only": true
+        },
+        "ole_object_type": {
+          "read_only": true
+        },
+        "dwg_mode": {
+          "read_only": true
         }
       }
     }

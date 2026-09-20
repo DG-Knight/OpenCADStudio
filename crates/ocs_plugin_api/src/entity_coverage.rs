@@ -1223,6 +1223,28 @@ fn validate_basic_entity(
     }
 }
 
+/// Ole2Frame: only the frame placement is scriptable; the embedded object
+/// storage is never rewritten.
+#[cfg(feature = "host")]
+fn validate_ole_frame(
+    old: Option<&crate::host::acadrust::entities::Ole2Frame>,
+    new: &crate::host::acadrust::entities::Ole2Frame,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    finite_vector("Ole2Frame.upper_left_corner", &new.upper_left_corner)?;
+    finite_vector("Ole2Frame.lower_right_corner", &new.lower_right_corner)?;
+    let (a, b) = (new.upper_left_corner, new.lower_right_corner);
+    if (a.x - b.x).abs() <= 1.0e-12 || (a.y - b.y).abs() <= 1.0e-12 {
+        return Err("Ole2Frame corners must span a nonzero width and height".into());
+    }
+    if new.lock_aspect > 1 {
+        return Err("Ole2Frame.lock_aspect must be 0 or 1".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -1348,6 +1370,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
                 return Err("Insert array counts must be greater than zero".into());
             }
         }
+        EntityType::Ole2Frame(value) => validate_ole_frame(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1716,6 +1739,12 @@ pub fn validate_entity_mutation(
         (EntityType::Viewport(old), EntityType::Viewport(new)) => validate_viewport(Some(old), new)?,
         (EntityType::ViewBorder(old), EntityType::ViewBorder(new)) => validate_view_border(Some(old), new)?,
         (EntityType::Light(old), EntityType::Light(new)) => validate_light(Some(old), new)?,
+        (EntityType::Ole2Frame(old), EntityType::Ole2Frame(new)) => {
+            validate_ole_frame(Some(old), new)?;
+            if old.storage != new.storage || old.envelope != new.envelope {
+                return Err("Ole2Frame embedded storage cannot change".into());
+            }
+        }
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -2502,6 +2531,7 @@ mod tests {
                         | "Viewport"
                         | "ViewBorder"
                         | "Light"
+                        | "Ole2Frame"
                 )
             {
                 assert!(
@@ -2787,6 +2817,10 @@ mod tests {
                 "Wipeout.clip_mode".to_owned(),
                 "Wipeout.clip_type".to_owned(),
                 "Wipeout.clip_boundary_vertices".to_owned(),
+                "Ole2Frame.upper_left_corner".to_owned(),
+                "Ole2Frame.lower_right_corner".to_owned(),
+                "Ole2Frame.lock_aspect".to_owned(),
+                "Ole2Frame.is_paper_space".to_owned(),
                 "Underlay.underlay_type".to_owned(),
                 "Underlay.definition_handle".to_owned(),
                 "Underlay.insertion_point".to_owned(),

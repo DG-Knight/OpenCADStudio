@@ -3212,7 +3212,28 @@ mod tests {
                 .map(|(x, y, z)| acadrust::types::Vector3::new(x, y, z));
             host.add_entity(EntityType::Polyline(acadrust::entities::Polyline::from_points(points.to_vec())));
         }
-        let update_only = create_script.contains("MAKEINSERT") || make_polyline;
+        let make_ole = create_script.contains("MAKEOLE");
+        if make_ole {
+            // An Ole2Frame is update-only: the host embeds a real picture.
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 120, 200, 255]))
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            let picture = crate::io::ole_embed::EmbeddedImage {
+                bytes: png.into_inner(),
+                pixel_width: 4,
+                pixel_height: 3,
+                name: "audit.png".into(),
+            };
+            crate::io::ole_embed::add_embedded_image(
+                host.document_mut(),
+                &picture,
+                acadrust::types::Vector3::new(10.0, 10.0, 0.0),
+                20.0,
+            )
+            .unwrap();
+        }
+        let update_only = create_script.contains("MAKEINSERT") || make_polyline || make_ole;
         if update_only || create_script.contains("MAKEBLOCK") {
             let next = host.document().next_handle();
             let (record_handle, block_handle, end_handle) = (Handle::new(next), Handle::new(next + 1), Handle::new(next + 2));
@@ -4385,6 +4406,47 @@ mod tests {
         // The legacy Polyline cannot be created and says what to use instead.
         dispatch(&mut host, "PY_EVAL ocs.active_document.create_entity('Polyline', vertices=[])");
         assert!(last(&host).contains("Polyline2D or Polyline3D"), "{}", last(&host));
+    }
+
+    #[test]
+    fn audit_python_ole2frame_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: "# MAKEOLE\n",
+            edit: concat!(
+                "e = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit'):\n",
+                "    e.upper_left_corner = (12.0, 40.0, 0.0)\n",
+                "    e.lower_right_corner = (42.0, 10.0, 0.0)\n",
+                "    e.lock_aspect = 1\n",
+                "doc.selection = [e]\n"),
+            rejects: &[
+                ("'upper_left_corner':{'x':42.0,'y':40.0,'z':0.0}", "nonzero width and height"),
+                ("'lock_aspect':2", "0 or 1"),
+                ("'lower_right_corner':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
+                ("'version':3", "read-only"),
+                ("'storage':{}", "outside the editable schema"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::Ole2Frame(_)),
+            digest: |entity| match entity {
+                EntityType::Ole2Frame(v) => {
+                    let picture = match acadrust::entities::extract_presentation(&v.encoded_payload()) {
+                        Some(acadrust::entities::OlePresentation::Raster(bytes)) => bytes.len(),
+                        _ => 0,
+                    };
+                    format!("ul{:.1},{:.1} lr{:.1},{:.1} lock{} picture{}", v.upper_left_corner.x, v.upper_left_corner.y,
+                        v.lower_right_corner.x, v.lower_right_corner.y, v.lock_aspect, picture)
+                }
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::Ole2Frame(v) = entity { v.lower_right_corner.x = 50.0; },
+            expect_created: "ul10.0,25.0 lr30.0,10.0 lock0 picture119",
+            expect_edited: "ul12.0,40.0 lr42.0,10.0 lock1 picture119",
+            expect_reedited: "ul12.0,40.0 lr50.0,10.0 lock1 picture119",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
+            expect_edited_dwg: "",
+            expect_reedited_dwg: "",
+        });
     }
 
     #[test]
