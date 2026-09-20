@@ -182,7 +182,47 @@ impl<'a> HostSession<'a> {
         Ok(())
     }
 
+    /// A scripted RasterImage names a file; the host creates the image
+    /// definition object it needs (pixel size read from the file) and links it.
+    fn prepare_scripted_raster_image(&mut self, entity: &mut EntityType) -> Result<(), String> {
+        let EntityType::RasterImage(image) = entity else {
+            return Ok(());
+        };
+        if image.definition_handle.is_some_and(|handle| !handle.is_null()) {
+            return Ok(());
+        }
+        let (width, height) = image::image_dimensions(&image.file_path)
+            .map_err(|error| format!("cannot read image {:?}: {error}", image.file_path))?;
+        let handle = self.document_mut().allocate_handle();
+        let mut definition = acadrust::objects::ImageDefinition::with_dimensions(
+            image.file_path.clone(),
+            width,
+            height,
+        );
+        definition.handle = handle;
+        definition.is_loaded = true;
+        self.document_mut()
+            .objects
+            .insert(handle, acadrust::objects::ObjectType::ImageDefinition(definition));
+        image.definition_handle = Some(handle);
+        // `size` is the image's pixel size, and an untouched clip boundary
+        // covers the whole image, so both follow the file.
+        let untouched_clip = image.clip_boundary
+            == acadrust::entities::ClipBoundary::full_image(image.size.x, image.size.y);
+        image.size = acadrust::types::Vector2::new(f64::from(width), f64::from(height));
+        if untouched_clip {
+            image.clip_boundary = acadrust::entities::ClipBoundary::full_image(
+                f64::from(width),
+                f64::from(height),
+            );
+        }
+        Ok(())
+    }
+
     pub fn add_entity(&mut self, mut entity: EntityType) -> Handle {
+        if self.prepare_scripted_raster_image(&mut entity).is_err() {
+            return Handle::NULL;
+        }
         if self.normalize_scripted_entity(None, &mut entity).is_err() {
             return Handle::NULL;
         }
@@ -220,6 +260,7 @@ impl<'a> HostSession<'a> {
 
     pub fn add_entities(&mut self, mut entities: Vec<EntityType>) -> Vec<Handle> {
         for entity in &mut entities {
+            let _ = self.prepare_scripted_raster_image(entity);
             // Creation input was validated by the caller; a degenerate MLine
             // simply keeps its supplied (unnormalized) vertices.
             let _ = self.normalize_scripted_entity(None, entity);
@@ -2515,7 +2556,7 @@ mod tests {
             ("'style_name':'Missing'", "does not exist"),
             ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}}]", "at least 2"),
             ("'scale_factor':0.0", "nonzero"),
-            ("'flags':64", "unknown bits"),
+            ("'flags':64", "unknown or out-of-range bits"),
             ("'flags':3,'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':1.0,'y':0.0,'z':0.0}}]", "requires at least 3"),
             ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':0.0,'y':0.0,'z':0.0}}]", "coincide"),
             ("'vertices':[{'position':{'x':0.0,'y':0.0,'z':0.0}},{'position':{'x':1.0,'y':float('nan'),'z':0.0}}]", "finite"),
@@ -3152,7 +3193,8 @@ mod tests {
             let _ = std::fs::remove_file(&path);
         };
 
-        run_script(&mut host, "create", case.create);
+        let tmp = std::env::temp_dir().to_string_lossy().into_owned();
+        run_script(&mut host, "create", &case.create.replace("TMPDIR", &tmp));
         let handle = host.document().entities().find(|entity| (case.is_kind)(entity))
             .map(|entity| entity.common().handle)
             .unwrap_or_else(|| panic!("Python did not create the mesh: {}", last_output(&host)));
@@ -3160,7 +3202,7 @@ mod tests {
         assert_eq!((case.digest)(&created), case.expect_created);
         assert!(!host.app.tabs[0].scene.wire_models_for(&[handle]).is_empty(), "no canvas geometry");
 
-        run_script(&mut host, "edit", &case.edit.replace("HANDLE", &handle.value().to_string()));
+        run_script(&mut host, "edit", &case.edit.replace("HANDLE", &handle.value().to_string()).replace("TMPDIR", &tmp));
         let expected = host.document().get_entity(handle).unwrap().clone();
         assert_eq!((case.digest)(&expected), case.expect_edited, "edit failed: {}", last_output(&host));
         assert_eq!(expected.common(), created.common());
@@ -3399,6 +3441,55 @@ mod tests {
             // never applies it, so handedness always reopens counter-clockwise.
             expect_edited_dxf: "r5 t5 h2 endz10.0 ccwtrue cptrue",
             expect_reedited_dxf: "r5 t6 h2 endz10.0 ccwtrue cptrue",
+        });
+    }
+
+    #[test]
+    fn staged_python_raster_image_lifecycle_over_real_ipc() {
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([200, 30, 30, 255]))
+            .save(std::env::temp_dir().join("ocs_raster_test.png"))
+            .unwrap();
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('RasterImage', file_path='TMPDIR/ocs_raster_test.png',\n",
+                "    insertion_point=P(10.0, 20.0, 0.0), u_vector=P(0.5, 0.0, 0.0), v_vector=P(0.0, 0.5, 0.0))\n"),
+            edit: concat!(
+                "img = doc.entities[HANDLE]\n",
+                "cb = img.clip_boundary\n",
+                "cb['vertices'] = [{'x': 1.0, 'y': 1.0}, {'x': 7.0, 'y': 3.0}]\n",
+                "with doc.transaction('Edit image'):\n",
+                "    img.insertion_point = (12.0, 22.0, 0.0)\n",
+                "    img.u_vector = (1.0, 0.0, 0.0)\n",
+                "    img.brightness = 70\n",
+                "    img.contrast = 40\n",
+                "    img.fade = 10\n",
+                "    img.clip_boundary = cb\n",
+                "    img.clipping_enabled = True\n",
+                "doc.selection = [img]\n"),
+            rejects: &[
+                ("'file_path':'other.png'", "fixed at creation"),
+                ("'brightness':101", "within 0..=100"),
+                ("'u_vector':{'x':0.0,'y':0.0,'z':0.0}", "not parallel"),
+                ("'v_vector':{'x':2.0,'y':0.0,'z':0.0}", "not parallel"),
+                ("'size':{'x':5.0,'y':5.0}", "read-only"),
+                ("'definition_handle':5", "read-only"),
+                ("'flags':64", "unknown or out-of-range bits"),
+                ("'clip_boundary':{'vertices':[]}", "at least 2"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::RasterImage(_)),
+            digest: |entity| match entity {
+                EntityType::RasterImage(i) => format!("{} {:.1},{:.1} u{:.1} b{} c{} f{} clip{} n{} {}x{} def{}",
+                    std::path::Path::new(&i.file_path).file_name().unwrap().to_string_lossy(),
+                    i.insertion_point.x, i.insertion_point.y, i.u_vector.x, i.brightness, i.contrast, i.fade,
+                    i.clipping_enabled, i.clip_boundary.vertices.len(), i.size.x, i.size.y, i.definition_handle.is_some()),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::RasterImage(i) = entity { i.brightness = 80; },
+            expect_created: "ocs_raster_test.png 10.0,20.0 u0.5 b50 c50 f0 clipfalse n2 8x4 deftrue",
+            expect_edited: "ocs_raster_test.png 12.0,22.0 u1.0 b70 c40 f10 cliptrue n2 8x4 deftrue",
+            expect_reedited: "ocs_raster_test.png 12.0,22.0 u1.0 b80 c40 f10 cliptrue n2 8x4 deftrue",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
         });
     }
 

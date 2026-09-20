@@ -781,6 +781,54 @@ fn validate_helix(
     Ok(())
 }
 
+/// RasterImage display parameters. The image definition is created and owned
+/// by the host; a script supplies the file and the placement.
+#[cfg(feature = "host")]
+fn validate_raster_image(
+    old: Option<&crate::host::acadrust::entities::RasterImage>,
+    new: &crate::host::acadrust::entities::RasterImage,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    if let Some(old) = old {
+        if old.file_path != new.file_path {
+            return Err("RasterImage.file_path is fixed at creation; the image definition owns it".into());
+        }
+    } else if new.file_path.trim().is_empty() {
+        return Err("RasterImage.file_path is empty".into());
+    } else if new.definition_handle.is_none_or(|handle| handle.is_null())
+        && !std::path::Path::new(&new.file_path).is_file()
+    {
+        return Err(format!("RasterImage.file_path {:?} is not a readable file", new.file_path));
+    }
+    finite_vector("RasterImage.insertion_point", &new.insertion_point)?;
+    finite_vector("RasterImage.u_vector", &new.u_vector)?;
+    finite_vector("RasterImage.v_vector", &new.v_vector)?;
+    let cross = new.u_vector.cross(&new.v_vector);
+    if cross.x.hypot(cross.y).hypot(cross.z) <= 1.0e-12 {
+        return Err("RasterImage.u_vector and v_vector must be nonzero and not parallel".into());
+    }
+    if !new.size.x.is_finite() || !new.size.y.is_finite() || new.size.x < 0.0 || new.size.y < 0.0 {
+        return Err("RasterImage.size must be finite and non-negative".into());
+    }
+    if new.brightness > 100 || new.contrast > 100 || new.fade > 100 {
+        return Err("RasterImage brightness, contrast and fade must be within 0..=100".into());
+    }
+    if new.flags.bits() & !0x0f != 0 {
+        return Err("RasterImage.flags has unknown bits".into());
+    }
+    for (index, vertex) in new.clip_boundary.vertices.iter().enumerate() {
+        if !vertex.x.is_finite() || !vertex.y.is_finite() {
+            return Err(format!("RasterImage.clip_boundary.vertices[{index}] must be finite"));
+        }
+    }
+    if new.clipping_enabled && new.clip_boundary.vertices.len() < 2 {
+        return Err("RasterImage clipping requires at least 2 clip boundary vertices".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -881,6 +929,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::PolyfaceMesh(value) => validate_polyface_mesh(None, value)?,
         EntityType::Mesh(value) => validate_mesh(None, value)?,
         EntityType::Helix(value) => validate_helix(None, value)?,
+        EntityType::RasterImage(value) => validate_raster_image(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1242,6 +1291,7 @@ pub fn validate_entity_mutation(
         (EntityType::PolyfaceMesh(old), EntityType::PolyfaceMesh(new)) => validate_polyface_mesh(Some(old), new)?,
         (EntityType::Mesh(old), EntityType::Mesh(new)) => validate_mesh(Some(old), new)?,
         (EntityType::Helix(old), EntityType::Helix(new)) => validate_helix(Some(old), new)?,
+        (EntityType::RasterImage(old), EntityType::RasterImage(new)) => validate_raster_image(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1503,6 +1553,16 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    if let EntityType::RasterImage(value) = entity {
+        if let Some(handle) = value.definition_handle.filter(|handle| !handle.is_null()) {
+            if !matches!(
+                document.objects.get(&handle),
+                Some(crate::host::acadrust::objects::ObjectType::ImageDefinition(_))
+            ) {
+                return Err(format!("RasterImage image definition {handle:?} does not exist"));
+            }
         }
     }
     if let EntityType::Table(value) = entity {
@@ -1920,6 +1980,7 @@ mod tests {
                         | "PolyfaceMesh"
                         | "Mesh"
                         | "Helix"
+                        | "RasterImage"
                 )
             {
                 assert!(
@@ -2183,6 +2244,16 @@ mod tests {
                 "Helix.turn_height".to_owned(),
                 "Helix.handedness".to_owned(),
                 "Helix.constraint".to_owned(),
+                "RasterImage.insertion_point".to_owned(),
+                "RasterImage.u_vector".to_owned(),
+                "RasterImage.v_vector".to_owned(),
+                "RasterImage.flags".to_owned(),
+                "RasterImage.clipping_enabled".to_owned(),
+                "RasterImage.brightness".to_owned(),
+                "RasterImage.contrast".to_owned(),
+                "RasterImage.fade".to_owned(),
+                "RasterImage.clip_boundary".to_owned(),
+                "RasterImage.file_path".to_owned(),
             ])
         );
     }

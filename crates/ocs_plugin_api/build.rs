@@ -791,6 +791,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                     | ("PolyfaceMesh", _)
                     | ("Mesh", _)
                     | ("Helix", _)
+                    | ("RasterImage", _)
                     | (
                         "MLine",
                         "flags"

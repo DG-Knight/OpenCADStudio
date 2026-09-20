@@ -35,7 +35,7 @@ attached attribute and sequence records. Those fields report `transaction_geomet
 catalog. All 43 canvas kinds also support nonempty `layer` changes through
 the same undoable transaction; internal and opaque variants remain read-only
 through the document model. The adapter accepts only `layer` patches for
-canvas kinds outside its 31 geometry converters. Other writable properties
+canvas kinds outside its 32 geometry converters. Other writable properties
 still report `type_conversion_only`; broader CAD range and cross-property
 checks remain outstanding.
 The host's `entity_snapshot` helper serializes any typed entity as a detached
@@ -91,7 +91,7 @@ Input tokens are bound to the drawing tab that requested the pick. Polling a
 token from another tab returns no result and does not consume it.
 
 Python `doc.entities[handle]` returns a descriptor for every entity. For kinds
-outside the 31-kind generated schema it contains only handle, kind, and layer;
+outside the 32-kind generated schema it contains only handle, kind, and layer;
 `layer` is editable on canvas kinds. `doc.coverage()` enumerates the
 catalog; `doc.coverage("Line")` and `line.coverage` return one entry. For
 covered kinds, the coverage object lists actual readable and editable

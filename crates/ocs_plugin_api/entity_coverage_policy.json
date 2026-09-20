@@ -388,6 +388,19 @@
       "turn_height",
       "handedness",
       "constraint"
+    ],
+    "RasterImage": [
+      "layer",
+      "insertion_point",
+      "u_vector",
+      "v_vector",
+      "flags",
+      "clipping_enabled",
+      "brightness",
+      "contrast",
+      "fade",
+      "clip_boundary",
+      "file_path"
     ]
   },
   "readable": {
@@ -448,6 +461,12 @@
       "spline",
       "major_version",
       "maintenance_version"
+    ],
+    "RasterImage": [
+      "class_version",
+      "definition_handle",
+      "definition_reactor_handle",
+      "size"
     ]
   },
   "aliases": {

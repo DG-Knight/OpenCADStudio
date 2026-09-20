@@ -30,7 +30,8 @@
     "PolygonMesh",
     "PolyfaceMesh",
     "Mesh",
-    "Helix"
+    "Helix",
+    "RasterImage"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -339,6 +340,16 @@
         "spline": { "read_only": true, "_comment": "Derived by the host from the generating parameters." },
         "major_version": { "read_only": true },
         "maintenance_version": { "read_only": true }
+      }
+    },
+    "RasterImage": {
+      "fields": {
+        "insertion_point": { "required": true },
+        "file_path": { "required": true },
+        "class_version": { "read_only": true },
+        "size": { "read_only": true, "_comment": "Pixel size of the image; the host takes it from the file." },
+        "definition_handle": { "read_only": true },
+        "definition_reactor_handle": { "read_only": true }
       }
     }
   }
