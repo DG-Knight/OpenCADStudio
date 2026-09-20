@@ -138,7 +138,27 @@ Execute responses use `response_detail: "compact"` by default and return only th
 
 For unfamiliar or conditional commands, use `start`, then inspect `state.command` in every response. Its `accepts` array gives the valid MCP input kinds, `options` gives the current tokens, and `input_example` gives the next request shape. Add the current state fields and a new `request_id` to each step.
 
-Every `ocs_execute` request requires a caller-generated `request_id`. Reuse that ID only to retry the identical request after a timeout, together with the same session ID, document ID, expected revision, and selection. Commands report `waiting_input` while more input is required and asynchronous work remains `running` until its real callback finishes. Geometry stays in OpenCADStudio and its geometry kernel.
+Every `ocs_execute` request requires a caller-generated `request_id`. Reuse that ID only to retry the identical request after a timeout, together with the same session ID, document ID, expected revision, and selection. Commands report `waiting_input` while more input is required and asynchronous work remains `running` until its real callback finishes.
+
+A `run` reply also carries two fields that describe what happened to the line:
+
+* `blocked_by` — `null` when the command finished, otherwise what *this line*
+  left open and waiting: `"command"` (an interactive command), `"text_editor"`
+  (the in-place editor opened by the `TEXT` content step), `"mtext_editor"`, or
+  `"modal:<Kind>"` for a dialog. A surface that was already open when the line
+  started (an earlier line's editor, another tab, a startup dialog) is not
+  attributed to this line, so a caller polling for `completed` is never stuck
+  waiting on someone else's editor. `blocked_by` is set whenever `status` is
+  `waiting_input`.
+* `unconsumed` — the tokens of the line that no prompt ever asked for, in order.
+  A fully consumed line reports `[]`; `CIRCLE 0,0 5 9` reports `["9"]` because
+  the radius step ends the command. Over-typed input is reported instead of
+  being dropped on the floor.
+
+When a line ends at the `TEXT` content step (`TEXT 0,0 5 0 hello`) the text is
+typed into the in-place editor and committed, so the line behaves exactly as the
+same input typed into the GUI command line would: one `Text` entity, nothing
+unconsumed, and the command closed rather than left armed for a second line. Geometry stays in OpenCADStudio and its geometry kernel.
 
 `ocs_capture` defaults to the drawing viewport and a longest edge of 1600 pixels. Set `scope` to `window` for the full interface or change `max_dimension` between 256 and 4096.
 
