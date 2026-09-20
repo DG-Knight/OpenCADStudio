@@ -196,3 +196,5 @@ Test it with **planar** operands (millisecond cost, safe in debug) plus one
 30 s script budget and that chained cuts on a drilled body are often refused.
 Do not move booleans to a background thread yet: it would need cancellation and
 undo coordination for a cost that is one to two seconds.
+
+**Status (2026-09-20): implemented.** `SolidOperation::Boolean` and `doc.solids.union`, `subtract` and `intersect` follow the recommendation above, with planar-operand lifecycle testing and an ignored curved refusal test. Every operation this note proposed is now built.

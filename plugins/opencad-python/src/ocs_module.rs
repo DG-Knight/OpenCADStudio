@@ -475,6 +475,40 @@ mod ocs {
             .map_err(|error| vm.new_runtime_error(format!("ocs.solid_region: {error}")))
     }
 
+    /// Combine two solids ("union", "subtract" or "intersect").
+    #[pyfunction]
+    fn solid_boolean(
+        first: u64,
+        second: u64,
+        operation: String,
+        layer: Option<String>,
+        keep_operands: bool,
+        vm: &VirtualMachine,
+    ) -> PyResult<u64> {
+        use ocs_plugin_api::host::{SolidBoolean, SolidOperation};
+        let operation = match operation.as_str() {
+            "union" => SolidBoolean::Union,
+            "subtract" => SolidBoolean::Subtract,
+            "intersect" => SolidBoolean::Intersect,
+            other => {
+                return Err(vm.new_value_error(format!("ocs.solid_boolean: unknown operation {other:?}")))
+            }
+        };
+        let result = host_ctx::with_host(|host| {
+            host.solid_operation(SolidOperation::Boolean {
+                first: Handle::new(first),
+                second: Handle::new(second),
+                operation,
+                layer,
+                keep_operands,
+            })
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.solid_boolean: {error}")))
+    }
+
     /// Build a plane surface from a closed planar profile entity.
     #[pyfunction]
     fn solid_surface(source: u64, layer: Option<String>, delete_source: bool, vm: &VirtualMachine) -> PyResult<u64> {

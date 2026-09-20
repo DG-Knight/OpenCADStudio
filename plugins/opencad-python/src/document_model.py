@@ -146,6 +146,26 @@ class _Solids:
         handle = profile.handle if isinstance(profile, _Entity) else int(profile)
         return self._document.entities[ocs.solid_region(handle, layer, bool(delete_source))]
 
+    def _boolean(self, operation, first, second, layer, keep_operands):
+        a = first.handle if isinstance(first, _Entity) else int(first)
+        b = second.handle if isinstance(second, _Entity) else int(second)
+        return self._document.entities[ocs.solid_boolean(a, b, operation, layer, bool(keep_operands))]
+
+    def union(self, first, second, layer=None, keep_operands=False):
+        """Join two solids into a new one. The operands are consumed unless
+        `keep_operands`. The kernel may refuse (the error says why) and a
+        refusal changes nothing. Curved operands can take a second or two,
+        and a whole script has a 30 second budget."""
+        return self._boolean("union", first, second, layer, keep_operands)
+
+    def subtract(self, first, second, layer=None, keep_operands=False):
+        """Remove `second` from `first`, giving a new solid."""
+        return self._boolean("subtract", first, second, layer, keep_operands)
+
+    def intersect(self, first, second, layer=None, keep_operands=False):
+        """Keep only the volume both solids share, as a new solid."""
+        return self._boolean("intersect", first, second, layer, keep_operands)
+
     def surface(self, profile, layer=None, delete_source=False):
         """Make a plane surface from one closed planar profile."""
         handle = profile.handle if isinstance(profile, _Entity) else int(profile)

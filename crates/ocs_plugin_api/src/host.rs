@@ -76,6 +76,15 @@ pub enum SolidPrimitive {
     Pyramid { center: [f64; 3], radius: f64, height: f64, sides: u32 },
 }
 
+/// How two solids combine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SolidBoolean {
+    Union,
+    /// Remove the second solid from the first.
+    Subtract,
+    Intersect,
+}
+
 /// A kernel operation on ACIS-backed solids (API v7, additive). The host owns
 /// the geometry: a script never sees or rewrites the payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -95,6 +104,18 @@ pub enum SolidOperation {
     /// Extrude a planar profile along `direction`: a solid when the profile is
     /// closed, a surface when it is open.
     Extrude { source: Handle, direction: [f64; 3], layer: Option<String>, delete_source: bool },
+    /// Combine two solids into a new one. Both operands are consumed unless
+    /// `keep_operands`; the result goes on `layer` or the first operand's
+    /// layer. The kernel refuses some cases (coincident faces, cuts it has no
+    /// closed form for); a refusal changes nothing. Curved operands can take a
+    /// second or two, and the host thread is busy meanwhile.
+    Boolean {
+        first: Handle,
+        second: Handle,
+        operation: SolidBoolean,
+        layer: Option<String>,
+        keep_operands: bool,
+    },
 }
 
 /// Value of a host-managed drafting or document setting exposed to plugins.

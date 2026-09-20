@@ -692,6 +692,71 @@ impl<'a> HostSession<'a> {
                 };
                 self.commit_profile_result(result, source, delete_source, "Extrude profile")
             }
+            SolidOperation::Boolean { first, second, operation, layer, keep_operands } => {
+                use ocs_plugin_api::host::SolidBoolean;
+                if first == second {
+                    return Err("a solid cannot be combined with itself".into());
+                }
+                if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
+                    return Err("layer name is empty".into());
+                }
+                let operand = |host: &Self, handle: Handle, which: &str| -> Result<acadrust::entities::Solid3D, String> {
+                    match host.document().get_entity(handle) {
+                        Some(EntityType::Solid3D(solid)) => Ok(solid.clone()),
+                        Some(_) => Err(format!("the {which} operand must be a Solid3D")),
+                        None => Err(format!("entity {handle:?} does not exist")),
+                    }
+                };
+                let a = operand(self, first, "first")?;
+                let b = operand(self, second, "second")?;
+                if !keep_operands {
+                    for handle in [first, second] {
+                        if self.app.tabs[self.tab].scene.is_layer_locked(handle) {
+                            return Err(format!("entity {handle:?} is on a locked layer"));
+                        }
+                    }
+                }
+                let lift = |solid: &acadrust::entities::Solid3D, which: &str| {
+                    crate::scene::convert::solid3d_tess::kernel_acis_body(&solid.acis_data).ok_or_else(|| {
+                        format!("the {which} solid's payload cannot be lifted losslessly, so nothing was changed")
+                    })
+                };
+                let (body_a, body_b) = (lift(&a, "first")?, lift(&b, "second")?);
+                let kind = match operation {
+                    SolidBoolean::Union => model::Bool::Union,
+                    SolidBoolean::Subtract => model::Bool::Subtract,
+                    SolidBoolean::Intersect => model::Bool::Intersect,
+                };
+                let combined = model::boolean_result(kind, &body_a, &body_b).map_err(|snag| {
+                    let reason = match snag {
+                        cadkernel::brep::Snag::Coincident => "two faces lie on the same surface, which the kernel cannot resolve",
+                        cadkernel::brep::Snag::CutRefused => "a face could not be cut along the intersection curve",
+                        cadkernel::brep::Snag::NoClosedForm => "the surfaces meet along a curve the kernel has no closed form for",
+                    };
+                    format!("the geometry kernel refused this {operation:?} ({snag:?}): {reason}; nothing was changed")
+                })?;
+                let sat = crate::scene::convert::acis_export::solid_to_sat(&combined)
+                    .ok_or("the result could not be exported losslessly, so nothing was changed")?;
+                let mut solid = acadrust::entities::Solid3D::new();
+                solid.common = a.common.clone();
+                solid.common.handle = Handle::NULL;
+                solid.common.owner_handle = Handle::NULL;
+                solid.wires = model::edge_wires(&combined);
+                solid.set_sat_document(&sat);
+                if let Some(layer) = layer {
+                    solid.common.layer = layer;
+                }
+                self.push_undo("Boolean solids");
+                let handle = self.add_entity(EntityType::Solid3D(solid));
+                if handle.is_null() {
+                    return Err("the result could not be added".into());
+                }
+                if !keep_operands {
+                    self.app.tabs[self.tab].scene.erase_entities(&[first, second]);
+                    self.publish_document_view();
+                }
+                Ok(handle)
+            }
             SolidOperation::Transform { handle, matrix } => {
                 if matrix.iter().any(|v| !v.is_finite()) {
                     return Err("transform matrix must be finite".into());
@@ -5325,6 +5390,175 @@ mod tests {
         // Two re-edits of reopened copies, two moves, and the isoline edit come before.
         app.undo_steps(2 + 2 + 1);
         assert_eq!(app.tabs[0].scene.document.get_entity(plane), Some(&plane_before), "undoing the edits restores the surface exactly");
+    }
+
+    #[test]
+    fn audit_python_boolean_lifecycle_over_real_ipc() {
+        use crate::scene::convert::solid3d_tess::kernel_body;
+        use crate::scene::model::solid_model as sm;
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let solids_in = |document: &CadDocument| {
+            let mut list: Vec<Handle> = document.entities().filter_map(|e| match e {
+                EntityType::Solid3D(s) => Some(s.common.handle), _ => None }).collect();
+            list.sort_by_key(|h| h.value());
+            list
+        };
+        let body_in = |document: &CadDocument, handle: Handle| {
+            let Some(EntityType::Solid3D(solid)) = document.get_entity(handle) else { panic!("no solid {handle:?}") };
+            kernel_body(solid).expect("payload lifts losslessly")
+        };
+        let volume_in = |document: &CadDocument, handle: Handle| sm::volume(&body_in(document, handle));
+        let extent_in = |document: &CadDocument, handle: Handle| sm::extent(&body_in(document, handle)).unwrap();
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-6 * b.abs().max(1.0);
+
+        // C: all three operations on two overlapping boxes, keeping the
+        // operands. A: x 0..10, B: x 5..15, both 6 by 4; the overlap is 120.
+        let script = std::env::temp_dir().join(format!("ocs_boolean_create_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "s = ocs.active_document.solids\n",
+            "a = s.box(center=(5, 3, 2), size=(10, 6, 4))\n",
+            "b = s.box(center=(10, 3, 2), size=(10, 6, 4))\n",
+            "s.union(a, b, keep_operands=True)\n",
+            "s.subtract(a, b, keep_operands=True)\n",
+            "s.intersect(a, b, keep_operands=True)\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let list = solids_in(host.document());
+        assert_eq!(list.len(), 5, "operands kept and three results: {}", last(&host));
+        let (a, b) = (list[0], list[1]);
+        for (index, expected) in [(2, 360.0), (3, 120.0), (4, 120.0)] {
+            let actual = volume_in(host.document(), list[index]);
+            assert!(close(actual, expected), "result {index}: volume {actual}, expected {expected}");
+        }
+        let (low, high) = extent_in(host.document(), list[3]);
+        assert!(close(low[0], 0.0) && close(high[0], 5.0), "subtract keeps x 0..5: {low:?} {high:?}");
+        let (low, high) = extent_in(host.document(), list[4]);
+        assert!(close(low[0], 5.0) && close(high[0], 10.0), "intersect keeps x 5..10: {low:?} {high:?}");
+        let Some(EntityType::Solid3D(union)) = host.document().get_entity(list[2]) else { unreachable!() };
+        assert_eq!((union.wires.is_empty(), union.history_handle), (false, None));
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[list[2]]).is_empty(), "no canvas geometry");
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", list[2].value()));
+        assert!(last(&host).contains("Solid3D"));
+
+        // Consuming operands: A minus B leaves only the result, on a new layer.
+        let before_consume = (host.document().get_entity(a).unwrap().clone(), host.document().get_entity(b).unwrap().clone());
+        let undo_before = host.app.tabs[0].history.undo_stack.len();
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.subtract({}, {}, layer='CUT').handle", a.value(), b.value()));
+        assert!(host.document().get_entity(a).is_none() && host.document().get_entity(b).is_none(), "operands are consumed");
+        let cut = *solids_in(host.document()).last().unwrap();
+        assert!(close(volume_in(host.document(), cut), 120.0));
+        assert_eq!(host.document().get_entity(cut).unwrap().common().layer, "CUT");
+        assert_eq!(host.app.tabs[0].history.undo_stack.len() - undo_before, 1, "one undo step per boolean");
+
+        // A second planar operation chains on the result: drill a through-hole.
+        dispatch(&mut host, "PY_EVAL ocs.active_document.solids.box(center=(2.5, 3, 2), size=(2, 2, 6)).handle");
+        let hole = *solids_in(host.document()).last().unwrap();
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.subtract({}, {}).handle", cut.value(), hole.value()));
+        let drilled = *solids_in(host.document()).last().unwrap();
+        assert!(close(volume_in(host.document(), drilled), 104.0), "120 minus a 2x2x4 hole is 104");
+
+        // V: refusals change nothing and leave no undo step.
+        let line = host.add_entity(EntityType::Line(acadrust::entities::Line::from_points(
+            acadrust::types::Vector3::ZERO, acadrust::types::Vector3::new(1.0, 0.0, 0.0))));
+        let unliftable = host.add_entity(EntityType::Solid3D(acadrust::entities::Solid3D::new()));
+        let mut plane = acadrust::entities::Surface::new(acadrust::entities::SurfaceKind::Plane);
+        plane.acis_data = acadrust::entities::AcisData::new();
+        let surface = host.add_entity(EntityType::Surface(plane));
+        let far = { dispatch(&mut host, "PY_EVAL ocs.active_document.solids.box(center=(500, 500, 500), size=(1, 1, 1)).handle");
+            *solids_in(host.document()).last().unwrap() };
+        let counts = (host.document().entities().count(), host.app.tabs[0].history.undo_stack.len());
+        let z = drilled.value();
+        for (command, message) in [
+            (format!("ocs.active_document.solids.union({z}, {z})"), "cannot be combined with itself"),
+            (format!("ocs.active_document.solids.union({z}, {})", line.value()), "must be a Solid3D"),
+            (format!("ocs.active_document.solids.union({}, {z})", surface.value()), "must be a Solid3D"),
+            (format!("ocs.active_document.solids.union({z}, 999999)"), "does not exist"),
+            (format!("ocs.active_document.solids.union({z}, {})", unliftable.value()), "cannot be lifted losslessly"),
+            (format!("ocs.active_document.solids.union({z}, {}, layer='')", far.value()), "layer name is empty"),
+            (format!("ocs.solid_boolean({z}, {}, 'xor', None, False)", far.value()), "unknown operation"),
+            (format!("ocs.active_document.solids.intersect({z}, {})", far.value()), "changed"),
+        ] {
+            dispatch(&mut host, &format!("PY_EVAL {command}"));
+            assert!(last(&host).contains(message), "{command}: {}", last(&host));
+        }
+        assert_eq!((host.document().entities().count(), host.app.tabs[0].history.undo_stack.len()), counts,
+            "refusals change nothing and record no undo step");
+
+        // W: both formats reopen the drilled result losslessly; it moves again.
+        let expected_volume = volume_in(host.document(), drilled);
+        let expected_extent = extent_in(host.document(), drilled);
+        let dwg = crate::io::load_bytes("boolean.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("boolean.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            assert!(close(volume_in(document, drilled), expected_volume), "{format} volume");
+            let reopened = extent_in(document, drilled);
+            for axis in 0..3 {
+                assert!(close(reopened.0[axis], expected_extent.0[axis]) && close(reopened.1[axis], expected_extent.1[axis]), "{format} extent");
+            }
+            let Some(EntityType::Solid3D(back)) = document.get_entity(drilled) else { unreachable!() };
+            let again = host.add_entity(EntityType::Solid3D(back.clone()));
+            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
+            assert!(close(extent_in(host.document(), again).0[0], reopened.0[0] + 100.0), "{format} re-edit");
+        }
+
+        // D and U: delete, then undo restores it, and undoing the consuming
+        // boolean brings both operands back exactly.
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", drilled.value()));
+        assert!(host.document().get_entity(drilled).is_none());
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(drilled).is_some(), "undo restores the deleted result");
+        // Two re-edits, the far box, the drilling subtract and the hole box, then the consuming subtract.
+        app.undo_steps(2 + 1 + 1 + 1 + 1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(a), Some(&before_consume.0), "undo restores operand A exactly");
+        assert_eq!(app.tabs[0].scene.document.get_entity(b), Some(&before_consume.1), "undo restores operand B exactly");
+        assert!(app.tabs[0].scene.document.get_entity(cut).is_none(), "undo removes the boolean result");
+    }
+
+    /// Release-only evidence for docs/cadkernel-body-path.md: the kernel's
+    /// refusals reach the script as messages. Curved booleans take about
+    /// 23 s in a debug build, so this is ignored by default.
+    #[test]
+    #[ignore = "curved boolean; slow in debug builds"]
+    fn audit_python_boolean_kernel_refusal_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let script = std::env::temp_dir().join(format!("ocs_boolean_refusal_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "s = ocs.active_document.solids\n",
+            "box = s.box(center=(0, 0, 0), size=(10, 6, 4))\n",
+            "sphere = s.sphere(center=(0, 0, 0), radius=3)\n",
+            "s.subtract(box, sphere)\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let message = host.app.command_line.history.last().unwrap().text.clone();
+        assert!(message.contains("Coincident") && message.contains("nothing was changed"), "{message}");
     }
 
     #[test]
