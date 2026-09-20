@@ -31,7 +31,8 @@
     "PolyfaceMesh",
     "Mesh",
     "Helix",
-    "RasterImage"
+    "RasterImage",
+    "Wipeout"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -348,6 +349,14 @@
         "file_path": { "required": true },
         "class_version": { "read_only": true },
         "size": { "read_only": true, "_comment": "Pixel size of the image; the host takes it from the file." },
+        "definition_handle": { "read_only": true },
+        "definition_reactor_handle": { "read_only": true }
+      }
+    },
+    "Wipeout": {
+      "fields": {
+        "insertion_point": { "required": true },
+        "class_version": { "read_only": true },
         "definition_handle": { "read_only": true },
         "definition_reactor_handle": { "read_only": true }
       }

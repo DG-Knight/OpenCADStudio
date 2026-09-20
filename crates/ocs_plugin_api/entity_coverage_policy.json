@@ -401,6 +401,21 @@
       "fade",
       "clip_boundary",
       "file_path"
+    ],
+    "Wipeout": [
+      "layer",
+      "insertion_point",
+      "u_vector",
+      "v_vector",
+      "size",
+      "flags",
+      "clipping_enabled",
+      "brightness",
+      "contrast",
+      "fade",
+      "clip_mode",
+      "clip_type",
+      "clip_boundary_vertices"
     ]
   },
   "readable": {
@@ -467,6 +482,11 @@
       "definition_handle",
       "definition_reactor_handle",
       "size"
+    ],
+    "Wipeout": [
+      "class_version",
+      "definition_handle",
+      "definition_reactor_handle"
     ]
   },
   "aliases": {

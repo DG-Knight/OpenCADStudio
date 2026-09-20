@@ -3494,6 +3494,45 @@ mod tests {
     }
 
     #[test]
+    fn staged_python_wipeout_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('Wipeout', insertion_point=P(0.0, 0.0, 0.0),\n",
+                "    u_vector=P(10.0, 0.0, 0.0), v_vector=P(0.0, 6.0, 0.0))\n"),
+            edit: concat!(
+                "w = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit wipeout'):\n",
+                "    w.clip_type = 'Polygonal'\n",
+                "    w.clip_boundary_vertices = [{'x': -0.5, 'y': -0.5}, {'x': 0.5, 'y': -0.5}, {'x': 0.0, 'y': 0.5}]\n",
+                "    w.insertion_point = (2.0, 3.0, 0.0)\n",
+                "    w.clip_mode = 'Inside'\n",
+                "doc.selection = [w]\n"),
+            rejects: &[
+                ("'clip_boundary_vertices':[{'x':0.0,'y':0.0}]", "at least 3"),
+                ("'clip_type':'Rectangular'", "exactly 2"),
+                ("'u_vector':{'x':0.0,'y':0.0,'z':0.0}", "not parallel"),
+                ("'brightness':200", "within 0..=100"),
+                ("'size':{'x':0.0,'y':1.0}", "greater than zero"),
+                ("'insertion_point':{'x':float('nan'),'y':0.0,'z':0.0}", "finite"),
+                ("'definition_handle':5", "read-only"),
+                ("'clip_type':'Circle'", "unsupported"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::Wipeout(_)),
+            digest: |entity| match entity {
+                EntityType::Wipeout(w) => format!("{:?} {:?} n{} at{:.1},{:.1} u{:.1} v{:.1}", w.clip_type, w.clip_mode,
+                    w.clip_boundary_vertices.len(), w.insertion_point.x, w.insertion_point.y, w.u_vector.x, w.v_vector.y),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::Wipeout(w) = entity { w.u_vector.x = 12.0; },
+            expect_created: "Rectangular Outside n2 at0.0,0.0 u10.0 v6.0",
+            expect_edited: "Polygonal Inside n3 at2.0,3.0 u10.0 v6.0",
+            expect_reedited: "Polygonal Inside n3 at2.0,3.0 u12.0 v6.0",
+            expect_edited_dxf: "",
+            expect_reedited_dxf: "",
+        });
+    }
+
+    #[test]
     fn staged_python_point_pick_and_cancel_over_real_ipc() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
             return;

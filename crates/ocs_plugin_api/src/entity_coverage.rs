@@ -829,6 +829,51 @@ fn validate_raster_image(
     Ok(())
 }
 
+/// Wipeout: a masking region placed like an image; the clip boundary (in
+/// normalized image coordinates) defines the masked area.
+#[cfg(feature = "host")]
+fn validate_wipeout(
+    old: Option<&crate::host::acadrust::entities::Wipeout>,
+    new: &crate::host::acadrust::entities::Wipeout,
+) -> Result<(), String> {
+    use crate::host::acadrust::entities::WipeoutClipType;
+    if old == Some(new) {
+        return Ok(());
+    }
+    finite_vector("Wipeout.insertion_point", &new.insertion_point)?;
+    finite_vector("Wipeout.u_vector", &new.u_vector)?;
+    finite_vector("Wipeout.v_vector", &new.v_vector)?;
+    let cross = new.u_vector.cross(&new.v_vector);
+    if cross.x.hypot(cross.y).hypot(cross.z) <= 1.0e-12 {
+        return Err("Wipeout.u_vector and v_vector must be nonzero and not parallel".into());
+    }
+    if !new.size.x.is_finite() || !new.size.y.is_finite() || new.size.x <= 0.0 || new.size.y <= 0.0 {
+        return Err("Wipeout.size must be finite and greater than zero".into());
+    }
+    if new.brightness > 100 || new.contrast > 100 || new.fade > 100 {
+        return Err("Wipeout brightness, contrast and fade must be within 0..=100".into());
+    }
+    if new.flags.bits() & !0x0f != 0 {
+        return Err("Wipeout.flags has unknown bits".into());
+    }
+    for (index, vertex) in new.clip_boundary_vertices.iter().enumerate() {
+        if !vertex.x.is_finite() || !vertex.y.is_finite() {
+            return Err(format!("Wipeout.clip_boundary_vertices[{index}] must be finite"));
+        }
+    }
+    let count = new.clip_boundary_vertices.len();
+    match new.clip_type {
+        WipeoutClipType::Rectangular if count != 2 => {
+            return Err("a rectangular Wipeout needs exactly 2 clip boundary vertices".into());
+        }
+        WipeoutClipType::Polygonal if count < 3 => {
+            return Err("a polygonal Wipeout needs at least 3 clip boundary vertices".into());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -930,6 +975,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::Mesh(value) => validate_mesh(None, value)?,
         EntityType::Helix(value) => validate_helix(None, value)?,
         EntityType::RasterImage(value) => validate_raster_image(None, value)?,
+        EntityType::Wipeout(value) => validate_wipeout(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1292,6 +1338,7 @@ pub fn validate_entity_mutation(
         (EntityType::Mesh(old), EntityType::Mesh(new)) => validate_mesh(Some(old), new)?,
         (EntityType::Helix(old), EntityType::Helix(new)) => validate_helix(Some(old), new)?,
         (EntityType::RasterImage(old), EntityType::RasterImage(new)) => validate_raster_image(Some(old), new)?,
+        (EntityType::Wipeout(old), EntityType::Wipeout(new)) => validate_wipeout(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1981,6 +2028,7 @@ mod tests {
                         | "Mesh"
                         | "Helix"
                         | "RasterImage"
+                        | "Wipeout"
                 )
             {
                 assert!(
@@ -2254,6 +2302,18 @@ mod tests {
                 "RasterImage.fade".to_owned(),
                 "RasterImage.clip_boundary".to_owned(),
                 "RasterImage.file_path".to_owned(),
+                "Wipeout.insertion_point".to_owned(),
+                "Wipeout.u_vector".to_owned(),
+                "Wipeout.v_vector".to_owned(),
+                "Wipeout.size".to_owned(),
+                "Wipeout.flags".to_owned(),
+                "Wipeout.clipping_enabled".to_owned(),
+                "Wipeout.brightness".to_owned(),
+                "Wipeout.contrast".to_owned(),
+                "Wipeout.fade".to_owned(),
+                "Wipeout.clip_mode".to_owned(),
+                "Wipeout.clip_type".to_owned(),
+                "Wipeout.clip_boundary_vertices".to_owned(),
             ])
         );
     }
