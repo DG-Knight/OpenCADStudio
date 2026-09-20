@@ -621,22 +621,10 @@ impl<'a> HostSession<'a> {
                 Ok(handle)
             }
             SolidOperation::RegionFromProfile { source, layer, delete_source } => {
-                if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
-                    return Err("layer name is empty".into());
-                }
-                let entity = self
-                    .document()
-                    .get_entity(source)
-                    .cloned()
-                    .ok_or_else(|| format!("entity {source:?} does not exist"))?;
+                let (entity, plane, loops, closed, layer) = self.profile_source(source, layer, delete_source)?;
                 if matches!(entity, EntityType::Region(_)) {
                     return Err("the source is already a region".into());
                 }
-                if delete_source && self.app.tabs[self.tab].scene.is_layer_locked(source) {
-                    return Err(format!("entity {source:?} is on a locked layer"));
-                }
-                let (plane, loops, closed) = crate::scene::model::presspull_model::profile_geometry(&entity)
-                    .ok_or("the source is not a planar profile a region can be made from")?;
                 if !closed {
                     return Err("the profile must be closed".into());
                 }
@@ -649,17 +637,60 @@ impl<'a> HostSession<'a> {
                     acadrust::types::Vector3::new(plane.origin[0], plane.origin[1], plane.origin[2]);
                 region.wires = model::edge_wires(&body);
                 region.set_sat_document(&sat);
-                region.common.layer = layer.unwrap_or_else(|| entity.common().layer.clone());
-                self.push_undo("Create region");
-                let handle = self.add_entity(EntityType::Region(region));
-                if handle.is_null() {
-                    return Err("the region could not be added".into());
+                region.common.layer = layer;
+                self.commit_profile_result(EntityType::Region(region), source, delete_source, "Create region")
+            }
+            SolidOperation::SurfaceFromProfile { source, layer, delete_source } => {
+                let (entity, plane, loops, closed, layer) = self.profile_source(source, layer, delete_source)?;
+                if matches!(entity, EntityType::Region(_)) {
+                    return Err("the source is already a region".into());
                 }
-                if delete_source {
-                    self.app.tabs[self.tab].scene.erase_entities(&[source]);
-                    self.publish_document_view();
+                if !closed {
+                    return Err("the profile must be closed".into());
                 }
-                Ok(handle)
+                let body = cadkernel::brep::planar_region(plane, &loops)
+                    .ok_or("the geometry kernel could not build a surface from this profile")?;
+                let sat = crate::scene::convert::acis_export::solid_to_sat(&body)
+                    .ok_or("the surface could not be exported losslessly")?;
+                let mut surface = acadrust::entities::Surface::new(acadrust::entities::SurfaceKind::Plane);
+                surface.point_of_reference =
+                    acadrust::types::Vector3::new(plane.origin[0], plane.origin[1], plane.origin[2]);
+                surface.wires = model::edge_wires(&body);
+                surface.acis_data = acadrust::entities::AcisData::from_sat(&sat.to_sat_string());
+                surface.common.layer = layer;
+                self.commit_profile_result(EntityType::Surface(surface), source, delete_source, "Create surface")
+            }
+            SolidOperation::Extrude { source, direction, layer, delete_source } => {
+                if direction.iter().any(|v| !v.is_finite()) {
+                    return Err("extrusion direction must be finite".into());
+                }
+                if direction.iter().map(|v| v * v).sum::<f64>().sqrt() <= 1e-9 {
+                    return Err("extrusion direction must be nonzero".into());
+                }
+                let (entity, _plane, _loops, closed, layer) = self.profile_source(source, layer, delete_source)?;
+                if matches!(entity, EntityType::Region(_)) {
+                    return Err("extrude a curve profile; a region cannot be extruded here".into());
+                }
+                let body = crate::scene::model::presspull_model::extrusion_body(&entity, direction)
+                    .ok_or("the geometry kernel could not extrude this profile in that direction")?;
+                let sat = crate::scene::convert::acis_export::solid_to_sat(&body)
+                    .ok_or("the extrusion could not be exported losslessly")?;
+                let result = if closed {
+                    let mut solid = acadrust::entities::Solid3D::new();
+                    solid.wires = model::edge_wires(&body);
+                    solid.set_sat_document(&sat);
+                    solid.common.layer = layer;
+                    EntityType::Solid3D(solid)
+                } else {
+                    // An open profile sweeps to a surface. The generic kind
+                    // carries only the payload, as OCS does after a boolean.
+                    let mut surface = acadrust::entities::Surface::new(acadrust::entities::SurfaceKind::Generic);
+                    surface.wires = model::edge_wires(&body);
+                    surface.acis_data = acadrust::entities::AcisData::from_sat(&sat.to_sat_string());
+                    surface.common.layer = layer;
+                    EntityType::Surface(surface)
+                };
+                self.commit_profile_result(result, source, delete_source, "Extrude profile")
             }
             SolidOperation::Transform { handle, matrix } => {
                 if matrix.iter().any(|v| !v.is_finite()) {
@@ -705,7 +736,25 @@ impl<'a> HostSession<'a> {
                     EntityType::Solid3D(value) => retarget!(value),
                     EntityType::Body(value) => retarget!(value),
                     EntityType::Region(value) => retarget!(value),
-                    _ => return Err("transform applies to Solid3D, Body and Region entities".into()),
+                    EntityType::Surface(value) => {
+                        let body = crate::scene::convert::solid3d_tess::kernel_acis_body(&value.acis_data)
+                            .ok_or("this surface's payload cannot be lifted losslessly, so it is left untouched")?;
+                        let moved = model::by_matrix(&body, matrix)
+                            .ok_or("the geometry kernel refused this transform")?;
+                        let sat = crate::scene::convert::acis_export::solid_to_sat(&moved)
+                            .ok_or("the moved surface could not be exported losslessly")?;
+                        value.wires = model::edge_wires(&moved);
+                        value.silhouettes.clear();
+                        value.history_handle = None;
+                        value.acis_data = acadrust::entities::AcisData::from_sat(&sat.to_sat_string());
+                        // A moved plane is still a plane; a swept surface no longer
+                        // matches its stored sweep parameters, so it becomes generic.
+                        if value.kind != acadrust::entities::SurfaceKind::Plane {
+                            value.kind = acadrust::entities::SurfaceKind::Generic;
+                            value.surface_data = acadrust::entities::SurfaceData::Generic;
+                        }
+                    }
+                    _ => return Err("transform applies to Solid3D, Body, Region and Surface entities".into()),
                 }
                 self.push_undo("Transform solid");
                 if !self.update_entity(entity) {
@@ -714,6 +763,56 @@ impl<'a> HostSession<'a> {
                 Ok(handle)
             }
         }
+    }
+
+    /// Look up a profile entity and its exact planar loops for the kernel.
+    /// Returns the entity, its plane, loops and closed flag, and the layer the
+    /// result should use (`layer`, or the profile's own).
+    #[allow(clippy::type_complexity)]
+    fn profile_source(
+        &self,
+        source: Handle,
+        layer: Option<String>,
+        delete_source: bool,
+    ) -> Result<(EntityType, cadkernel::space::Plane, Vec<Vec<cadkernel::geom2d::Curve>>, bool, String), String> {
+        if layer.as_ref().is_some_and(|name| name.trim().is_empty()) {
+            return Err("layer name is empty".into());
+        }
+        let entity = self
+            .document()
+            .get_entity(source)
+            .cloned()
+            .ok_or_else(|| format!("entity {source:?} does not exist"))?;
+        if delete_source && self.app.tabs[self.tab].scene.is_layer_locked(source) {
+            return Err(format!("entity {source:?} is on a locked layer"));
+        }
+        if matches!(entity, EntityType::Solid3D(_) | EntityType::Body(_) | EntityType::Surface(_)) {
+            return Err("the source must be a curve profile, not an existing solid or surface".into());
+        }
+        let (plane, loops, closed) = crate::scene::model::presspull_model::profile_geometry(&entity)
+            .ok_or("the source is not a planar profile")?;
+        let layer = layer.unwrap_or_else(|| entity.common().layer.clone());
+        Ok((entity, plane, loops, closed, layer))
+    }
+
+    /// Record one undo step, add `result` and optionally erase the profile.
+    fn commit_profile_result(
+        &mut self,
+        result: EntityType,
+        source: Handle,
+        delete_source: bool,
+        label: &str,
+    ) -> Result<Handle, String> {
+        self.push_undo(label);
+        let handle = self.add_entity(result);
+        if handle.is_null() {
+            return Err("the result could not be added".into());
+        }
+        if delete_source {
+            self.app.tabs[self.tab].scene.erase_entities(&[source]);
+            self.publish_document_view();
+        }
+        Ok(handle)
     }
 
     pub fn push_undo(&mut self, label: &str) {
@@ -5069,6 +5168,163 @@ mod tests {
         // Two re-edits of reopened copies, then the move of the first region.
         app.undo_steps(3);
         assert_eq!(app.tabs[0].scene.document.get_entity(list[0]), Some(&before), "undoing the move restores the region exactly");
+    }
+
+    #[test]
+    fn audit_python_surface_lifecycle_over_real_ipc() {
+        use crate::scene::convert::solid3d_tess::kernel_acis_body;
+        use crate::scene::model::solid_model as sm;
+        use acadrust::entities::SurfaceKind;
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dispatch = |host: &mut HostSession<'_>, command: &str| {
+            assert!(process.dispatch(host, command, &mut |_| {}).expect("Python dispatch"));
+        };
+        let last = |host: &HostSession<'_>| host.app.command_line.history.last().unwrap().text.clone();
+        let sorted = |mut list: Vec<Handle>| { list.sort_by_key(|h| h.value()); list };
+        let surfaces_in = |document: &CadDocument| sorted(document.entities().filter_map(|e| match e {
+            EntityType::Surface(s) => Some(s.common.handle), _ => None }).collect());
+        let solids_in = |document: &CadDocument| sorted(document.entities().filter_map(|e| match e {
+            EntityType::Solid3D(s) => Some(s.common.handle), _ => None }).collect());
+        let body_of = |document: &CadDocument, handle: Handle| match document.get_entity(handle) {
+            Some(EntityType::Surface(s)) => kernel_acis_body(&s.acis_data).expect("surface payload lifts losslessly"),
+            Some(EntityType::Solid3D(s)) => kernel_acis_body(&s.acis_data).expect("solid payload lifts losslessly"),
+            other => panic!("no surface or solid {handle:?}: {other:?}"),
+        };
+        let extent_in = |document: &CadDocument, handle: Handle| sm::extent(&body_of(document, handle)).unwrap();
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        let kind_in = |document: &CadDocument, handle: Handle| match document.get_entity(handle) {
+            Some(EntityType::Surface(s)) => s.kind, other => panic!("no surface {handle:?}: {other:?}") };
+
+        // C: plane surfaces and extrusions from real profile entities.
+        let script = std::env::temp_dir().join(format!("ocs_surface_create_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "doc = ocs.active_document\n",
+            "s = doc.solids\n",
+            "circle = doc.create_entity('Circle', center=(0, 0, 0), radius=3)\n",
+            "rect = doc.create_entity('LwPolyline', is_closed=True, vertices=[{'location': {'x': 20.0, 'y': 0.0}}, {'location': {'x': 30.0, 'y': 0.0}}, {'location': {'x': 30.0, 'y': 6.0}}, {'location': {'x': 20.0, 'y': 6.0}}])\n",
+            "open_path = doc.create_entity('LwPolyline', vertices=[{'location': {'x': 50.0, 'y': 0.0}}, {'location': {'x': 54.0, 'y': 0.0}}, {'location': {'x': 54.0, 'y': 4.0}}])\n",
+            "temp = doc.create_entity('Circle', center=(70, 0, 0), radius=2)\n",
+            "s.surface(circle)\n",
+            "s.surface(rect, layer='SURFACES')\n",
+            "s.extrude(rect, (0, 0, 4))\n",
+            "s.extrude(circle, (0, 0, 5))\n",
+            "s.extrude(open_path, (0, 0, 3))\n",
+            "s.extrude(temp, (0, 0, 2), delete_source=True)\n",
+        )).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let surfaces = surfaces_in(host.document());
+        let solids = solids_in(host.document());
+        assert_eq!((surfaces.len(), solids.len()), (3, 3), "{}", last(&host));
+        // surfaces[0] plane of the circle, [1] plane of the rectangle, [2] extruded open path.
+        assert_eq!((kind_in(host.document(), surfaces[0]), kind_in(host.document(), surfaces[1]), kind_in(host.document(), surfaces[2])),
+            (SurfaceKind::Plane, SurfaceKind::Plane, SurfaceKind::Generic));
+        let (low, high) = extent_in(host.document(), surfaces[0]);
+        assert!(close(low[0], -3.0) && close(high[1], 3.0) && close(low[2], 0.0) && close(high[2], 0.0), "{low:?} {high:?}");
+        let (low, high) = extent_in(host.document(), surfaces[2]);
+        assert!(close(low[0], 50.0) && close(high[0], 54.0) && close(low[2], 0.0) && close(high[2], 3.0), "open path extrusion {low:?} {high:?}");
+        assert_eq!(host.document().get_entity(surfaces[1]).unwrap().common().layer, "SURFACES");
+        let pi = std::f64::consts::PI;
+        for (index, expected, tolerance) in [(0, 240.0, 1e-9), (1, pi * 9.0 * 5.0, 0.02), (2, pi * 4.0 * 2.0, 0.02)] {
+            let volume = sm::volume(&body_of(host.document(), solids[index]));
+            assert!((volume - expected).abs() <= tolerance * expected, "solid {index}: {volume} vs {expected}");
+        }
+        assert_eq!(host.document().entities().filter(|e| matches!(e, EntityType::Circle(_))).count(), 1,
+            "delete_source removed only the extruded temporary circle");
+        assert!(!host.app.tabs[0].scene.wire_models_for(&[surfaces[0]]).is_empty(), "no canvas geometry");
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.entities[{}].kind", surfaces[0].value()));
+        assert!(last(&host).contains("Surface"));
+
+        // V: refusals change nothing and leave no undo step.
+        let ray = host.add_entity(EntityType::Ray(acadrust::entities::Ray::default()));
+        let circle = host.document().entities().find_map(|e| match e { EntityType::Circle(c) => Some(c.common.handle), _ => None }).unwrap();
+        let counts = (host.document().entities().count(), host.app.tabs[0].history.undo_stack.len());
+        for (command, message) in [
+            (format!("ocs.active_document.solids.extrude({}, (0, 0, 0))", circle.value()), "nonzero"),
+            (format!("ocs.active_document.solids.extrude({}, (float('nan'), 0, 1))", circle.value()), "must be finite"),
+            (format!("ocs.active_document.solids.extrude({}, (0, 0, 1))", ray.value()), "planar profile"),
+            (format!("ocs.active_document.solids.extrude({}, (0, 0, 1))", solids[0].value()), "curve profile"),
+            (format!("ocs.active_document.solids.surface({})", surfaces[0].value()), "curve profile"),
+            (format!("ocs.active_document.solids.surface({})", ray.value()), "planar profile"),
+            (format!("ocs.active_document.solids.surface({}, layer='')", circle.value()), "layer name is empty"),
+            ("ocs.active_document.solids.surface(999999)".to_string(), "does not exist"),
+            ("ocs.solid_extrude(1, [1.0], None, False)".to_string(), "3 numbers"),
+        ] {
+            dispatch(&mut host, &format!("PY_EVAL {command}"));
+            assert!(last(&host).contains(message), "{command}: {}", last(&host));
+        }
+        assert_eq!((host.document().entities().count(), host.app.tabs[0].history.undo_stack.len()), counts,
+            "refusals change nothing and record no undo step");
+
+        // E: isoline density is scriptable and validated; kind and payload are not.
+        let plane = surfaces[0];
+        let plane_before = host.document().get_entity(plane).unwrap().clone();
+        let script = std::env::temp_dir().join(format!("ocs_surface_edit_{}.py", std::process::id()));
+        std::fs::write(&script, format!(concat!(
+            "doc = ocs.active_document\n",
+            "e = doc.entities[{}]\n",
+            "with doc.transaction('Edit surface'):\n",
+            "    e.u_isolines = 8\n",
+            "    e.v_isolines = 6\n",
+        ), plane.value())).unwrap();
+        dispatch(&mut host, &format!("PY_RUN {}", script.display()));
+        let _ = std::fs::remove_file(&script);
+        let Some(EntityType::Surface(edited)) = host.document().get_entity(plane) else { unreachable!() };
+        assert_eq!((edited.u_isolines, edited.v_isolines, edited.kind), (8, 6, SurfaceKind::Plane), "{}", last(&host));
+        let edited_state = host.document().get_entity(plane).unwrap().clone();
+        for (patch, message) in [("'u_isolines':500", "between 0 and 200"), ("'surface_kind':'Extruded'", "read-only"),
+            ("'surface_data':{}", "outside the editable schema"), ("'v_isolines':-1", "between 0 and 200")] {
+            dispatch(&mut host, &format!("PY_EVAL ocs.update_many('Reject surface', [{{'handle':{}, {patch}}}])", plane.value()));
+            assert_eq!(host.document().get_entity(plane), Some(&edited_state), "{patch}");
+            assert!(last(&host).contains(message), "{patch}: {}", last(&host));
+        }
+        // Moves keep a plane a plane and turn a swept surface generic.
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (10, 5, 0)).handle", plane.value()));
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (0, 0, 7)).handle", surfaces[2].value()));
+        assert_eq!(kind_in(host.document(), plane), SurfaceKind::Plane);
+        let (low, high) = extent_in(host.document(), plane);
+        assert!(close(low[0], 7.0) && close(high[0], 13.0) && close(low[1], 2.0) && close(high[1], 8.0), "{low:?} {high:?}");
+        let (low, _) = extent_in(host.document(), surfaces[2]);
+        assert!(close(low[2], 7.0), "{low:?}");
+
+        // W: both formats reopen surfaces that lift with the same extents, keep
+        // the isolines, and a reopened surface moves again.
+        let dwg = crate::io::load_bytes("surface.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("surface.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        let moved = extent_in(host.document(), plane);
+        for (format, document) in [("DWG", &dwg), ("DXF", &dxf)] {
+            assert_eq!((surfaces_in(document).len(), solids_in(document).len()), (3, 3), "{format}");
+            let reopened = extent_in(document, plane);
+            for axis in 0..3 {
+                assert!(close(reopened.0[axis], moved.0[axis]) && close(reopened.1[axis], moved.1[axis]), "{format} extent");
+            }
+            let Some(EntityType::Surface(back)) = document.get_entity(plane) else { unreachable!() };
+            assert_eq!((back.u_isolines, back.v_isolines), (8, 6), "{format} isolines");
+            assert_eq!(back.kind, SurfaceKind::Plane, "{format} keeps the plane kind");
+            let again = host.add_entity(EntityType::Surface(back.clone()));
+            dispatch(&mut host, &format!("PY_EVAL ocs.active_document.solids.translate({}, (100, 0, 0)).handle", again.value()));
+            assert!(close(extent_in(host.document(), again).0[0], reopened.0[0] + 100.0), "{format} re-edit");
+        }
+
+        // D and U.
+        dispatch(&mut host, &format!("PY_EVAL ocs.active_document.delete_entity({})", surfaces[1].value()));
+        assert!(host.document().get_entity(surfaces[1]).is_none());
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(1);
+        assert!(app.tabs[0].scene.document.get_entity(surfaces[1]).is_some(), "undo restores the deleted surface");
+        // Two re-edits of reopened copies, two moves, and the isoline edit come before.
+        app.undo_steps(2 + 2 + 1);
+        assert_eq!(app.tabs[0].scene.document.get_entity(plane), Some(&plane_before), "undoing the edits restores the surface exactly");
     }
 
     #[test]

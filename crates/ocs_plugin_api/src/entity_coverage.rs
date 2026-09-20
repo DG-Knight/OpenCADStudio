@@ -1245,6 +1245,24 @@ fn validate_ole_frame(
     Ok(())
 }
 
+/// Surface: only the display isoline density is scriptable; the geometry lives
+/// in the ACIS payload that the geometry kernel owns.
+#[cfg(feature = "host")]
+fn validate_surface(
+    old: Option<&crate::host::acadrust::entities::Surface>,
+    new: &crate::host::acadrust::entities::Surface,
+) -> Result<(), String> {
+    if old.is_some_and(|old| old.u_isolines == new.u_isolines && old.v_isolines == new.v_isolines) {
+        return Ok(());
+    }
+    for (name, value) in [("u_isolines", new.u_isolines), ("v_isolines", new.v_isolines)] {
+        if !(0..=200).contains(&value) {
+            return Err(format!("Surface.{name} must be between 0 and 200"));
+        }
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -1371,6 +1389,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
             }
         }
         EntityType::Ole2Frame(value) => validate_ole_frame(None, value)?,
+        EntityType::Surface(value) => validate_surface(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1745,6 +1764,7 @@ pub fn validate_entity_mutation(
                 return Err("Ole2Frame embedded storage cannot change".into());
             }
         }
+        (EntityType::Surface(old), EntityType::Surface(new)) => validate_surface(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -2487,6 +2507,20 @@ mod tests {
     }
 
     #[test]
+    fn exposed_property_names_are_unique_per_kind() {
+        // A field named like a base key (`kind`, `handle`, `layer`, ...) would
+        // overwrite it in every Python dict; such fields must be renamed.
+        let catalog: EntityCoverageCatalog =
+            serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
+        for entry in &catalog.entity_kinds {
+            let mut seen = std::collections::HashSet::new();
+            for property in entry.properties.iter().filter(|p| p.model_access != ModelAccess::Unmapped) {
+                assert!(seen.insert(property.name.clone()), "{}: duplicate exposed name {}", entry.kind, property.name);
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_kinds_have_no_editable_properties() {
         let catalog: EntityCoverageCatalog =
             serde_json::from_str(get_embedded_entity_coverage_json()).unwrap();
@@ -2535,6 +2569,7 @@ mod tests {
                         | "Solid3D"
                         | "Body"
                         | "Region"
+                        | "Surface"
                 )
             {
                 assert!(
@@ -2824,6 +2859,8 @@ mod tests {
                 "Ole2Frame.lower_right_corner".to_owned(),
                 "Ole2Frame.lock_aspect".to_owned(),
                 "Ole2Frame.is_paper_space".to_owned(),
+                "Surface.u_isolines".to_owned(),
+                "Surface.v_isolines".to_owned(),
                 "Underlay.underlay_type".to_owned(),
                 "Underlay.definition_handle".to_owned(),
                 "Underlay.insertion_point".to_owned(),

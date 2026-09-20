@@ -502,6 +502,11 @@
     ],
     "Region": [
       "layer"
+    ],
+    "Surface": [
+      "layer",
+      "u_isolines",
+      "v_isolines"
     ]
   },
   "readable": {
@@ -627,6 +632,12 @@
       "uid",
       "point_of_reference",
       "history_handle"
+    ],
+    "Surface": [
+      "surface_kind",
+      "modeler_format_version",
+      "point_of_reference",
+      "history_handle"
     ]
   },
   "aliases": {
@@ -643,6 +654,9 @@
     "MText": {
       "text": "value",
       "insertion": "insertion_point"
+    },
+    "Surface": {
+      "surface_kind": "kind"
     }
   },
   "synthetic": {

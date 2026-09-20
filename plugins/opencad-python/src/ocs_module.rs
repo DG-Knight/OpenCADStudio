@@ -475,6 +475,50 @@ mod ocs {
             .map_err(|error| vm.new_runtime_error(format!("ocs.solid_region: {error}")))
     }
 
+    /// Build a plane surface from a closed planar profile entity.
+    #[pyfunction]
+    fn solid_surface(source: u64, layer: Option<String>, delete_source: bool, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::SolidOperation;
+        let result = host_ctx::with_host(|host| {
+            host.solid_operation(SolidOperation::SurfaceFromProfile {
+                source: Handle::new(source),
+                layer,
+                delete_source,
+            })
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.solid_surface: {error}")))
+    }
+
+    /// Extrude a planar profile: a solid if closed, a surface if open.
+    #[pyfunction]
+    fn solid_extrude(
+        source: u64,
+        direction: Vec<f64>,
+        layer: Option<String>,
+        delete_source: bool,
+        vm: &VirtualMachine,
+    ) -> PyResult<u64> {
+        use ocs_plugin_api::host::SolidOperation;
+        let direction: [f64; 3] = direction.try_into().map_err(|_| {
+            vm.new_value_error("ocs.solid_extrude: the direction needs 3 numbers".to_owned())
+        })?;
+        let result = host_ctx::with_host(|host| {
+            host.solid_operation(SolidOperation::Extrude {
+                source: Handle::new(source),
+                direction,
+                layer,
+                delete_source,
+            })
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.solid_extrude: {error}")))
+    }
+
     /// Apply a column-major 4x4 rigid transform to a solid, body or region.
     #[pyfunction]
     fn solid_transform(handle: u64, matrix: Vec<f64>, vm: &VirtualMachine) -> PyResult<u64> {
@@ -4905,7 +4949,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(emitted.len(), 41);
+        assert_eq!(emitted.len(), 42);
     }
 
     #[cfg(feature = "experimental-host-model")]

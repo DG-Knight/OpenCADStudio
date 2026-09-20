@@ -146,6 +146,18 @@ class _Solids:
         handle = profile.handle if isinstance(profile, _Entity) else int(profile)
         return self._document.entities[ocs.solid_region(handle, layer, bool(delete_source))]
 
+    def surface(self, profile, layer=None, delete_source=False):
+        """Make a plane surface from one closed planar profile."""
+        handle = profile.handle if isinstance(profile, _Entity) else int(profile)
+        return self._document.entities[ocs.solid_surface(handle, layer, bool(delete_source))]
+
+    def extrude(self, profile, direction, layer=None, delete_source=False):
+        """Extrude a planar profile along `direction`: a Solid3D when the
+        profile is closed, a Surface when it is open."""
+        handle = profile.handle if isinstance(profile, _Entity) else int(profile)
+        vector = [float(v) for v in direction]
+        return self._document.entities[ocs.solid_extrude(handle, vector, layer, bool(delete_source))]
+
     def transform(self, entity, matrix):
         """Apply a column-major 4x4 rigid transform (16 numbers) in place."""
         handle = entity.handle if isinstance(entity, _Entity) else int(entity)

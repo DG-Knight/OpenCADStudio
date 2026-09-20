@@ -90,6 +90,11 @@ pub enum SolidOperation {
     /// `layer`, or on the source's layer when `None`; `delete_source` erases
     /// the profile afterwards, as the REGION command does.
     RegionFromProfile { source: Handle, layer: Option<String>, delete_source: bool },
+    /// Build a plane surface from one closed planar profile entity.
+    SurfaceFromProfile { source: Handle, layer: Option<String>, delete_source: bool },
+    /// Extrude a planar profile along `direction`: a solid when the profile is
+    /// closed, a surface when it is open.
+    Extrude { source: Handle, direction: [f64; 3], layer: Option<String>, delete_source: bool },
 }
 
 /// Value of a host-managed drafting or document setting exposed to plugins.

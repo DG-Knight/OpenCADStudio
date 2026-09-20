@@ -793,6 +793,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                     | ("Helix", _)
                     | ("RasterImage", _)
                     | ("Wipeout", _)
+                    | ("Surface", "u_isolines" | "v_isolines")
                     | ("Ole2Frame", _)
                     | ("Underlay", _)
                     | ("Viewport", _)
