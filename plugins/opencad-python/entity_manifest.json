@@ -32,7 +32,8 @@
     "Mesh",
     "Helix",
     "RasterImage",
-    "Wipeout"
+    "Wipeout",
+    "Underlay"
   ],
   "manual_kinds": ["Dimension"],
   "base_fields": ["handle", "layer", "owner_handle"],
@@ -359,6 +360,12 @@
         "class_version": { "read_only": true },
         "definition_handle": { "read_only": true },
         "definition_reactor_handle": { "read_only": true }
+      }
+    },
+    "Underlay": {
+      "fields": {
+        "definition_handle": { "required": true },
+        "insertion_point": { "required": true }
       }
     }
   }

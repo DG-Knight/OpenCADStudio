@@ -3194,7 +3194,16 @@ mod tests {
         };
 
         let tmp = std::env::temp_dir().to_string_lossy().into_owned();
-        run_script(&mut host, "create", &case.create.replace("TMPDIR", &tmp));
+        let mut create_script = case.create.replace("TMPDIR", &tmp);
+        if create_script.contains("DEFHANDLE") {
+            // Scripts reference an underlay definition that the drawing owns.
+            let handle = host.document_mut().allocate_handle();
+            let mut definition = acadrust::objects::UnderlayDefinition::pdf("plan.pdf", "1");
+            definition.handle = handle;
+            host.document_mut().objects.insert(handle, acadrust::objects::ObjectType::UnderlayDefinition(definition));
+            create_script = create_script.replace("DEFHANDLE", &handle.value().to_string());
+        }
+        run_script(&mut host, "create", &create_script);
         let handle = host.document().entities().find(|entity| (case.is_kind)(entity))
             .map(|entity| entity.common().handle)
             .unwrap_or_else(|| panic!("Python did not create the mesh: {}", last_output(&host)));
@@ -3529,6 +3538,51 @@ mod tests {
             expect_reedited: "Polygonal Inside n3 at2.0,3.0 u12.0 v6.0",
             expect_edited_dxf: "",
             expect_reedited_dxf: "",
+        });
+    }
+
+    #[test]
+    fn staged_python_underlay_lifecycle_over_real_ipc() {
+        run_mesh_lifecycle(&MeshCase {
+            create: concat!(
+                "doc.create_entity('Underlay', underlay_type='Pdf', definition_handle=DEFHANDLE,\n",
+                "    insertion_point=P(5.0, 5.0, 0.0), x_scale=2.0, y_scale=2.0)\n"),
+            edit: concat!(
+                "u = doc.entities[HANDLE]\n",
+                "with doc.transaction('Edit underlay'):\n",
+                "    u.insertion_point = (8.0, 9.0, 0.0)\n",
+                "    u.x_scale = 3.0\n",
+                "    u.y_scale = 3.0\n",
+                "    u.rotation = 0.5\n",
+                "    u.contrast = 70\n",
+                "    u.fade = 20\n",
+                "    u.clip_boundary_vertices = [{'x': 0.0, 'y': 0.0}, {'x': 4.0, 'y': 3.0}]\n",
+                "doc.selection = [u]\n"),
+            rejects: &[
+                ("'definition_handle':999999", "does not exist"),
+                ("'underlay_type':'Dwf'", "does not match its definition"),
+                ("'x_scale':0.0", "nonzero"),
+                ("'rotation':float('nan')", "finite"),
+                ("'contrast':101", "within 0..=100"),
+                ("'normal':{'x':0.0,'y':0.0,'z':0.0}", "nonzero"),
+                ("'clip_boundary_vertices':[{'x':1.0,'y':1.0}]", "at least 2"),
+                ("'flags':64", "unknown or out-of-range bits"),
+            ],
+            is_kind: |entity| matches!(entity, EntityType::Underlay(_)),
+            digest: |entity| match entity {
+                EntityType::Underlay(u) => format!("{:?} at{:.1},{:.1} s{:.1} r{:.1} c{} f{} clip{}", u.underlay_type,
+                    u.insertion_point.x, u.insertion_point.y, u.x_scale, u.rotation, u.contrast, u.fade,
+                    u.clip_boundary_vertices.len()),
+                _ => "wrong kind".into(),
+            },
+            reedit: |entity| if let EntityType::Underlay(u) = entity { u.x_scale = 4.0; },
+            expect_created: "Pdf at5.0,5.0 s2.0 r0.0 c100 f0 clip0",
+            expect_edited: "Pdf at8.0,9.0 s3.0 r0.5 c70 f20 clip2",
+            expect_reedited: "Pdf at8.0,9.0 s4.0 r0.5 c70 f20 clip2",
+            // BLOCKER: DXF stores the rotation in degrees and the reader returns
+            // it unconverted, so 0.5 rad reopens as 28.6 and a second save-reopen compounds it to 1641.4.
+            expect_edited_dxf: "Pdf at8.0,9.0 s3.0 r28.6 c70 f20 clip2",
+            expect_reedited_dxf: "Pdf at8.0,9.0 s4.0 r1641.4 c70 f20 clip2",
         });
     }
 

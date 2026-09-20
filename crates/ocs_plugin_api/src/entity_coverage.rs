@@ -874,6 +874,51 @@ fn validate_wipeout(
     Ok(())
 }
 
+/// Underlay placement and display. The file and page live on the referenced
+/// `UnderlayDefinition`, which a script names by handle at creation.
+#[cfg(feature = "host")]
+fn validate_underlay(
+    old: Option<&crate::host::acadrust::entities::Underlay>,
+    new: &crate::host::acadrust::entities::Underlay,
+) -> Result<(), String> {
+    if old == Some(new) {
+        return Ok(());
+    }
+    if let Some(old) = old {
+        if old.definition_handle != new.definition_handle {
+            return Err("Underlay.definition_handle is fixed at creation".into());
+        }
+        if old.underlay_type != new.underlay_type {
+            return Err("Underlay.underlay_type is fixed at creation".into());
+        }
+    }
+    finite_vector("Underlay.insertion_point", &new.insertion_point)?;
+    solid_normal("Underlay.normal", &new.normal)?;
+    for (name, value) in [("x_scale", new.x_scale), ("y_scale", new.y_scale), ("z_scale", new.z_scale)] {
+        if !value.is_finite() || value == 0.0 {
+            return Err(format!("Underlay.{name} must be finite and nonzero"));
+        }
+    }
+    if !new.rotation.is_finite() {
+        return Err("Underlay.rotation must be finite".into());
+    }
+    if new.contrast > 100 || new.fade > 100 {
+        return Err("Underlay contrast and fade must be within 0..=100".into());
+    }
+    if new.flags.bits() & !0x0f != 0 {
+        return Err("Underlay.flags has unknown bits".into());
+    }
+    for (index, vertex) in new.clip_boundary_vertices.iter().enumerate() {
+        if !vertex.x.is_finite() || !vertex.y.is_finite() {
+            return Err(format!("Underlay.clip_boundary_vertices[{index}] must be finite"));
+        }
+    }
+    if !new.clip_boundary_vertices.is_empty() && new.clip_boundary_vertices.len() < 2 {
+        return Err("Underlay clip boundary needs at least 2 vertices".into());
+    }
+    Ok(())
+}
+
 /// Validate newly created geometry for the kinds whose mapped fields have
 /// host checks. Called by the Python add path before an entity enters the document.
 #[cfg(feature = "host")]
@@ -976,6 +1021,7 @@ pub fn validate_new_canvas_entity(entity: &crate::host::EntityType) -> Result<()
         EntityType::Helix(value) => validate_helix(None, value)?,
         EntityType::RasterImage(value) => validate_raster_image(None, value)?,
         EntityType::Wipeout(value) => validate_wipeout(None, value)?,
+        EntityType::Underlay(value) => validate_underlay(None, value)?,
         EntityType::AttributeDefinition(value) => {
             finite_vector(
                 "AttributeDefinition.insertion_point",
@@ -1339,6 +1385,7 @@ pub fn validate_entity_mutation(
         (EntityType::Helix(old), EntityType::Helix(new)) => validate_helix(Some(old), new)?,
         (EntityType::RasterImage(old), EntityType::RasterImage(new)) => validate_raster_image(Some(old), new)?,
         (EntityType::Wipeout(old), EntityType::Wipeout(new)) => validate_wipeout(Some(old), new)?,
+        (EntityType::Underlay(old), EntityType::Underlay(new)) => validate_underlay(Some(old), new)?,
         (EntityType::MLine(old), EntityType::MLine(new)) => validate_mline(Some(old), new)?,
         (EntityType::Leader(old), EntityType::Leader(new)) => validate_leader(Some(old), new)?,
         (EntityType::AttributeDefinition(old), EntityType::AttributeDefinition(new)) => {
@@ -1600,6 +1647,24 @@ pub fn validate_canvas_entity_references(
         }
         if style.font_file.trim().is_empty() {
             return Err(format!("Shape text style {:?} has no SHX file", style.name));
+        }
+    }
+    if let EntityType::Underlay(value) = entity {
+        match document.objects.get(&value.definition_handle) {
+            Some(crate::host::acadrust::objects::ObjectType::UnderlayDefinition(definition)) => {
+                if definition.underlay_type != value.underlay_type {
+                    return Err(format!(
+                        "Underlay type {:?} does not match its definition ({:?})",
+                        value.underlay_type, definition.underlay_type
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Underlay definition {:?} does not exist",
+                    value.definition_handle
+                ));
+            }
         }
     }
     if let EntityType::RasterImage(value) = entity {
@@ -2029,6 +2094,7 @@ mod tests {
                         | "Helix"
                         | "RasterImage"
                         | "Wipeout"
+                        | "Underlay"
                 )
             {
                 assert!(
@@ -2314,6 +2380,19 @@ mod tests {
                 "Wipeout.clip_mode".to_owned(),
                 "Wipeout.clip_type".to_owned(),
                 "Wipeout.clip_boundary_vertices".to_owned(),
+                "Underlay.underlay_type".to_owned(),
+                "Underlay.definition_handle".to_owned(),
+                "Underlay.insertion_point".to_owned(),
+                "Underlay.x_scale".to_owned(),
+                "Underlay.y_scale".to_owned(),
+                "Underlay.z_scale".to_owned(),
+                "Underlay.rotation".to_owned(),
+                "Underlay.normal".to_owned(),
+                "Underlay.flags".to_owned(),
+                "Underlay.contrast".to_owned(),
+                "Underlay.fade".to_owned(),
+                "Underlay.clip_boundary_vertices".to_owned(),
+                "Underlay.clip_inverted".to_owned(),
             ])
         );
     }

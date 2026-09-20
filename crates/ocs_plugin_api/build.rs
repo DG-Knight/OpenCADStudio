@@ -793,6 +793,7 @@ fn generate_entity_coverage(out_dir: &Path, registry: &TypeRegistry) {
                     | ("Helix", _)
                     | ("RasterImage", _)
                     | ("Wipeout", _)
+                    | ("Underlay", _)
                     | (
                         "MLine",
                         "flags"

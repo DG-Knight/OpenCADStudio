@@ -416,6 +416,22 @@
       "clip_mode",
       "clip_type",
       "clip_boundary_vertices"
+    ],
+    "Underlay": [
+      "layer",
+      "underlay_type",
+      "definition_handle",
+      "insertion_point",
+      "x_scale",
+      "y_scale",
+      "z_scale",
+      "rotation",
+      "normal",
+      "flags",
+      "contrast",
+      "fade",
+      "clip_boundary_vertices",
+      "clip_inverted"
     ]
   },
   "readable": {

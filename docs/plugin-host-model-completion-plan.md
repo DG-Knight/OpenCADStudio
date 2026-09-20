@@ -7,13 +7,13 @@ Build a general Python document model over the OCS host API for all **43 canvas 
 As of 20 September 2026, the working branch is `plugin/host-model-api` at
 `a8dd3640` plus the Leader increment, published as draft PR
 [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391). Host API is
-v7. The Python feature has explicit writes for **33 of 43** canvas kinds: 32
-are creatable and `Insert` remains update-only. This is **not** 33 completed
+v7. The Python feature has explicit writes for **34 of 43** canvas kinds: 33
+are creatable and `Insert` remains update-only. This is **not** 34 completed
 kinds: Tolerance, Shape, AttributeEntity, Hatch, MLine, Dimension, MultiLeader, Table, PolygonMesh, PolyfaceMesh, Mesh and Wipeout pass every completion gate.
 AttributeDefinition passes its host and real IPC lifecycle but remains short of
 `Complete` because the previously pinned CAD codec dropped optional ATTDEF
 fields during DXF reads; revalidate that blocker against the current
-`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). Leader and Helix are mapped and integration-tested but blocked at W by acadrust persistence gaps (see the ledger). RasterImage is mapped and integration-tested, held short of `Complete` by unverifiable image-dictionary linkage. The other 10 canvas kinds have only `layer`
+`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). Leader, Helix and Underlay are mapped and integration-tested but blocked at W by acadrust persistence gaps (see the ledger). RasterImage is mapped and integration-tested, held short of `Complete` by unverifiable image-dictionary linkage. The other 9 canvas kinds have only `layer`
 writes through the document model. All 43 have raw typed snapshots. There are
 three internal records and two opaque fallbacks outside the 43 canvas kinds.
 
@@ -123,7 +123,7 @@ The last five may require new engine capabilities rather than only Python conver
 
 ## Handoff start point
 
-Continue with **Underlay** (queue item 12). Leader is done except for its W
+Continue with **Viewport** (queue item 13). Leader is done except for its W
 gate; when the engine writes DXF group 340, reads group 213 and the DWG
 R2010+ text-size question is decided, flip the canary assertions in
 `staged_python_leader_lifecycle_over_real_ipc` and mark it `Complete`.
@@ -166,3 +166,4 @@ exact queue above and update statuses with evidence after each increment.
 - Mapped `Helix` with a host-rebuilt spline. `run_mesh_lifecycle` gained per-format DXF expectations so an engine gap is pinned by a canary instead of hidden. All gates pass except W for `handedness` in DXF (reader ignores boolean group 290). The queue now continues with `RasterImage`.
 - Mapped `RasterImage`. The host reads the image file, creates and links the `ImageDefinition`, and derives `size` and the default clip boundary. The shared lifecycle driver passes every gate in OCS with a real PNG; `ACAD_IMAGE_DICT`/reactor creation is not implemented, so the kind stays integration-tested. The queue now continues with `Wipeout`.
 - Completed `Wipeout` (queue item 11) with rectangular and polygonal clip masks through the shared lifecycle driver; scripted creation matches OCS's native command. The queue now continues with `Underlay`.
+- Mapped `Underlay` against a fixture PDF `UnderlayDefinition`. All gates pass except DXF W: the reader does not convert the degree-valued rotation back to radians, and repeated DXF round trips compound the error (pinned by a canary). The queue now continues with `Viewport`.
