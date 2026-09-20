@@ -13,7 +13,7 @@ kinds: Tolerance, Shape, AttributeEntity, Hatch, MLine, Dimension, MultiLeader, 
 AttributeDefinition passes its host and real IPC lifecycle but remains short of
 `Complete` because the previously pinned CAD codec dropped optional ATTDEF
 fields during DXF reads; revalidate that blocker against the current
-`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). Leader, Helix, Underlay, ViewBorder and Light are mapped and integration-tested but blocked at W by acadrust persistence gaps, and RasterImage and Viewport are held short of `Complete` by unverifiable or missing oracles (see the ledger). RasterImage is mapped and integration-tested, held short of `Complete` by unverifiable image-dictionary linkage. The other 6 canvas kinds have only `layer` (SectionSymbol is recorded as blocked)
+`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). Leader, Helix, Underlay, ViewBorder and Light are mapped and integration-tested but blocked at W by acadrust persistence gaps, and RasterImage and Viewport are held short of `Complete` by unverifiable or missing oracles (see the ledger). RasterImage is mapped and integration-tested, held short of `Complete` by unverifiable image-dictionary linkage. The other 6 canvas kinds (SectionSymbol, Region, Body, Solid3D, Surface, Ole2Frame) have only `layer` and are recorded as blocked
 writes through the document model. All 43 have raw typed snapshots. There are
 three internal records and two opaque fallbacks outside the 43 canvas kinds.
 
@@ -123,7 +123,7 @@ The last five may require new engine capabilities rather than only Python conver
 
 ## Handoff start point
 
-Continue with **Region** (queue item 17). SectionSymbol (item 15) is blocked; see the ledger. Leader is done except for its W
+The 21-kind queue is finished: items 1-14 and 16 are mapped and gated, and items 15 (SectionSymbol) and 17-21 (Region, Body, Solid3D, Surface, Ole2Frame) are recorded as **blocked** with concrete engine or fixture dependencies in the ledger. Leader is done except for its W
 gate; when the engine writes DXF group 340, reads group 213 and the DWG
 R2010+ text-size question is decided, flip the canary assertions in
 `staged_python_leader_lifecycle_over_real_ipc` and mark it `Complete`.
@@ -170,3 +170,4 @@ exact queue above and update statuses with evidence after each increment.
 - Mapped `Viewport` with a paper-space owner rule and frozen-layer reference validation. Every gate except a paper-space canvas oracle passes through the shared driver; the kind stays integration-tested. The queue now continues with `ViewBorder`.
 - Mapped `ViewBorder` with viewport and scale reference rules. All gates pass in DWG; DXF loading does not restore the typed entity (pinned by a canary). The queue now continues with `SectionSymbol`.
 - Recorded `SectionSymbol` (queue item 15) as **blocked**: it needs a section view style and view representation the host cannot create, and its raw point-count fields have no documented derivation. Mapped `Light` (item 16); every gate passes except DXF `cast_shadows`, which the reader drops (pinned by a canary). The queue now continues with `Region`.
+- Recorded `Region`, `Body`, `Solid3D`, `Surface` (queue items 17-20) and `Ole2Frame` (item 21) as **blocked**. The ACIS kinds need a host-side kernel-backed create/transform API that regenerates the payload, wires and silhouettes; the OLE frame needs a valid embedded-storage fixture. No opaque payload is rewritten. With this the ordered queue is complete: 12 kinds are fully complete, Leader, Helix, Underlay, ViewBorder and Light are mapped but blocked at DWG/DXF persistence by acadrust gaps, RasterImage and Viewport lack an oracle or linkage, and six kinds are blocked. Next work is the engine fixes behind the canary assertions, the mapped-kind audit of the 17 pre-existing kinds, and merging `origin/main`.
