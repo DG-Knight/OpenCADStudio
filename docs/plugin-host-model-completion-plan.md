@@ -4,31 +4,51 @@
 
 Build a general Python document model over the OCS host API for all **43 canvas kinds**. A kind is **complete** only after the per-kind gate below passes. Merely appearing in a converter or allowing a `layer` edit is partial coverage. Keep a property-level record of read/write, read-only, snapshot-only, and unsupported fields in the [43-kind coverage ledger](plugin-host-model-coverage-ledger.md). Do not resume the separate Lisp-to-Python conversion work.
 
-As of 19 September 2026, the current Hatch increment is OCS commit `98b56ef6` on `plugin/host-model-api` and PandoraBox commit `a9b5de8` on `main`. Host API is v7. The Python feature has explicit writes for **22 of 43** canvas kinds: 21 are creatable and `Insert` remains update-only. This is **not** 22 completed kinds: Tolerance, Shape, AttributeEntity and Hatch pass every completion gate. AttributeDefinition passes its host and real IPC lifecycle but remains short of `Complete` because the pinned acadrust DXF reader drops optional ATTDEF fields. The other 21 canvas kinds have only `layer` writes through the document model. All 43 have raw typed snapshots. There are three internal records and two opaque fallbacks outside the 43 canvas kinds.
+As of 20 September 2026, the working branch is `plugin/host-model-api` at
+`8648225a`, published as draft PR
+[#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391). Host API is
+v7. The Python feature has explicit writes for **22 of 43** canvas kinds: 21
+are creatable and `Insert` remains update-only. This is **not** 22 completed
+kinds: Tolerance, Shape, AttributeEntity and Hatch pass every completion gate.
+AttributeDefinition passes its host and real IPC lifecycle but remains short of
+`Complete` because the previously pinned CAD codec dropped optional ATTDEF
+fields during DXF reads; revalidate that blocker against the current
+`acadrust` revision `7ea4247`. The other 21 canvas kinds have only `layer`
+writes through the document model. All 43 have raw typed snapshots. There are
+three internal records and two opaque fallbacks outside the 43 canvas kinds.
 
 Repositories:
 
 - OCS host: `/Users/felix/Documents/MacApps/OpenCADStudio`
-- Python adapter: `/Users/felix/Documents/MacApps/opencad-python/plugins/opencad-python`
+- Bundled Python adapter: `/Users/felix/Documents/MacApps/OpenCADStudio/plugins/opencad-python`
 - Host coverage policy: `crates/ocs_plugin_api/entity_coverage_policy.json`
 - Host coverage/validation: `crates/ocs_plugin_api/src/entity_coverage.rs` and `build.rs`
-- Adapter mapping: `entity_manifest.json`, `build/generate.rs`, `src/ocs_module.rs`, `src/document_model.py`
+- Adapter mapping: `plugins/opencad-python/entity_manifest.json`,
+  `plugins/opencad-python/build/generate.rs`,
+  `plugins/opencad-python/src/ocs_module.rs`, and
+  `plugins/opencad-python/src/document_model.py`
 - Host design notes: `docs/plugin-host-model.md`
 
-Preserve unrelated untracked files in both repositories. Push OCS changes only to the `felixriestra/OpenCADStudio` fork, not H7 upstream; do not open a PR without asking. The prior user approved pushing work to the existing OCS and PandoraBox repositories, but verify remote branch tips before each push.
+Preserve unrelated untracked files. Host and adapter changes now live in the
+same OCS repository and commit. Push the feature branch only to the
+`felixriestra/OpenCADStudio` fork; PR #1391 updates automatically. Never push a
+feature commit directly to H7's `main`. Verify both upstream `main` and the fork
+branch before each push.
 
 ## First: complete the originally agreed Phase 8
 
 The earlier Phase 8 was **integration and compatibility**, not a new entity kind. `Insert` was added afterward as a separate coverage increment. Before marking any kind complete, establish an executable integration harness that exercises the actual plugin runner and IPC, not only direct Rust conversion helpers:
 
-1. Stage the development v7 plugin with `bash plugins/opencad-python/tools/stage-host-model.sh <OCS checkout> <stage directory> [--debug]`. Verify the staged `plugin.toml` says API v7 and its acadrust source matches OCS. Keep checked-in PandoraBox `plugin.toml` and `Cargo.lock` on H7 API v5; keep `Cargo.toml` free of machine-local paths.
+1. Stage the in-tree v7 plugin with `bash plugins/opencad-python/tools/stage-bundled.sh <stage directory> [--debug]`. Verify the staged `plugin.toml` says API v7 and its acadrust source and Rust compiler match OCS. Keep the repository-relative `ocs_plugin_api` path; never check in a machine-local path.
 2. Through real IPC, create, inspect, edit, and delete a representative entity. Verify an invalid multi-entity transaction changes nothing, a valid transaction produces one undo entry, and undo **and redo** restore the expected geometry and references.
 3. In the running GUI, exercise a real point pick, entity pick, cancellation/Escape, and plugin command cancellation. Verify drawing/selection/command notifications, including overflow recovery.
 4. Repeat an input request and event poll across two tabs; verify token and notification isolation and cleanup when a tab closes.
 5. Save and reopen representative edits as **DWG and DXF**, verifying the actual geometry and preserved unmapped fields. Use a real viewport/canvas check where the entity has visible geometry; a converter round trip alone does not satisfy this.
 6. Record platform, OCS/acadrust revisions, fixture files, commands, results, and any engine limitation. Keep repeatable tests in the relevant repositories.
 
-Phase 8 is complete only when these checks pass without weakening the portable v5 build. If a test is blocked by OCS or acadrust behavior, record the specific failure and leave Phase 8 open.
+Phase 8 is complete only when these checks pass through the bundled plugin and
+real runner boundary. If a test is blocked by OCS or acadrust behavior, record
+the specific failure and leave Phase 8 open.
 
 ## Per-kind completion gate
 
@@ -40,7 +60,10 @@ Use one checklist row per kind in a coverage ledger. Status values: `unstarted`,
 4. **Delete and history:** Delete the created entity through the Python interface. Prove create, edit, and delete have defined undo/redo behavior in the host, including grouped writes and failure rollback. Record any transaction API extension and bump the host API version if its ABI changes; keep older plugin compatibility.
 5. **Real IPC and canvas:** Run the above through the staged plugin and actual OCS IPC. Verify visibility/geometry in the canvas and selection or picking in the GUI. For nonvisual entities, verify their observable document or layout behavior and explain the oracle.
 6. **Persistence:** Save/reopen DWG **and** DXF fixtures. Compare kind, geometry, important metadata, handles/references, and preserved fields after reopen; edit again after reopen. Test at least one valid edge case for that kind. Do not count a JSON or in-memory round trip as file persistence.
-7. **Portable build:** Run feature tests with a command-line Cargo patch to the OCS fork, restore PandoraBox `Cargo.lock`, then run `cargo check --locked` against the checked-in H7 v5 dependency. Never check in a local Cargo path or v7 portable manifest.
+7. **Packaged build:** Run the in-tree adapter tests with `--locked`, stage the
+   plugin with `stage-bundled.sh`, and load it from the macOS application
+   resources through the separate runner process. The staged manifest must
+   match the host's Rust compiler and acadrust source.
 
 If OCS/acadrust cannot create or serialize a kind reliably, mark it **blocked**, add a regression test or fixture demonstrating the failure, and move to the next independent kind. An explicit unsupported status is honest progress, not completion.
 
@@ -88,18 +111,35 @@ The last five may require new engine capabilities rather than only Python conver
 1. Inspect the acadrust entity struct, constructors, private fields, serializer, drawing path, and linked tables/objects. Record the intended editable/read-only/unmapped properties first.
 2. Put generic validation and transaction behavior in the OCS fork. Keep the Python adapter thin; add a manifest override only when the generator cannot safely express a field.
 3. Add focused host validation, adapter conversion, document-model, real transaction/undo/redo, IPC, GUI, and DWG/DXF fixture checks. Record test evidence in the ledger, including which checks were manual.
-4. Run `cargo test -p ocs_plugin_api --features host --lib` and relevant app host tests in OCS. For the adapter, use `cargo test --features experimental-host-model --config 'patch."https://github.com/HakanSeven12/OpenCADStudio".ocs_plugin_api.path="/Users/felix/Documents/MacApps/OpenCADStudio/crates/ocs_plugin_api"' --lib`, run its Python tests, restore `Cargo.lock`, then run `cargo check --locked`.
-5. Check both `git diff --check` and repository status. Stage only task files, preserve unrelated untracked files, commit coherent host/adapter changes, and push only to the two established `felixriestra` remotes if still authorized. Record the resulting commits and next unfinished gate in the ledger.
+4. Run `cargo test -p ocs_plugin_api --features host --lib` and the relevant
+   app host tests. Run
+   `cargo test --locked --features experimental-host-model --manifest-path plugins/opencad-python/Cargo.toml`
+   plus
+   `python3 -m unittest discover -s plugins/opencad-python/tests -v`.
+5. Check `git diff --check` and repository status. Stage only task files,
+   preserve unrelated untracked files, commit host and adapter changes
+   together, push `plugin/host-model-api` to the Felix fork, and record the
+   resulting commit and next unfinished gate in the ledger.
 
 ## Handoff start point
 
-Continue with **Leader**. Build a valid vertex path and annotation-linked fixture, map geometry separately from annotation/object handles, and verify path rendering, selection, reference preservation, deletion, undo/redo and both file formats through real IPC. AttributeDefinition remains mapped and integration-tested but open at W: pinned acadrust `568a12c` loses optional ATTDEF fields such as width factor on DXF read. Do not mark it complete until that dependency is fixed and the full property state passes DXF save/reopen. Keep the exact queue above and update statuses with evidence after each increment.
+Continue with **Leader**. Build a valid vertex path and annotation-linked
+fixture, map geometry separately from annotation/object handles, and verify
+path rendering, selection, reference preservation, deletion, undo/redo and
+both file formats through real IPC. AttributeDefinition remains mapped and
+integration-tested but open at W. First rerun its DXF regression against
+current acadrust `7ea4247`; do not mark it complete until the full optional
+property state passes DXF save/reopen. Keep the exact queue above and update
+statuses with evidence after each increment.
 
 ## Phase 8 progress log
 
 - Added a V4 local-socket nested-request test for `UpdateEntitiesTransaction` using a simulated runner peer and a recording host. This proves the request and response cross the V4 IPC framing and reach `HostApi`; it does **not** prove the actual Python plugin runs through IPC.
 - Extended the OCS app-host Point batch test to assert redo after undo. This proves the real app history path for those edits; creation/deletion history remains untested by this case.
-- Staged the actual debug Python cdylib with `stage-host-model.sh`. Its generated manifest declares API v7 and the OCS acadrust source; the checked-in PandoraBox manifest and lockfile remain on H7 v5, and `cargo check --locked` passes.
+- Staged the actual debug Python cdylib with `stage-bundled.sh`. Its generated
+  manifest declares API v7 and the exact OCS acadrust and Rust compiler
+  fingerprints. The plugin now builds from `plugins/opencad-python` in this
+  repository and ships from the macOS application resources.
 - The opt-in `staged_python_plugin_line_lifecycle_over_real_ipc` app test passed with the staged v7 Python plugin and built OCS executable. It creates, edits, and deletes a Line through Python over the actual runner IPC; confirms three undo entries and undo/redo; and writes/reopens the edited Line as DWG and DXF. It does not exercise GUI picking, multiple tabs, or cancellation. Re-run with `OCS_TEST_PYTHON_PLUGIN=<staged dylib> OCS_PLUGIN_RUNNER_EXE=<built OpenCADStudio executable> cargo test app::plugin_host::tests::staged_python_plugin_line_lifecycle_over_real_ipc --lib -- --test-threads=1 --nocapture` from the OCS checkout.
 - The same Line test now also sends a duplicate-handle batch through Python and confirms the host rejects it without changing geometry or creating an undo entry.
 - The opt-in `staged_python_point_pick_and_cancel_over_real_ipc` test passes with the same runner. It requests point and entity picks through Python, drives the app's active-command point/object-pick callbacks, polls the returned tokens through a later Python run, and verifies Enter cancellation. The callbacks are invoked by the test harness, not by a physical GUI pointer event; live GUI verification remains open.
@@ -111,8 +151,8 @@ Continue with **Leader**. Build a valid vertex path and annotation-linked fixtur
 - `staged_python_shape_lifecycle_over_real_ipc` passes C/R/E/D/U/I/W/V/P through the actual runner, checks the real SHX linework before and after DWG/DXF reopen, and proves that invalid size/style edits remain atomic. The DXF renderer fallback now searches named `is_shape_file` styles as well as legacy unnamed styles. Shape is **Complete**; the queue now continues with `AttributeDefinition`.
 - Added creation-time `owner_handle` to the generated document-model adapter. It is present in snapshots and accepted by `doc.create_entity`, but rejected after creation; host transactions independently reject owner changes. Generic host validation now requires a non-null canvas owner to resolve to a block record, except `AttributeEntity`, whose owner may be an `Insert`.
 - Mapped stable AttributeDefinition fields and validated tag, placement, normal, height, width, angles, text style, line count and block ownership. `embedded_mtext` stays snapshot-readable but unmapped so partial Python edits preserve its linked R2018+ layout payload.
-- `staged_python_attribute_definition_lifecycle_over_real_ipc` passes the real create/read/edit/delete/undo/selection/render/validation/portable-build path using a structurally valid block and linked Insert. Full DWG state and core DXF geometry survive reopen; deletion stays absent after both formats. OCS also stopped double-converting ATTDEF/ATTRIB DXF rotation already converted by acadrust.
-- AttributeDefinition remains **Integration-tested / DXF blocked**, not Complete: acadrust `568a12c`'s ATTDEF DXF reader does not restore optional AcDbText fields including width factor. The real test and ledger record that exact W-gate gap. The queue now continues with `AttributeEntity`.
+- `staged_python_attribute_definition_lifecycle_over_real_ipc` passes the real create/read/edit/delete/undo/selection/render/validation/packaged-build path using a structurally valid block and linked Insert. Full DWG state and core DXF geometry survive reopen; deletion stays absent after both formats. OCS also stopped double-converting ATTDEF/ATTRIB DXF rotation already converted by acadrust.
+- AttributeDefinition remains **Integration-tested / DXF blocked**, not Complete: acadrust `568a12c`'s ATTDEF DXF reader did not restore optional AcDbText fields including width factor. Revalidate this recorded failure against the currently merged `7ea4247` revision before keeping or clearing the W-gate blocker.
 - Closed `AttributeEntity` without flattening canonical drawing storage. V4 views and IPC snapshots expose each nested child by handle, while host create/update/delete and transactions rewrite the owning Insert so rendering, serialization and undo remain consistent.
 - `staged_python_attribute_entity_lifecycle_over_real_ipc` passes C/R/E/D/U/I/W/V/P with the actual v7 adapter. It creates a linked attribute from its block's ATTDEF, reads and edits value/placement/rotation, selects the parent Insert, renders text, rejects invalid tag/height/owner edits atomically, reopens edited and deleted state in DWG and DXF, and proves three-step undo/redo. AttributeEntity is **Complete**; the queue now continues with `Hatch`.
 - Completed `Hatch` with full solid/pattern definitions and typed nested boundary paths. The adapter generator now handles single-payload tagged enums as `{kind, value}` dictionaries, which covers every Hatch edge variant and is reusable by later nested entity models. Unknown adapter properties are rejected instead of being silently ignored.

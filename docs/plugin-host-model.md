@@ -35,7 +35,7 @@ attached attribute and sequence records. Those fields report `transaction_geomet
 catalog. All 43 canvas kinds also support nonempty `layer` changes through
 the same undoable transaction; internal and opaque variants remain read-only
 through the document model. The adapter accepts only `layer` patches for
-canvas kinds outside its 17 geometry converters. Other writable properties
+canvas kinds outside its 22 geometry converters. Other writable properties
 still report `type_conversion_only`; broader CAD range and cross-property
 checks remain outstanding.
 The host's `entity_snapshot` helper serializes any typed entity as a detached
@@ -46,20 +46,23 @@ write path for them. The Python adapter exposes its variant payload through
 It is an inspection view: JSON converts non-finite floating-point values to
 null and cannot be used as a lossless replacement entity.
 
-The separate PandoraBox adapter currently maps these entity kinds to Python
-dictionaries: Point, Line, Circle, Arc, Ellipse, Polyline, Polyline2D,
-Polyline3D, LwPolyline, Spline, Text, MText, Ray, XLine, Solid, Face3D, and
-Insert. Insert is update-only: the block name is readable but cannot be
-changed, and Python creation is withheld until block-table references can be
-established safely. Attached attributes remain available in the raw snapshot.
-The authoritative per-field mapping
-is `plugins/opencad-python/entity_manifest.json` in PandoraBox. The generated
+The bundled first-party adapter under `plugins/opencad-python` currently maps
+these entity kinds to Python dictionaries: Point, Line, Circle, Arc, Ellipse,
+Polyline, Polyline2D, Polyline3D, LwPolyline, Spline, Text, MText, Ray, XLine,
+Solid, Face3D, Insert, Tolerance, Shape, AttributeDefinition,
+AttributeEntity, and Hatch. Insert is update-only: the block name is readable
+but cannot be changed, and Python creation is withheld until block-table
+references can be established safely. Attached attributes remain available in
+the raw snapshot. The authoritative per-field mapping is
+`plugins/opencad-python/entity_manifest.json`. The generated
 mapping excludes fields it cannot represent, including common color, line
 weight, transparency, Polyline3D smooth type, and MText background color.
 Absent geometry fields are not editable through the Python document model.
 A feature test compares the generated Python keys with the
 host catalog. The adapter's `experimental-host-model` feature requires API
-v7; its portable default remains pinned to H7's v5 contract.
+v7 and builds against the repository-relative `ocs_plugin_api`. RustPython is
+loaded inside the separate plugin runner process; OCS does not link the Python
+runtime into the editor executable.
 
 API v7 also exposes a synchronous, ordered selection query and an atomic
 selection replacement scoped to the session tab. All handles must exist before
@@ -74,7 +77,7 @@ noninteractive command that starts and finishes within one message does not
 produce an active-state transition.
 
 The host's existing `InteractiveCommand` machinery collects either a point or
-an entity pick. PandoraBox's v7 adapter now exposes a token-based request and
+an entity pick. The bundled v7 adapter exposes a token-based request and
 poll API because `PY_RUN` uses a fresh Python interpreter per invocation; a
 script cannot suspend in place while the user clicks. Enter and command
 cancellation report a cancelled result. The host releases the runner's pick
@@ -88,7 +91,7 @@ Input tokens are bound to the drawing tab that requested the pick. Polling a
 token from another tab returns no result and does not consume it.
 
 Python `doc.entities[handle]` returns a descriptor for every entity. For kinds
-outside the 17-kind generated schema it contains only handle, kind, and layer;
+outside the 22-kind generated schema it contains only handle, kind, and layer;
 `layer` is editable on canvas kinds. `doc.coverage()` enumerates the
 catalog; `doc.coverage("Line")` and `line.coverage` return one entry. For
 covered kinds, the coverage object lists actual readable and editable
