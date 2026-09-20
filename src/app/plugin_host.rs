@@ -269,24 +269,14 @@ impl<'a> HostSession<'a> {
             return None;
         }
 
-        let resolved_lt = if let Some(ref lt_name) = config.linetype {
-            let matched = doc
-                .line_types
-                .iter()
-                .find(|lt| lt.name.eq_ignore_ascii_case(lt_name))
-                .map(|lt| lt.name.clone());
-            if let Some(m) = matched {
-                m
-            } else {
-                crate::io::linetypes::populate_document(doc);
-                doc.line_types
-                    .iter()
-                    .find(|lt| lt.name.eq_ignore_ascii_case(lt_name))
-                    .map(|lt| lt.name.clone())
-                    .unwrap_or_else(|| lt_name.clone())
-            }
-        } else {
-            "Continuous".to_string()
+        let resolved_lt = match config.linetype {
+            // A name the drawing does not carry would leave the LAYER record
+            // pointing at no LTYPE, so it is refused rather than written.
+            Some(ref lt_name) => match resolve_linetype(doc, lt_name) {
+                Some(name) => name,
+                None => return None,
+            },
+            None => "Continuous".to_string(),
         };
 
         let mut layer = acadrust::tables::Layer::new(trimmed);
@@ -325,27 +315,12 @@ impl<'a> HostSession<'a> {
             return false;
         }
 
-        let resolved_lt = if let Some(ref lt_name) = config.linetype {
-            let doc = self.document_mut();
-            let matched = doc
-                .line_types
-                .iter()
-                .find(|lt| lt.name.eq_ignore_ascii_case(lt_name))
-                .map(|lt| lt.name.clone());
-            if let Some(m) = matched {
-                Some(m)
-            } else {
-                crate::io::linetypes::populate_document(doc);
-                Some(
-                    doc.line_types
-                        .iter()
-                        .find(|lt| lt.name.eq_ignore_ascii_case(lt_name))
-                        .map(|lt| lt.name.clone())
-                        .unwrap_or_else(|| lt_name.clone()),
-                )
-            }
-        } else {
-            None
+        let resolved_lt = match config.linetype {
+            Some(ref lt_name) => match resolve_linetype(self.document_mut(), lt_name) {
+                Some(name) => Some(name),
+                None => return false,
+            },
+            None => None,
         };
 
         let doc = self.document_mut();
@@ -395,6 +370,17 @@ impl<'a> HostSession<'a> {
         self.publish_document_view();
         true
     }
+}
+
+/// The stored spelling of `name` in the drawing's linetype table, loading the
+/// standard linetypes first when it is not there yet. `None` when the drawing
+/// cannot supply it: a layer must not reference a linetype that does not exist.
+fn resolve_linetype(doc: &mut acadrust::CadDocument, name: &str) -> Option<String> {
+    let stored = |doc: &acadrust::CadDocument| doc.line_types.get(name).map(|lt| lt.name.clone());
+    stored(doc).or_else(|| {
+        crate::io::linetypes::populate_document(doc);
+        stored(doc)
+    })
 }
 
 /// The stable contract a plugin's `dispatch` sees. Each method forwards to the
