@@ -21,10 +21,10 @@ refuses without changing anything when it cannot honour a request. The Python ad
 thin translation layer. The design and its guarantees are in
 [plugin-host-model.md](plugin-host-model.md).
 
-**Size.** 74 files, +30,697 / −178, against the merge base. About 15,000 added lines are the
+**Size.** 75 files, +30,833 / −178, against current `main`. About 15,000 added lines are the
 new plugin crate (including a 3,000-line lockfile and a generator), 5,600 are the API crate
 (3,500 of them the entity coverage validator), and 8,800 are in `src/`, of which roughly 6,200
-are tests in `plugin_host.rs`. Existing OCS code changes by **178 deleted lines in total**;
+are tests in `plugin_host.rs`. Existing OCS code changes by **178 deleted lines in total** (151 of them outside docs, plugin and API);
 everything else is additive.
 
 ## Check it without a Mac
@@ -54,11 +54,14 @@ Already run for you:
 | `fork-build.yml` (release build with the plugin staged) | Linux and Windows | 60 of 60 host tests on each; unsigned portable packages you can download and run |
 | Local | macOS | the same, plus the wasm check |
 
-What has **not** been done: launching the GUI on Linux or Windows (the runners have no display), running
-the whole `cargo test --lib` suite there, and building an AppImage or MSI that contains the plugin. Two
-unrelated tests, `arc_grips_drive_center_start_and_end_but_not_midpoint` and `fonts_parse_and_resolve`,
-fail on pristine `main` in the macOS environment used; they are not part of this change and I do not know
-how they behave on Linux or Windows.
+`main` now has its own `Tests` workflow (`cargo test --workspace --locked` on Linux), which will also run on
+this pull request. Run locally on macOS against the merged tree with the same command and `LC_ALL=C` and
+`--no-fail-fast`, the whole workspace gives **1,805 passed and 1 failed**. The one failure,
+`scene::text::lff::tests::fonts_parse_and_resolve`, also fails on pristine `main` in that environment (it
+needs font data) and is not part of this change; I expect it passes on the Linux runner but have not seen that.
+
+What has **not** been done: launching the GUI on Linux or Windows (the runners have no display), running the
+whole workspace suite on Windows, and building an AppImage or MSI that contains the plugin.
 
 ## Reading order
 

@@ -348,6 +348,13 @@ files, settings and the lockfile), on a `pr-check-*` tag and by hand, on `ubuntu
 (`--features host`), staging the bundled plugin and building the runner, the plugin crate tests, the Python model unit tests, and the host's
 real-IPC tests. It fails outright if the staged plugin or the runner is missing, because those tests otherwise skip and report success. First run
 (`pr-check-1`, commit `1f8cbb81`, all green on both platforms): 115 plugin API tests, 20 plugin crate tests, 16 Python model tests and 60 real-IPC
-host tests on each. Debug build, so a cold run is about 30 minutes and a cached one much less. The whole lib suite is deliberately not run there:
-two unrelated tests fail on upstream `main` in the environments checked (see the earlier notes).
+host tests on each. Debug build, so a cold run is about 30 minutes and a cached one much less. The whole lib suite is deliberately not run by that workflow, because `main`'s own `Tests` workflow (`cargo test --workspace --locked`, added upstream on 21 September) runs it on every pull request. Against the merged tree that command gives 1,805 passed and 1 failed locally on macOS, `fonts_parse_and_resolve`, which also fails on pristine `main` there.
+
+### 2026-09-21: merged upstream `main` (25 commits)
+
+Merged `origin/main` at its head (no conflicts). Upstream added `.github/workflows/ci.yml` (`cargo test --workspace --locked` on Linux for every
+pull request, `LC_ALL=C`), removed the Nix files, and added parametric-constraint and viewport-plot changes. Re-verified on the merged tree: the
+plugin gate (60 real-IPC host tests, 115 plugin API, 20 plugin crate, 16 Python model), the wasm check, and the upstream workspace command with
+`--no-fail-fast` (1,805 passed, 1 failed: `fonts_parse_and_resolve`, which fails on pristine `main` on this Mac too; `arc_grips_drive_center_start_and_end_but_not_midpoint`
+now passes, fixed upstream). The change is 75 files, +30,833 / -178 against current `main`.
 
