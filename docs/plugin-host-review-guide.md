@@ -120,7 +120,7 @@ several kinds and features are interleaved, so read by area rather than commit b
 4. **Nesting depth.** A command step runs inside the editor's message handling. It is not recursive, but a debug
    build of one step (PEDIT converting a line to a polyline) needs 2 to 4 MiB of stack; the native builds link
    with at least 8 MiB (16 MiB on Windows).
-5. **Splitting.** If 70 commits is too much, the natural seams are: the API and host core, the entity kinds,
+5. **Splitting.** If 79 commits is too much, the natural seams are: the API and host core, the entity kinds,
    the tables, and the command runner. Tell me and I will cut it that way.
 
 ## What is deliberately not done
