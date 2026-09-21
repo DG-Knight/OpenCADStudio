@@ -4000,13 +4000,11 @@ impl OpenCADStudio {
                         id,
                         self.constraint_bar_display,
                     );
-                    // The first line stays; the second turns about its start
-                    // to run parallel, as the reference keeps that start.
-                    let mut pins = first_ends.to_vec();
-                    pins.push(second_ends[0]);
+                    // The first line stays; the second turns parallel the way the
+                    // Parallel constraint itself moves it.
                     self.tabs[i].scene.bump_entities_with_parametric_policy(
                         &[(second_line.entity, crate::scene::ChangeKind::Modified)],
-                        &pins,
+                        &first_ends,
                         self.constraint_solve_mode,
                     );
                     self.tabs[i].dirty = true;
