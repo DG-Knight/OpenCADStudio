@@ -1474,6 +1474,150 @@ fn bench_ui_statusbar_derived_data(runner: &mut BenchmarkRunner) {
     );
 }
 
+// ── 12d. UI Grip Vertex Budget (budgeted build + per-frame projection) ──────
+// Covers the selection-grip vertex budget (`MAX_SELECTED_GRIPS` in
+// app/settings.rs): one dense 100K-vertex polyline emits ~2 grips/vertex
+// (vertex + midpoint). The budget keeps entity order with vertex grips first
+// and truncates the parallel handle vec in lockstep, so the per-frame
+// `grips_to_screen` projection only ever sees the capped set.
+//
+// NOTE: the budget step below calls the real `apply_grip_budget`
+// (app/properties.rs) with the real `MAX_SELECTED_GRIPS` (app/settings.rs),
+// re-exported via `OpenCADStudio::app` so this external bench crate can reach
+// them (both modules are otherwise private/`pub(crate)`).
+// Projection is measured with the real `grips_to_screen` on the capped set,
+// which bounds the per-frame cost by construction: uncapped it is O(vertices),
+// budgeted it is O(cap).
+
+fn bench_ui_grip_budget(runner: &mut BenchmarkRunner) {
+    if !runner.should_run("ui_grip_budget") && !runner.should_run("ui_grip_budget_build") {
+        return;
+    }
+
+    use OpenCADStudio::app::{apply_grip_budget, MAX_SELECTED_GRIPS};
+    use OpenCADStudio::scene::model::object::{GripDef, GripShape};
+    use OpenCADStudio::scene::pick::grip::grips_to_screen;
+
+    // Fixture: one dense polyline's grips — 2 per vertex (vertex + midpoint),
+    // i.e. ~200K grips for a 100K-vertex polyline in full mode. Midpoint grips
+    // mirror the real LWPolyline producer (entities/lwpolyline.rs via
+    // entities/common.rs `rectangle_grip`): `Rectangle` shape with `dir:
+    // Some(chord)` so the bench exercises the second `camera.project` in
+    // `grips_to_screen` (scene/pick/grip.rs), exactly like production.
+    let n_vertices = if runner.quick_mode { 10_000 } else { 100_000 };
+    let mut all_grips = Vec::with_capacity(2 * n_vertices);
+    for v in 0..n_vertices {
+        let base = (v % 1024) as f64;
+        all_grips.push(GripDef {
+            id: 2 * v,
+            world: glam::DVec3::new(base, base * 0.5, 0.0),
+            is_midpoint: false,
+            shape: GripShape::Square,
+            dir: None,
+            axis: None,
+        });
+        all_grips.push(GripDef {
+            id: 2 * v + 1,
+            world: glam::DVec3::new(base + 0.5, base * 0.5 + 0.25, 0.0),
+            is_midpoint: true,
+            shape: GripShape::Rectangle,
+            // In-plane segment direction of the synthetic polyline
+            // (vertices run along (1, 0.5)), matching the chord `dir` the
+            // real producer passes to `rectangle_grip`.
+            dir: Some(glam::DVec3::new(1.0, 0.5, 0.0)),
+            axis: None,
+        });
+    }
+    let all_handles: Vec<acadrust::Handle> = (0..all_grips.len() as u64)
+        .map(|k| acadrust::Handle::new(k + 1))
+        .collect();
+    let n_fixture_grips = all_grips.len();
+
+    // Budget once (selection-change path): the per-frame loop below only ever
+    // sees the capped set, exactly like view/mod.rs after refresh. Cloned so
+    // the full fixture stays available for the `ui_grip_budget_build` timing
+    // below, which measures this same selection-change cost per iteration.
+    let (capped_grips, _) = apply_grip_budget(all_grips.clone(), all_handles.clone());
+    assert_eq!(capped_grips.len(), MAX_SELECTED_GRIPS.min(2 * n_vertices));
+
+    let cam = Camera::default();
+    let bounds = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+
+    // Warm-up for allocator settling.
+    for _ in 0..10 {
+        let projected = grips_to_screen(black_box(&capped_grips), &cam, bounds);
+        black_box(projected);
+    }
+
+    let n = if runner.quick_mode { 20 } else { 100 };
+    let runs = 5;
+    let mut samples = Vec::with_capacity(runs);
+
+    for _ in 0..runs {
+        let t0 = Instant::now();
+        for _ in 0..n {
+            let projected = grips_to_screen(black_box(&capped_grips), &cam, bounds);
+            black_box(projected);
+        }
+        let per_us = (t0.elapsed().as_micros() as f64) / (n as f64);
+        samples.push(per_us);
+    }
+
+    let median_us = samples[samples.len() / 2];
+    runner.record(
+        "ui_grip_budget",
+        &format!(
+            "Budgeted per-frame grip projection ({}-grip polyline capped to {} grips)",
+            n_fixture_grips,
+            capped_grips.len()
+        ),
+        "µs",
+        samples,
+        Some(((capped_grips.len() as f64) / (median_us / 1_000_000.0), "grips/s")),
+        Some(500.0), // Target threshold < 500 µs (measured ~132 µs quick / ~147 µs full)
+    );
+
+    // Selection-change cost (previously unmeasured): `apply_grip_budget` sorts
+    // ~200K grips by `is_midpoint` (O(n log n)), builds an FxHashSet of the
+    // kept indices, and filters both parallel vecs — once per selection change,
+    // not per frame. Iteration inputs are pre-cloned before the timer so only
+    // the budget itself is measured, not the clone.
+    let n_build = if runner.quick_mode { 20 } else { 5 };
+    let mut build_samples = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let mut build_inputs = Vec::with_capacity(n_build);
+        for _ in 0..n_build {
+            build_inputs.push((all_grips.clone(), all_handles.clone()));
+        }
+        let t0 = Instant::now();
+        for (grips_in, handles_in) in build_inputs {
+            let grips_in = black_box(grips_in);
+            let handles_in = black_box(handles_in);
+            let (capped, _) = apply_grip_budget(grips_in, handles_in);
+            black_box(capped);
+        }
+        let per_us = (t0.elapsed().as_micros() as f64) / (n_build as f64);
+        build_samples.push(per_us);
+    }
+    let build_median_us = build_samples[build_samples.len() / 2];
+    runner.record(
+        "ui_grip_budget_build",
+        &format!(
+            "Selection-change grip budget over {} grips (sort + FxHashSet + filter)",
+            n_fixture_grips
+        ),
+        "µs",
+        build_samples,
+        Some(((n_fixture_grips as f64) / (build_median_us / 1_000_000.0), "grips/s")),
+        Some(7_000.0), // Target < 7 ms (selection-change hitch budget; measured ~2.36 ms full / ~0.30 ms quick, ~3x headroom)
+    );
+}
+
 // ── 13. Wide & Tapered Arc + Donut Tessellation ─────────────────────────────
 
 fn bench_wide_and_tapered_arc_tessellation(runner: &mut BenchmarkRunner) {
@@ -1878,6 +2022,7 @@ fn main() {
     bench_ui_icon_caching(&mut runner);
     bench_ui_plotstyle_layer_usage(&mut runner);
     bench_ui_statusbar_derived_data(&mut runner);
+    bench_ui_grip_budget(&mut runner);
     bench_wide_and_tapered_arc_tessellation(&mut runner);
     bench_zoom_extents_calculation(&mut runner);
     bench_batch_entity_mutation(&mut runner);

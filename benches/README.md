@@ -19,7 +19,7 @@ cargo bench --bench performance_benchmarks -- --quick
 
 ---
 
-## Benchmark Suite Catalog (27 Metrics)
+## Benchmark Suite Catalog (29 Metrics)
 
 ### 1. Scene & Entity Management
 - `scene_entity_ingestion_10k`: Ingestion throughput for 10,000 mixed 2D entities (Lines, Circles, Arcs, Polylines).
@@ -53,6 +53,8 @@ cargo bench --bench performance_benchmarks -- --quick
 - `ui_icon_handle_uncached`: Uncached SVG icon memory parse and Handle allocation.
 - `ui_plotstyle_layer_usage`: Plot Style 256-bucket ACI layer-usage table rebuild (200 layers).
 - `ui_statusbar_derived_data`: Status-bar cached derived-data hit (layout names + scale picker `Arc` clones).
+- `ui_grip_budget`: Budgeted per-frame selection-grip projection (dense-polyline grips capped to `MAX_SELECTED_GRIPS`).
+- `ui_grip_budget_build`: Selection-change `apply_grip_budget` cost over the full grip set (sort + FxHashSet + filter).
 
 ### 6. State Management & Draworder
 - `selection_state_deep_clone`: Deep cloning of `SelectionState` (with 64 polygon points).

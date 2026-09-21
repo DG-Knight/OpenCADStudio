@@ -44,6 +44,13 @@ mod visibility;
 
 pub use style_ops::StyleKind;
 
+/// Re-exported `pub` (not `pub(crate)`) so the `cargo bench` harness
+/// (`benches/`, an external crate) can measure the real grip-budget helper as
+/// `ui_grip_budget`. The `properties` / `settings` modules themselves stay
+/// private / `pub(crate)`; only these two names are reachable externally.
+pub use properties::apply_grip_budget;
+pub use settings::MAX_SELECTED_GRIPS;
+
 use document::DocumentTab;
 
 use crate::modules::ModuleEvent;

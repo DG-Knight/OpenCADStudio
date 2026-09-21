@@ -1,7 +1,7 @@
 use super::helpers::{entity_type_key, entity_type_label, title_case_word};
 use super::{OpenCADStudio, VARIES_LABEL};
 use crate::io::linetypes;
-use crate::scene::model::object::PropValue;
+use crate::scene::model::object::{GripDef, PropValue};
 use crate::scene::view::dispatch;
 use crate::t;
 use crate::ui;
@@ -12,6 +12,47 @@ use acadrust::{Entity, EntityType, Handle};
 /// property aggregation (which is O(n) per row, plus an O(n²) group filter) and
 /// shows a count-only summary instead. Bulk edits still go through the ribbon.
 const MAX_PROP_AGGREGATE: usize = 2_000;
+
+/// Cap the total number of selection grips at
+/// [`crate::app::settings::MAX_SELECTED_GRIPS`], keeping entity order with
+/// non-midpoint (vertex/stretch) grips first. Below the cap both vecs are
+/// returned untouched, so existing selections are identical. The parallel
+/// `handles` vec is truncated in lockstep with `grips`.
+///
+/// `pub` (not private) so the `cargo bench` harness (external crate) measures
+/// the real function as `ui_grip_budget`.
+pub fn apply_grip_budget(
+    mut grips: Vec<GripDef>,
+    mut handles: Vec<Handle>,
+) -> (Vec<GripDef>, Vec<Handle>) {
+    debug_assert_eq!(
+        grips.len(),
+        handles.len(),
+        "grips/handles are parallel vecs built in lockstep"
+    );
+    if grips.len() > crate::app::settings::MAX_SELECTED_GRIPS {
+        // Vertex budget: one dense polyline can emit ~2 grips/vertex past the
+        // object-count gate above. Keep entity order; non-midpoint (stretch)
+        // grips first, midpoints fill the remainder.
+        let cap = crate::app::settings::MAX_SELECTED_GRIPS;
+        let mut idx: Vec<usize> = (0..grips.len()).collect();
+        idx.sort_by_key(|&j| grips[j].is_midpoint); // false (vertex) first; stable
+        idx.truncate(cap);
+        idx.sort_unstable(); // restore entity order for determinism
+        let keep: rustc_hash::FxHashSet<usize> = idx.into_iter().collect();
+        let mut kept_grips = Vec::with_capacity(cap);
+        let mut kept_handles = Vec::with_capacity(cap);
+        for (j, (grip, handle)) in grips.into_iter().zip(handles.into_iter()).enumerate() {
+            if keep.contains(&j) {
+                kept_grips.push(grip);
+                kept_handles.push(handle);
+            }
+        }
+        grips = kept_grips;
+        handles = kept_handles;
+    }
+    (grips, handles)
+}
 
 fn visual_style_properties_text(style: &acadrust::objects::VisualStyle) -> String {
     style
@@ -2798,6 +2839,7 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                     grips.push(grip);
                 }
             }
+            let (grips, handles) = apply_grip_budget(grips, handles);
             (single_handle, grips, handles)
         };
         self.tabs[i].selected_handle = new_handle;
@@ -4497,6 +4539,126 @@ mod chprop_integration_tests {
 #[cfg(test)]
 mod grip_limit_tests {
     use super::*;
+    use crate::scene::model::object::GripShape;
+
+    fn test_grip(id: usize, is_midpoint: bool) -> GripDef {
+        GripDef {
+            id,
+            world: glam::DVec3::ZERO,
+            is_midpoint,
+            shape: GripShape::Square,
+            dir: None,
+            axis: None,
+        }
+    }
+
+    #[test]
+    fn refresh_selected_grips_caps_total_grip_count() {
+        let cap = crate::app::settings::MAX_SELECTED_GRIPS;
+        let n = cap + 500;
+        let grips: Vec<GripDef> = (0..n).map(|id| test_grip(id, false)).collect();
+        let handles: Vec<Handle> = (0..n as u64).map(|k| Handle::new(k + 1)).collect();
+        let (grips, handles) = super::apply_grip_budget(grips, handles);
+        assert_eq!(
+            grips.len(),
+            cap,
+            "grips past the budget must be dropped, kept {}/{}",
+            grips.len(),
+            n,
+        );
+        assert_eq!(
+            handles.len(),
+            grips.len(),
+            "handles must stay in lockstep with grips",
+        );
+        for (grip, handle) in grips.iter().zip(handles.iter()) {
+            assert_eq!(
+                *handle,
+                Handle::new(grip.id as u64 + 1),
+                "handle at each index must still belong to its grip",
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_selected_grips_prefers_vertex_grips_over_midpoints() {
+        let cap = crate::app::settings::MAX_SELECTED_GRIPS;
+        let n = cap + 500;
+        // Interleaved: even ids are midpoints, odd ids are vertices.
+        let grips: Vec<GripDef> = (0..n).map(|id| test_grip(id, id % 2 == 0)).collect();
+        let handles: Vec<Handle> = (0..n as u64).map(|k| Handle::new(k + 1)).collect();
+        let (grips, handles) = super::apply_grip_budget(grips, handles);
+        assert_eq!(grips.len(), cap);
+        assert_eq!(handles.len(), grips.len());
+        // Fewer vertices than the cap: every vertex grip survives, midpoints
+        // fill the remainder — no vertex is sacrificed for a midpoint.
+        let kept_vertices: Vec<usize> = grips
+            .iter()
+            .filter(|grip| !grip.is_midpoint)
+            .map(|grip| grip.id)
+            .collect();
+        let all_vertices: Vec<usize> = (0..n).filter(|id| id % 2 == 1).collect();
+        assert_eq!(
+            kept_vertices, all_vertices,
+            "no vertex grip may be sacrificed for a midpoint",
+        );
+        let ids: Vec<usize> = grips.iter().map(|grip| grip.id).collect();
+        assert!(ids.is_sorted(), "retained grips must keep entity order");
+        for (grip, handle) in grips.iter().zip(handles.iter()) {
+            assert_eq!(*handle, Handle::new(grip.id as u64 + 1));
+        }
+
+        // Vertices alone past the cap: the tail is truncated deterministically.
+        let over = cap + 100;
+        let grips: Vec<GripDef> = (0..over).map(|id| test_grip(id, false)).collect();
+        let handles: Vec<Handle> = (0..over as u64).map(|k| Handle::new(k + 1)).collect();
+        let (grips, handles) = super::apply_grip_budget(grips, handles);
+        assert_eq!(grips.len(), cap);
+        assert_eq!(handles.len(), grips.len());
+        assert!(
+            grips.iter().zip(0..cap).all(|(grip, id)| grip.id == id),
+            "vertex overflow must keep the first `cap` grips in entity order",
+        );
+        for (grip, handle) in grips.iter().zip(handles.iter()) {
+            assert_eq!(*handle, Handle::new(grip.id as u64 + 1));
+        }
+    }
+
+    #[test]
+    fn grip_budget_boundary_lengths() {
+        let cap = crate::app::settings::MAX_SELECTED_GRIPS;
+
+        // Empty vec passthrough.
+        let (grips, handles) = super::apply_grip_budget(Vec::new(), Vec::new());
+        assert!(grips.is_empty());
+        assert!(handles.is_empty());
+
+        // len == cap passthrough: content untouched.
+        let grips: Vec<GripDef> = (0..cap).map(|id| test_grip(id, id % 2 == 0)).collect();
+        let handles: Vec<Handle> = (0..cap as u64).map(|k| Handle::new(k + 1)).collect();
+        let (kept_grips, kept_handles) = super::apply_grip_budget(grips, handles);
+        assert_eq!(kept_grips.len(), cap);
+        assert_eq!(kept_handles.len(), cap);
+        assert!(
+            kept_grips.iter().zip(0..cap).all(|(grip, id)| grip.id == id),
+            "at exactly the cap every grip must survive in order",
+        );
+        for (grip, handle) in kept_grips.iter().zip(kept_handles.iter()) {
+            assert_eq!(*handle, Handle::new(grip.id as u64 + 1));
+        }
+
+        // len == cap + 1 truncates to cap.
+        let over = cap + 1;
+        let grips: Vec<GripDef> = (0..over).map(|id| test_grip(id, false)).collect();
+        let handles: Vec<Handle> = (0..over as u64).map(|k| Handle::new(k + 1)).collect();
+        let (kept_grips, kept_handles) = super::apply_grip_budget(grips, handles);
+        assert_eq!(kept_grips.len(), cap);
+        assert_eq!(kept_handles.len(), cap);
+        assert!(
+            kept_grips.iter().zip(0..cap).all(|(grip, id)| grip.id == id),
+            "one over the cap must drop exactly the tail grip",
+        );
+    }
 
     #[test]
     fn a_selection_past_the_limit_gets_no_grips() {
