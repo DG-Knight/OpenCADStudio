@@ -5039,7 +5039,10 @@ mod tests {
             let _ = std::fs::remove_file(&path);
         };
 
-        let tmp = std::env::temp_dir().to_string_lossy().into_owned();
+        // Substituted into Python string literals: on Windows a backslash path such as
+        // `C:\Users\...` is read as escape sequences (`\U` is a unicode escape), and Windows
+        // accepts forward slashes, so hand the script a forward-slash path.
+        let tmp = std::env::temp_dir().to_string_lossy().replace('\\', "/");
         let mut create_script = case.create.replace("TMPDIR", &tmp);
         // Insert is update-only: the host makes a block and one insert, and the
         // "create" script only has to exist.
