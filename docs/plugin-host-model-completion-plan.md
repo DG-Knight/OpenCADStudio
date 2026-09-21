@@ -337,5 +337,5 @@ Merged `origin/main` at its head (no conflicts). Upstream added `.github/workflo
 pull request, `LC_ALL=C`), removed the Nix files, and added parametric-constraint and viewport-plot changes. Re-verified on the merged tree: the
 plugin gate (60 real-IPC host tests, 115 plugin API, 20 plugin crate, 16 Python model), the wasm check, and the upstream workspace command with
 `--no-fail-fast` (1,805 passed, 1 failed: `fonts_parse_and_resolve`, which fails on pristine `main` on this Mac too; `arc_grips_drive_center_start_and_end_but_not_midpoint`
-now passes, fixed upstream). The change is 75 files, +30,833 / -178 against current `main`.
+now passes, fixed upstream). The change is 74 files, +30,703 / -178 against current `main` (fork-only workflow excluded).
 

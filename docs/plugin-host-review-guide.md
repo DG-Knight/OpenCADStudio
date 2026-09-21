@@ -21,7 +21,7 @@ refuses without changing anything when it cannot honour a request. The Python ad
 thin translation layer. The design and its guarantees are in
 [plugin-host-model.md](plugin-host-model.md).
 
-**Size.** 75 files, +30,833 / −178, against current `main`. About 15,000 added lines are the
+**Size.** 74 files, +30,703 / −178, against current `main`. About 15,000 added lines are the
 new plugin crate (including a 3,000-line lockfile and a generator), 5,600 are the API crate
 (3,500 of them the entity coverage validator), and 8,800 are in `src/`, of which roughly 6,200
 are tests in `plugin_host.rs`. Existing OCS code changes by **178 deleted lines in total** (151 of them outside docs, plugin and API);
