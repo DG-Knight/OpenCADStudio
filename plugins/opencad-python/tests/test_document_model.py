@@ -58,7 +58,7 @@ class DocumentModelTests(unittest.TestCase):
         outcome = {"status": "completed", "blocked_by": None, "command": "", "prompt": "", "accepts": [],
                    "options": [], "entities": 0, "added": 0, "unconsumed": [], "error": None}
         outcome.update(self.step_outcome.get(kind, {}))
-        if kind == "enter":
+        if kind in ("enter", "entity"):
             new = max(self.records) + 1
             self.records[new] = {"handle": new, "kind": "Line", "layer": "0", "_editable": True}
         return outcome
@@ -97,6 +97,22 @@ class DocumentModelTests(unittest.TestCase):
         self.doc.modify.offset(1, 2, (0, 5))
         entity_step = [c for c in self.calls if c[0] == "step" and c[1] == "entity"][0]
         self.assertEqual(entity_step[2]["point"], [1, 0, 5.0])
+
+    def test_more_modify_wrappers(self):
+        self.step_outcome = {}
+        self.doc.modify.chamfer(1, 2, 2, 3, at1=(0, 0, 0), at2=(1, 1, 0))
+        texts = [c[2]["text"] for c in self.calls if c[0] == "step" and c[1] == "text"]
+        self.assertEqual(texts, ["2", "3"])
+        self.calls.clear()
+        self.doc.modify.chamfer(1, 2, 4, at1=(0, 0, 0), at2=(1, 1, 0))
+        texts = [c[2]["text"] for c in self.calls if c[0] == "step" and c[1] == "text"]
+        self.assertEqual(texts, ["4", "4"])
+        self.calls.clear()
+        self.doc.modify.array_rect([1], 2, 3, 10, 20)
+        self.assertEqual([c[2]["text"] for c in self.calls if c[0] == "step" and c[1] == "text"], ["2", "3", "10", "20"])
+        self.calls.clear()
+        self.doc.modify.stretch((0, 0), (1, 1), (0, 0), (5, 0))
+        self.assertEqual([c[1] for c in self.calls if c[0] == "step"], ["start", "point", "point", "enter", "point", "point"])
 
     def test_batch_edit_and_rollback(self):
         line = self.doc.entities[1]

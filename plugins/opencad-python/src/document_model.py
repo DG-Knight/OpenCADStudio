@@ -751,6 +751,76 @@ class _Modify:
             lambda c: c.token("Y" if erase_source else "N"),
         ], entities)
 
+    def chamfer(self, first, second, distance1, distance2=None, at1=None, at2=None):
+        """Cut the corner between two lines; `distance1` is measured along `first`
+        and `distance2` (default the same) along `second`. Returns the new line."""
+        if distance2 is None:
+            distance2 = distance1
+        result = self._run("CHAMFER", [
+            lambda c: c.token("D"),
+            lambda c: c.text(distance1),
+            lambda c: c.text(distance2),
+            lambda c: c.entity(first, self._at(first, at1)),
+            lambda c: c.entity(second, self._at(second, at2)),
+        ])
+        if not result:
+            raise RuntimeError("CHAMFER produced nothing")
+        return result[0]
+
+    def array_rect(self, entities, rows, columns, row_spacing, column_spacing):
+        """Rectangular array of the entities: `rows` by `columns` copies counting
+        the original, spaced by `row_spacing` and `column_spacing`. Returns the copies."""
+        return self._run("ARRAYRECT", [
+            lambda c: c.text(rows),
+            lambda c: c.text(columns),
+            lambda c: c.text(row_spacing),
+            lambda c: c.text(column_spacing),
+        ], entities)
+
+    def array_polar(self, entities, center, count, angle=360):
+        """Polar array about `center`: `count` items counting the original, spread
+        over `angle` degrees. Returns the copies."""
+        return self._run("ARRAYPOLAR", [
+            lambda c: c.point(center),
+            lambda c: c.text(count),
+            lambda c: c.text(angle),
+        ], entities)
+
+    def explode(self, entities):
+        """Break polylines, blocks and similar entities into their parts; returns the parts."""
+        return self._run("EXPLODE", [], entities)
+
+    def join(self, entities):
+        """Join end-to-end lines, arcs and polylines into one entity; returns it."""
+        return self._run("JOIN", [], entities)
+
+    def break_entity(self, entity, first, second):
+        """Remove the part of `entity` between two points on it; returns the new piece."""
+        return self._run("BREAK", [
+            lambda c: c.entity(entity, first),
+            lambda c: c.point(second),
+        ])
+
+    def stretch(self, corner1, corner2, base, target):
+        """Stretch whatever the crossing window (two opposite corners) catches, moving
+        `base` to `target`; entities fully inside move, ones crossing the edge stretch."""
+        self._run("STRETCH", [
+            lambda c: c.point(corner1),
+            lambda c: c.point(corner2),
+            lambda c: c.enter(),
+            lambda c: c.point(base),
+            lambda c: c.point(target),
+        ])
+
+    def lengthen(self, entity, delta, at=None):
+        """Lengthen (or, negative, shorten) `entity` by `delta` at the end nearest `at`."""
+        self._run("LENGTHEN", [
+            lambda c: c.token("DE"),
+            lambda c: c.text(delta),
+            lambda c: c.entity(entity, self._at(entity, at)),
+            lambda c: c.enter(),
+        ])
+
     def erase(self, entities):
         before = len(list(ocs.entity_handles()))
         self._select(entities)

@@ -8067,6 +8067,22 @@ mi = line((800, 0), (810, 0))
 step('mirror', lambda: M.mirror([mi], (0, 5, 0), (1, 5, 0)))
 e = line((900, 0), (910, 0))
 step('erase', lambda: M.erase([e]))
+ca = line((1300, 0), (1310, 0)); cb = line((1300, 0), (1300, 10))
+step('chamfer', lambda: M.chamfer(ca, cb, 2, 3, (1308, 0), (1300, 8)))
+ar = line((1400, 0), (1401, 0))
+step('array_rect', lambda: M.array_rect([ar], 2, 3, 10, 20))
+ap = line((1500, 0), (1501, 0))
+step('array_polar', lambda: M.array_polar([ap], (1500, 10, 0), 4, 360))
+pl = doc.create_entity('LwPolyline', vertices=[{'location': P(1600, 0)}, {'location': P(1610, 0)}, {'location': P(1610, 10)}])
+step('explode', lambda: M.explode([pl]))
+j1 = line((1700, 0), (1705, 0)); j2 = line((1705, 0), (1710, 0))
+step('join', lambda: M.join([j1, j2]))
+bk = line((1800, 0), (1810, 0))
+step('break', lambda: M.break_entity(bk, (1802, 0, 0), (1805, 0, 0)))
+st = line((1900, 0), (1910, 0))
+step('stretch', lambda: M.stretch((1908, -2, 0), (1912, 2, 0), (1910, 0, 0), (1915, 0, 0)))
+ln = line((2000, 0), (2010, 0))
+step('lengthen', lambda: M.lengthen(ln, 5, (2009, 0, 0)))
 step('run_line', lambda: doc.command('LINE 1100,0 1110,10'))
 def interactive():
     with doc.start_command('CIRCLE') as c:
@@ -8112,6 +8128,18 @@ check('bad_point', lambda: ocs.command_step('point', {'point': [0, 0, 0]}))
         assert!(has_line(800.0, 0.0, 810.0, 0.0) && has_line(800.0, 10.0, 810.0, 10.0), "mirror keeps the source and adds the reflection: {:?}", describe());
         assert!(!has_line(900.0, 0.0, 910.0, 0.0), "erase: {:?}", describe());
         assert!(has_line(1100.0, 0.0, 1110.0, 10.0), "doc.command run: {:?}", describe());
+        assert!(has_line(1302.0, 0.0, 1300.0, 3.0), "chamfer: {:?}", describe());
+        for (x, y) in [(1400.0, 0.0), (1420.0, 0.0), (1440.0, 0.0), (1400.0, 10.0), (1420.0, 10.0), (1440.0, 10.0)] {
+            assert!(has_line(x, y, x + 1.0, y), "rectangular array member at ({x}, {y}): {:?}", describe());
+        }
+        assert!(has_line(1500.0, 0.0, 1501.0, 0.0) && has_line(1500.0, 20.0, 1499.0, 20.0), "polar array (start and half turn): {:?}", describe());
+        assert_eq!(lines.iter().filter(|l| l.start.x > 1450.0 && l.start.x < 1520.0 || l.end.x > 1450.0 && l.end.x < 1520.0).count(), 4, "polar array has four members");
+        assert!(has_line(1600.0, 0.0, 1610.0, 0.0) && has_line(1610.0, 0.0, 1610.0, 10.0), "explode: {:?}", describe());
+        assert!(!host.document().entities().any(|e| matches!(e, EntityType::LwPolyline(p) if p.vertices.first().is_some_and(|v| near(v.location.x, 1600.0)))), "explode removed the polyline");
+        assert!(has_line(1700.0, 0.0, 1710.0, 0.0) && !has_line(1700.0, 0.0, 1705.0, 0.0), "join: {:?}", describe());
+        assert!(has_line(1800.0, 0.0, 1802.0, 0.0) && has_line(1805.0, 0.0, 1810.0, 0.0) && !has_line(1800.0, 0.0, 1810.0, 0.0), "break: {:?}", describe());
+        assert!(has_line(1900.0, 0.0, 1915.0, 0.0), "stretch: {:?}", describe());
+        assert!(has_line(2000.0, 0.0, 2015.0, 0.0), "lengthen: {:?}", describe());
         assert!(circles.iter().any(|c| near(c.center.x, 1200.0) && near(c.radius, 3.0)), "start_command session: {circles:?}");
         assert!(host.app.tabs[0].active_cmd.is_none(), "no command is left running");
 
@@ -8142,8 +8170,8 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
         let show = |label: &str, r: &Result<ocs_plugin_api::host::CommandOutcome, String>| match r {
-            Ok(o) => eprintln!("SPIKE {label}: {} cmd={} prompt={:?} accepts={:?} opts={:?} added={} unconsumed={:?} err={:?}",
-                o.status, o.command, o.prompt, o.accepts, o.options, o.added, o.unconsumed, o.error),
+            Ok(o) => eprintln!("SPIKE {label}: {} prompt={:?} accepts={:?} opts={:?} added={} err={:?}",
+                o.status, o.prompt, o.accepts, o.options, o.added, o.error),
             Err(e) => eprintln!("SPIKE {label}: ERR {e}"),
         };
         let run = |host: &mut HostSession<'_>, label: &str, r: R| { let out = host.run_command(r); show(label, &out); out };
@@ -8152,59 +8180,62 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             host.document().entities().map(|e| e.common().handle).collect()
         };
         let cancel = |host: &mut HostSession<'_>| { let _ = host.run_command(R::Cancel); };
-        let hs = mk(&mut host, &["LINE 0,0 10,0", "LINE 5,-5 5,5", "LINE 20,0 30,0", "LINE 0,10 10,10", "LINE 0,20 10,20"]);
-        // EXTEND: extend line 3 toward line 2? use boundary line 2 at x=5; extend line hs[0]'s end at x=10? Extend hs[2] (20..30) leftwards to x=5 no; use hs[0] end to the wall at x=15
-        let _ = mk(&mut host, &["LINE 15,-5 15,5"]);
-        let wall = *host.document().entities().last().map(|e| &e.common().handle).unwrap();
-        run(&mut host, "EXTEND start", R::Start { name: "EXTEND".into() });
-        run(&mut host, "EXTEND pick", R::Entity { handle: hs[0], point: [9.0, 0.0, 0.0] });
-        run(&mut host, "EXTEND enter", R::Enter);
-        cancel(&mut host);
-        // FILLET
-        run(&mut host, "FILLET start", R::Start { name: "FILLET".into() });
-        run(&mut host, "FILLET R", R::Token { text: "R".into() });
-        run(&mut host, "FILLET radius", R::Text { text: "2".into() });
-        run(&mut host, "FILLET first", R::Entity { handle: hs[3], point: [2.0, 10.0, 0.0] });
-        run(&mut host, "FILLET second", R::Entity { handle: hs[4], point: [2.0, 20.0, 0.0] });
-        cancel(&mut host);
-        let _ = wall;
+        let hs = mk(&mut host, &["LINE 0,0 10,0", "LINE 0,0 0,10", "PLINE 50,0 60,0 60,10", "LINE 100,0 105,0", "LINE 105,0 110,5", "CIRCLE 200,0 5", "LINE 300,0 310,0"]);
         // CHAMFER
         run(&mut host, "CHAMFER start", R::Start { name: "CHAMFER".into() });
+        run(&mut host, "CHAMFER D", R::Token { text: "D".into() });
+        run(&mut host, "CHAMFER d1", R::Text { text: "2".into() });
+        run(&mut host, "CHAMFER d2", R::Text { text: "3".into() });
+        run(&mut host, "CHAMFER first", R::Entity { handle: hs[0], point: [8.0, 0.0, 0.0] });
+        run(&mut host, "CHAMFER second", R::Entity { handle: hs[1], point: [0.0, 8.0, 0.0] });
         cancel(&mut host);
-        // selection commands
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[3]]);
-        run(&mut host, "COPY run", R::Run { line: "COPY 0,0 0,3".into() });
-        run(&mut host, "COPY leftover", R::Enter);
-        cancel(&mut host);
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[3]]);
-        run(&mut host, "ROTATE run", R::Run { line: "ROTATE 0,0 90".into() });
-        cancel(&mut host);
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
-        run(&mut host, "SCALE run", R::Run { line: "SCALE 0,0 2".into() });
-        cancel(&mut host);
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
-        run(&mut host, "MIRROR start", R::Start { name: "MIRROR".into() });
-        run(&mut host, "MIRROR sel", R::Selection);
-        run(&mut host, "MIRROR p1", R::Point { point: [0.0, 0.0, 0.0] });
-        run(&mut host, "MIRROR p2", R::Point { point: [1.0, 0.0, 0.0] });
-        run(&mut host, "MIRROR erase?", R::Token { text: "N".into() });
-        cancel(&mut host);
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
+        // ARRAYRECT
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[6]]);
         run(&mut host, "ARRAYRECT start", R::Start { name: "ARRAYRECT".into() });
-        run(&mut host, "ARRAYRECT sel", R::Selection);
+        run(&mut host, "ARRAYRECT rows", R::Text { text: "2".into() });
+        run(&mut host, "ARRAYRECT cols", R::Text { text: "3".into() });
+        run(&mut host, "ARRAYRECT rowdist", R::Text { text: "10".into() });
+        run(&mut host, "ARRAYRECT coldist", R::Text { text: "20".into() });
+        run(&mut host, "ARRAYRECT enter", R::Enter);
         cancel(&mut host);
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
+        // ARRAYPOLAR
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[6]]);
         run(&mut host, "ARRAYPOLAR start", R::Start { name: "ARRAYPOLAR".into() });
-        run(&mut host, "ARRAYPOLAR sel", R::Selection);
+        run(&mut host, "ARRAYPOLAR center", R::Point { point: [300.0, 20.0, 0.0] });
+        run(&mut host, "ARRAYPOLAR count", R::Text { text: "4".into() });
+        run(&mut host, "ARRAYPOLAR angle", R::Text { text: "360".into() });
+        run(&mut host, "ARRAYPOLAR enter", R::Enter);
+        cancel(&mut host);
+        // EXPLODE
+        run(&mut host, "EXPLODE start", R::Start { name: "EXPLODE".into() });
+        run(&mut host, "EXPLODE entity", R::Entity { handle: hs[2], point: [55.0, 0.0, 0.0] });
         cancel(&mut host);
         host.app.tabs[0].scene.replace_selection_exact(&[hs[2]]);
-        run(&mut host, "ERASE run", R::Run { line: "ERASE".into() });
+        run(&mut host, "EXPLODE presel", R::Start { name: "EXPLODE".into() });
         cancel(&mut host);
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[0]]);
-        run(&mut host, "EXPLODE run", R::Run { line: "EXPLODE".into() });
+        // JOIN
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[3], hs[4]]);
+        run(&mut host, "JOIN presel", R::Start { name: "JOIN".into() });
+        run(&mut host, "JOIN enter", R::Enter);
+        cancel(&mut host);
+        // BREAK
+        run(&mut host, "BREAK start", R::Start { name: "BREAK".into() });
+        run(&mut host, "BREAK entity", R::Entity { handle: hs[6], point: [302.0, 0.0, 0.0] });
+        run(&mut host, "BREAK p2", R::Point { point: [305.0, 0.0, 0.0] });
+        cancel(&mut host);
+        // HATCH
+        run(&mut host, "HATCH start", R::Start { name: "HATCH".into() });
+        cancel(&mut host);
+        // STRETCH, LENGTHEN, JOIN, PEDIT
+        run(&mut host, "LENGTHEN start", R::Start { name: "LENGTHEN".into() });
+        cancel(&mut host);
+        run(&mut host, "PEDIT start", R::Start { name: "PEDIT".into() });
+        cancel(&mut host);
+        run(&mut host, "STRETCH start", R::Start { name: "STRETCH".into() });
         cancel(&mut host);
         eprintln!("SPIKE final entity count {}", host.document().entities().count());
     }
+
 
     #[test]
     fn audit_python_raster_image_definition_linkage_over_real_ipc() {

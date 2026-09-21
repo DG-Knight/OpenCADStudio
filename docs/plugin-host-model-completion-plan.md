@@ -273,3 +273,14 @@ command, second command, run while active), no command left running, and a one-s
 Not covered: chamfer, arrays, hatch, join, explode, break and the many other commands (reachable through `doc.command` and
 `start_command`); reading prompts for commands with a text editor; an on/off setting for script-driven commands.
 
+### 2026-09-21: more modify wrappers
+
+`doc.modify` gained `chamfer`, `array_rect`, `array_polar`, `explode`, `join`, `break_entity`, `stretch` and `lengthen`, each
+written against the prompt sequence observed in `spike_command_runner_prompts` (STRETCH needs an Enter after the crossing
+window, LENGTHEN and STRETCH end on Enter, EXPLODE and JOIN use the pre-selection because a pick at their selection prompt
+selects nothing). `audit_python_modify_wrappers_over_real_ipc` checks exact geometry for each: the chamfer line, all six
+rectangular-array members, the four polar-array members (start and half turn), the exploded segments and the removed polyline,
+the joined line without its parts, the two pieces after a break, the stretched and the lengthened end points. HATCH is left to
+`create_entity("Hatch")`: its command needs an interactive boundary pick that no scripted step can supply. Not wrapped: PEDIT,
+path and 3-D arrays, and the remaining commands, which stay reachable through `doc.command` and `start_command`.
+

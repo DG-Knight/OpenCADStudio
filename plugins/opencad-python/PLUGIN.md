@@ -281,6 +281,13 @@ M.fillet(first, second, radius=2)           # radius 0 squares the corner
 M.move([a, b], (0, 0, 0), (5, 5, 0)); M.copy([a], base, target)
 M.rotate([a], base, 90); M.scale([a], base, 2)
 M.mirror([a], p1, p2, erase_source=False); M.erase([a])
+M.chamfer(first, second, 2, 3)              # distance 2 along first, 3 along second
+M.array_rect([a], rows=2, columns=3, row_spacing=10, column_spacing=20)
+M.array_polar([a], center, count=4, angle=360)   # counts include the original
+M.explode([polyline]); M.join([line1, line2])
+M.break_entity(line, first_point, second_point)
+M.stretch(corner1, corner2, base, target)   # crossing window, then the displacement
+M.lengthen(line, 5, at=near_the_end)        # delta; negative shortens
 ```
 
 Each step returns an outcome dict: `status` (`completed` or `waiting_input`),
@@ -292,7 +299,8 @@ Each step returns an outcome dict: `status` (`completed` or `waiting_input`),
 also closing any editor or dialog it opened. `doc.command` cancels and raises when
 the line leaves a prompt open.
 
-Selection-based tools (`move`, `copy`, `rotate`, `scale`, `mirror`, `erase`) select
+Selection-based tools (`move`, `copy`, `rotate`, `scale`, `mirror`, `erase`, the arrays,
+`explode` and `join`) select
 the entities you pass first, so the command skips its own selection prompt. Pick
 points default to the middle of a line, arc or circle; give `at=` for anything else.
 `trim` and `extend` cut or extend against every entity in the drawing. Each command is
@@ -304,7 +312,9 @@ line names a command that could end the session or re-enter Python: `QUIT`,
 `RECOVER`, `SCRIPT`, `RUNSCRIPT` and any `PY_*`. Commands run on the active
 document only. Commands that need an interactive surface a script cannot fill
 (the rich-text editor, a file dialog) report it in `blocked_by` and are cancelled.
-`ocs.command_step(kind, options)` is the raw single step behind all of this.
+Hatching has no wrapper: create it with `create_entity("Hatch", ...)`, because the
+HATCH command needs an interactive boundary pick. `ocs.command_step(kind, options)`
+is the raw single step behind all of this.
 
 ### Historical command-replay experiment (not in the default build)
 
