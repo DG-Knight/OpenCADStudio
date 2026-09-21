@@ -79,5 +79,6 @@ pub fn handle_plugin_request(
         ),
         AddLayer(config) => PluginResponse::OptHandle(host.add_layer(config)),
         ModifyLayer(config) => PluginResponse::Bool(host.modify_layer(config)),
+        ExecuteCommand(cmd) => PluginResponse::Bool(host.execute_command(&cmd)),
     }
 }

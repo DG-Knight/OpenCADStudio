@@ -758,6 +758,20 @@ impl HostApi for V4PluginHostApi {
             }
         }
     }
+
+    fn execute_command(&mut self, cmd: &str) -> bool {
+        match self.request(PluginRequest::ExecuteCommand(cmd.to_string())) {
+            Ok(PluginResponse::Bool(b)) => b,
+            Ok(other) => {
+                eprintln!("[plugin] unexpected ExecuteCommand response: {other:?}");
+                false
+            }
+            Err(e) => {
+                eprintln!("[plugin] ExecuteCommand failed: {e}");
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]

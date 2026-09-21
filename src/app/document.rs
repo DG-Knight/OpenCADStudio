@@ -151,6 +151,8 @@ pub(super) struct DocumentTab {
     pub(super) properties: PropertiesPanel,
     pub(super) layers: LayerPanel,
     pub(super) active_cmd: Option<Box<dyn CadCommand>>,
+    /// Remaining command tokens queued behind a PAUSE (or `\`) awaiting user interaction.
+    pub(super) pending_pause_tokens: Option<Vec<String>>,
     /// The selection set the most recent command worked on, captured when a
     /// finishing command drops the live selection — re-selectable with the
     /// "Previous" keyword at any Select objects prompt (#426).
@@ -611,6 +613,7 @@ impl DocumentTab {
             properties: PropertiesPanel::empty(),
             layers: LayerPanel::default(),
             active_cmd: None,
+            pending_pause_tokens: None,
             last_cmd: None,
             last_draw_anchor: None,
             snap_result: None,

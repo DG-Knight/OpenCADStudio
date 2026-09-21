@@ -444,6 +444,20 @@ impl HostApi for PluginHostApi {
             }
         }
     }
+
+    fn execute_command(&mut self, cmd: &str) -> bool {
+        match self.client.request(PluginRequest::ExecuteCommand(cmd.to_string())) {
+            Ok(PluginResponse::Bool(b)) => b,
+            Ok(other) => {
+                eprintln!("[plugin] unexpected ExecuteCommand response: {other:?}");
+                false
+            }
+            Err(e) => {
+                eprintln!("[plugin] ExecuteCommand request failed: {e}");
+                false
+            }
+        }
+    }
 }
 
 /// Sentinel reader used when the shared-memory view could not be initialized.

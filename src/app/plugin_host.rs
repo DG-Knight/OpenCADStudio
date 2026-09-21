@@ -370,6 +370,102 @@ impl<'a> HostSession<'a> {
         self.publish_document_view();
         true
     }
+
+    /// Run a command string on the active tab's command line (AutoLISP style).
+    /// Supports AutoCAD-style `PAUSE` (and `\`) input queuing, explicit `ENTER` /
+    /// `RETURN` tokens, and `\n` trailing newline execution.
+    pub fn execute_command(&mut self, cmd: &str) -> bool {
+        let has_newline = cmd.ends_with('\n') || cmd.ends_with('\r');
+        let trimmed = cmd.trim();
+
+        // 1. ESC / CANCEL handling
+        if trimmed.eq_ignore_ascii_case("ESC")
+            || trimmed.eq_ignore_ascii_case("ESCAPE")
+            || trimmed.eq_ignore_ascii_case("CANCEL")
+        {
+            self.app.tabs[self.tab].pending_pause_tokens = None;
+            let _ = self.app.feed_command(crate::command::StepInput::Escape);
+            self.publish_document_view();
+            return true;
+        }
+
+        // 2. If a PAUSE is already pending for this tab:
+        if let Some(ref mut queue) = self.app.tabs[self.tab].pending_pause_tokens {
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("ENTER")
+                || trimmed.eq_ignore_ascii_case("RETURN")
+            {
+                queue.push("ENTER".to_string());
+            } else {
+                for part in trimmed.split_whitespace() {
+                    queue.push(part.to_string());
+                }
+                if has_newline {
+                    queue.push("ENTER".to_string());
+                }
+            }
+            return true;
+        }
+
+        // 3. ENTER / RETURN / empty string handling when no pause is pending
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("ENTER")
+            || trimmed.eq_ignore_ascii_case("RETURN")
+        {
+            if self.app.tabs[self.tab].active_cmd.is_some() {
+                let _ = self.app.feed_command(crate::command::StepInput::Enter);
+                self.publish_document_view();
+                return true;
+            }
+            return false;
+        }
+
+        // 4. Command execution
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            return false;
+        }
+
+        let tab = self.tab;
+        let is_new_cmd = self.app.tabs[tab].active_cmd.is_none();
+        if is_new_cmd {
+            let cmd_name = parts[0];
+            let resolved = self.app.resolve_alias(cmd_name);
+            let effective = resolved.as_deref().unwrap_or(cmd_name);
+            let _ = self.app.dispatch_command(effective);
+        }
+
+        let mut paused = false;
+        let start_idx = if is_new_cmd { 1 } else { 0 };
+        for (idx, &part) in parts.iter().skip(start_idx).enumerate() {
+            if self.app.tabs[tab].active_cmd.is_none() {
+                break;
+            }
+            if part.eq_ignore_ascii_case("PAUSE") || part == "\\" {
+                let mut remainder: Vec<String> =
+                    parts[start_idx + idx + 1..].iter().map(|s| s.to_string()).collect();
+                if has_newline {
+                    remainder.push("ENTER".to_string());
+                }
+                self.app.tabs[tab].pending_pause_tokens = Some(remainder);
+                paused = true;
+                break;
+            }
+            if part.eq_ignore_ascii_case("ENTER") || part.eq_ignore_ascii_case("RETURN") {
+                let _ = self.app.feed_command(crate::command::StepInput::Enter);
+            } else {
+                let _ = self.app.feed_active_cmd(part);
+            }
+        }
+
+        if !paused && has_newline && self.app.tabs[tab].active_cmd.is_some() {
+            let _ = self.app.feed_command(crate::command::StepInput::Enter);
+        }
+
+        self.app.refresh_layer_panel();
+        self.publish_document_view();
+        true
+    }
 }
 
 /// The stored spelling of `name` in the drawing's linetype table, loading the
@@ -489,6 +585,9 @@ impl HostApi for HostSession<'_> {
     }
     fn modify_layer(&mut self, config: ocs_plugin_api::host::LayerConfig) -> bool {
         self.modify_layer(config)
+    }
+    fn execute_command(&mut self, cmd: &str) -> bool {
+        self.execute_command(cmd)
     }
 }
 
@@ -1048,5 +1147,55 @@ mod tests {
             ..Default::default()
         };
         assert!(!host.modify_layer(non_existent));
+    }
+
+    #[test]
+    fn test_plugin_execute_command() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+
+        // 1. Single-line command with newline finishes command
+        assert!(host.execute_command("LINE 0,0 10,10\n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 1);
+
+        // 2. Streamed command without newline leaves tool active
+        assert!(host.execute_command("LINE 10,10"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        // Feed next point without newline
+        assert!(host.execute_command("20,20"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        // Send explicit ENTER
+        assert!(host.execute_command("ENTER"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 2);
+
+        // 3. Command with PAUSE buffers remaining tokens until point is provided
+        assert!(host.execute_command("LINE 20,20 PAUSE ENTER"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        assert_eq!(
+            host.app.tabs[0].pending_pause_tokens,
+            Some(vec!["ENTER".to_string()])
+        );
+        // User clicks second point in viewport
+        let _ = host
+            .app
+            .feed_command(crate::command::StepInput::Point(glam::DVec3::new(30.0, 30.0, 0.0)));
+        // Draining should have executed ENTER and completed LINE
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 3);
+
+        // 4. Command with PAUSE and trailing \n
+        assert!(host.execute_command("LINE 30,30 PAUSE\n"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        assert_eq!(
+            host.app.tabs[0].pending_pause_tokens,
+            Some(vec!["ENTER".to_string()])
+        );
+        // Escape cancels paused command cleanly
+        assert!(host.execute_command("ESC"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.app.tabs[0].pending_pause_tokens, None);
     }
 }

@@ -568,6 +568,12 @@ pub trait HostApi {
         let _ = config;
         false
     }
+
+    /// Run a command on the active document tab's command line (AutoLISP style).
+    fn execute_command(&mut self, cmd: &str) -> bool {
+        let _ = cmd;
+        false
+    }
 }
 
 /// Configuration properties for creating or modifying a layer.

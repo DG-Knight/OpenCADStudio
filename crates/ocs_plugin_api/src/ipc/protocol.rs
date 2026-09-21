@@ -142,6 +142,8 @@ pub enum PluginRequest {
     AddLayer(crate::host::LayerConfig),
     /// Modify specified properties of an existing layer in the active document.
     ModifyLayer(crate::host::LayerConfig),
+    /// Run a command on the active document tab's command line (AutoLISP style).
+    ExecuteCommand(String),
 }
 
 /// Responses the host sends back for `PluginRequest`.
