@@ -374,15 +374,143 @@ pub(crate) fn dynamic_dimension_text(name: &str, value: f64, format: u8) -> Stri
     }
 }
 
-/// The expression a measured value seeds a parameter with (`100`, `111.8034`).
+/// The expression a measured value seeds a parameter with: twelve
+/// significant digits with the trailing zeros dropped (`100`,
+/// `111.803398875`), as the reference stores it.
 pub(crate) fn measured_expression(value: f64) -> String {
-    let text = format!("{value:.4}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    if text.is_empty() || text == "-" {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    // Solver noise (24.9999999047) reads as the round value it means.
+    let snapped = (value * 1.0e4).round() / 1.0e4;
+    let value = if (value - snapped).abs() < 1.0e-6 {
+        snapped
+    } else {
+        value
+    };
+    let magnitude = value.abs();
+    let integer_digits = if magnitude < 1.0 {
+        1
+    } else {
+        magnitude.log10().floor() as i32 + 1
+    };
+    let decimals = (12 - integer_digits).clamp(0, 12) as usize;
+    let text = format!("{value:.decimals$}");
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        text.as_str()
+    };
+    if text.is_empty() || text == "-" || text == "-0" {
         "0".to_string()
     } else {
         text.to_string()
     }
+}
+
+/// Moves a dynamic dimension's extension origins to `first`/`second`,
+/// keeping its dimension line where it was; true when anything moved.
+fn dynamic_dimension_follow_points(
+    dimension: &mut acadrust::entities::Dimension,
+    first: Vector3,
+    second: Vector3,
+) -> bool {
+    use acadrust::entities::Dimension;
+    let same = |a: Vector3, b: Vector3| (a - b).length_squared() < 1.0e-16;
+    let to_dvec = |p: Vector3| glam::DVec3::new(p.x, p.y, p.z);
+    let (current_first, current_second, definition, axis) = match dimension {
+        Dimension::Aligned(d) => (d.first_point, d.second_point, d.definition_point, None),
+        Dimension::Linear(d) => (
+            d.first_point,
+            d.second_point,
+            d.definition_point,
+            Some(glam::DVec3::new(d.rotation.cos(), d.rotation.sin(), 0.0)),
+        ),
+        _ => return false,
+    };
+    if same(current_first, first) && same(current_second, second) {
+        return false;
+    }
+    let text = dimension.base().user_text.clone();
+    let rebuilt = match axis {
+        None => crate::modules::annotate::aligned_dim::aligned_dimension_entity(
+            to_dvec(first),
+            to_dvec(second),
+            to_dvec(definition),
+            text,
+        ),
+        Some(axis) => crate::modules::annotate::linear_dim::linear_dimension_entity(
+            to_dvec(first),
+            to_dvec(second),
+            to_dvec(definition),
+            axis,
+            text,
+        ),
+    };
+    let acadrust::EntityType::Dimension(mut rebuilt) = rebuilt else {
+        return false;
+    };
+    // Everything but the geometry stays: identity, layer, color, style, xdata.
+    let base = dimension.base();
+    let target = rebuilt.base_mut();
+    target.common = base.common.clone();
+    target.style_name = base.style_name.clone();
+    target.text_rotation = base.text_rotation;
+    target.attachment_point = base.attachment_point;
+    target.line_spacing_style = base.line_spacing_style;
+    target.line_spacing_factor = base.line_spacing_factor;
+    *dimension = rebuilt;
+    true
+}
+
+/// What stays put when a dimensional constraint's value changes: its first
+/// point, and — when the distance runs perpendicular to a line that owns
+/// that point (2Lines, line-first Point & line) — the whole line, so the
+/// other object moves, as in the reference.
+pub(crate) fn dimensional_anchor_refs(
+    document: &acadrust::CadDocument,
+    refs: &[ParametricRef],
+) -> Vec<ParametricRef> {
+    let Some(&first) = refs.first() else {
+        return Vec::new();
+    };
+    let mut anchors = vec![first];
+    if let Some(&line) = refs.get(2).filter(|line| line.entity == first.entity) {
+        let ends = match line.segment_index() {
+            Some(index) => {
+                let index = index as i32;
+                let end = document
+                    .get_entity(line.entity)
+                    .and_then(|entity| resolve_point(entity, index + 1))
+                    .map_or(0, |_| index + 1);
+                [
+                    ParametricRef::point(line.entity, index),
+                    ParametricRef::point(line.entity, end),
+                ]
+            }
+            None => [
+                ParametricRef::point(line.entity, 0),
+                ParametricRef::point(line.entity, 1),
+            ],
+        };
+        anchors.extend(ends.into_iter().filter(|end| *end != first));
+    }
+    anchors
+}
+
+/// The constraint a dynamic dimension shows, with the table its parameter
+/// lives in.
+pub(crate) fn dynamic_dimension_constraint(
+    sets: &[ParametricConstraintSet],
+    handle: Handle,
+) -> Option<(&ParametricConstraintSet, &ParametricConstraint)> {
+    sets.iter().find_map(|set| {
+        let id = set
+            .dimensions
+            .iter()
+            .find_map(|(id, dimension)| (*dimension == handle).then_some(*id))?;
+        Some((set, set.get(id)?))
+    })
 }
 
 /// Grabbed points are exact kernel inputs; the solver anchors the remaining
@@ -1460,10 +1588,11 @@ impl super::Scene {
 
     /// Rewrites every dynamic dimension's text from its constraint's
     /// parameter name and current value, in the CONSTRAINTNAMEFORMAT
-    /// reading `constraint_name_format` selects.
+    /// reading `constraint_name_format` selects, and moves its extension
+    /// origins to where the solve left the constraint points.
     pub(crate) fn refresh_dynamic_dimension_texts(&mut self) {
         let format = self.constraint_name_format;
-        let mut updates: Vec<(Handle, String)> = Vec::new();
+        let mut updates: Vec<(Handle, String, Option<(Vector3, Vector3)>)> = Vec::new();
         for set in &self.parametric_constraints {
             let table = if set.local_parameters.is_empty() {
                 &self.named_parameters
@@ -1481,23 +1610,43 @@ impl super::Scene {
                     Some(DrivingValue::Literal(value)) => (String::new(), *value),
                     None => continue,
                 };
-                updates.push((*dimension, dynamic_dimension_text(&name, value, format)));
+                let world = |reference: &ParametricRef| {
+                    let entity = self.document.get_entity(reference.entity)?;
+                    resolve_point(entity, reference.marker?)
+                };
+                let points = match constraint.refs.as_slice() {
+                    [first, second, ..] => world(first).zip(world(second)),
+                    _ => None,
+                };
+                updates.push((
+                    *dimension,
+                    dynamic_dimension_text(&name, value, format),
+                    points,
+                ));
             }
         }
-        for (handle, text) in updates {
+        for (handle, text, points) in updates {
             let Some(acadrust::EntityType::Dimension(mut dimension)) =
                 self.document.get_entity(handle).cloned()
             else {
                 continue;
             };
-            if dimension.base().user_text.as_deref() == Some(text.as_str()) {
-                continue;
+            let mut changed = false;
+            if let Some((first, second)) = points {
+                if dynamic_dimension_follow_points(&mut dimension, first, second) {
+                    changed = true;
+                }
             }
-            crate::entities::dimension::set_dimension_text_override(
-                dimension.base_mut(),
-                Some(text),
-            );
-            self.update_entity(acadrust::EntityType::Dimension(dimension));
+            if dimension.base().user_text.as_deref() != Some(text.as_str()) {
+                crate::entities::dimension::set_dimension_text_override(
+                    dimension.base_mut(),
+                    Some(text),
+                );
+                changed = true;
+            }
+            if changed {
+                self.update_entity(acadrust::EntityType::Dimension(dimension));
+            }
         }
     }
 

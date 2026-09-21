@@ -6295,7 +6295,7 @@ fn dimension_text_is_outside(dim: &Dimension, style: Option<&DimStyle>) -> bool 
         }
 }
 
-/// Where a dynamic dimension's lock mark sits: just before the text on its
+/// Where a dynamic dimension's lock mark sits: just after the text on its
 /// baseline, with the direction that points away from the text.
 pub(crate) fn dynamic_dimension_lock_anchor(
     document: &CadDocument,
@@ -6323,13 +6323,11 @@ pub(crate) fn dynamic_dimension_lock_anchor(
         dimension_text_natural_rotation(dim)
     };
     let (sr, cr) = rot.sin_cos();
-    let outward = Vector3::new(-cr, -sr, 0.0);
+    let outward = Vector3::new(cr, sr, 0.0);
+    // A glyph-sized gap keeps the lock clear of the last digit.
+    let reach = half_width + text_height * 0.9;
     Some((
-        Vector3::new(
-            pos.x + outward.x * half_width,
-            pos.y + outward.y * half_width,
-            pos.z,
-        ),
+        Vector3::new(pos.x + outward.x * reach, pos.y + outward.y * reach, pos.z),
         outward,
     ))
 }

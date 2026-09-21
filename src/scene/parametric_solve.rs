@@ -993,9 +993,15 @@ fn resolved_target(params: &ParameterTable, constraint: &ParametricConstraint) -
     if !value.is_finite() {
         return None;
     }
+    // A dimensional distance keeps its sign in the parameter but measures
+    // its magnitude, as the reference does (`d1=-50` shortens the line to
+    // 50; `0` folds the points together).
+    if constraint.kind == ConstraintKind::Distance {
+        return Some(value.abs());
+    }
     let must_be_positive = matches!(
         constraint.kind,
-        ConstraintKind::Distance | ConstraintKind::Radius | ConstraintKind::Diameter
+        ConstraintKind::Radius | ConstraintKind::Diameter
     );
     (!must_be_positive || value > 0.0).then_some(value)
 }
@@ -1590,6 +1596,14 @@ fn build_constraint(
             let Some(resolved) = resolved_target(params, c) else {
                 return Vec::new();
             };
+            // A zero distance folds the points together; the distance
+            // residual has no gradient there, the coordinate equalities do.
+            if resolved.abs() <= f64::EPSILON {
+                return vec![
+                    Rc::new(Equal::new(pa.x, pb.x, 1.0)),
+                    Rc::new(Equal::new(pa.y, pb.y, 1.0)),
+                ];
+            }
             let target = sys.add_param(resolved, true);
             vec![Rc::new(P2PDistance::new(pa, pb, target))]
         }

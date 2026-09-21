@@ -1625,9 +1625,21 @@ pub enum CmdResult {
         second_point: DVec3,
         location: DVec3,
         axis: DVec3,
+        /// Aligned's Point & line / 2Lines: the line the distance is
+        /// measured perpendicular to.
+        direction: Option<crate::scene::parametric_constraints::ParametricRef>,
         name: String,
         expression: String,
         label: &'static str,
+    },
+    /// Aligned's 2Lines: makes `second_line` parallel to `first_line` (whose
+    /// ends stay put), then hands the second line's solved ends back through
+    /// `CadCommand::accept_parallel_line`.
+    MakeParallel {
+        first_line: crate::scene::parametric_constraints::ParametricRef,
+        first_ends: [crate::scene::parametric_constraints::ParametricRef; 2],
+        second_line: crate::scene::parametric_constraints::ParametricRef,
+        second_ends: [crate::scene::parametric_constraints::ParametricRef; 2],
     },
     /// Adds a point or object symmetry relation around a picked line. The
     /// first reference and axis remain fixed during initial placement.
@@ -2478,6 +2490,14 @@ pub trait CadCommand: Send {
         &mut self,
         _reference: crate::scene::parametric_constraints::ParametricRef,
         _point: DVec3,
+    ) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    /// The second line's ends after a `MakeParallel` solve.
+    fn accept_parallel_line(
+        &mut self,
+        _ends: [(crate::scene::parametric_constraints::ParametricRef, DVec3); 2],
     ) -> CmdResult {
         CmdResult::NeedPoint
     }

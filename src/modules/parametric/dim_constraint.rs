@@ -16,6 +16,29 @@ pub enum DimConstraintAxis {
     Aligned,
 }
 
+/// A picked line (a line entity or one polyline segment) an Aligned
+/// constraint measures perpendicular to.
+#[derive(Clone, Copy)]
+struct LineTarget {
+    line: ParametricRef,
+    /// Unit direction from its start to its end.
+    dir: DVec3,
+    /// Its two ends and where they are.
+    ends: [(ParametricRef, DVec3); 2],
+}
+
+impl LineTarget {
+    /// The end nearest to `point` — the end the reference measures from.
+    fn nearest_end(&self, point: DVec3) -> (ParametricRef, DVec3) {
+        let [a, b] = self.ends;
+        if (b.1 - point).length_squared() < (a.1 - point).length_squared() {
+            b
+        } else {
+            a
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Step {
     /// `Specify first constraint point or [Object] <Object>:`
@@ -27,12 +50,37 @@ enum Step {
         first: ParametricRef,
         first_point: DVec3,
     },
+    /// Aligned's Point & line: `Specify constraint point or [Line] <Line>:`
+    PointLinePoint,
+    /// `Select line:` after the constraint point.
+    PointLineLine {
+        point: ParametricRef,
+        point_pos: DVec3,
+    },
+    /// `Select line:` first (the Line option).
+    LineFirst,
+    /// `Select constraint point:` after the line.
+    LinePoint { line: LineTarget },
+    /// Aligned's 2Lines: `Select first line:`
+    TwoLinesFirst,
+    /// `Select second line to make parallel:`
+    TwoLinesSecond { line: LineTarget },
+    /// The host is making the second line parallel; `accept_parallel_line`
+    /// brings its solved ends.
+    TwoLinesParallel {
+        first: LineTarget,
+        second: LineTarget,
+        /// Where the second line was picked.
+        pick: DVec3,
+    },
     /// `Specify dimension line location:`
     Location {
         first: ParametricRef,
         second: ParametricRef,
         first_point: DVec3,
         second_point: DVec3,
+        /// The line the distance is measured perpendicular to.
+        direction: Option<LineTarget>,
     },
     /// `Enter value or name and value <d1=100>:`
     Value {
@@ -44,6 +92,7 @@ enum Step {
         axis: DVec3,
         kind: ConstraintKind,
         measured: f64,
+        direction: Option<LineTarget>,
     },
 }
 
@@ -63,6 +112,7 @@ impl DimConstraintCommand {
     pub const NO_POINT: &'static str = "No valid constraint point found.";
     pub const SAME_POINT: &'static str =
         "The object or point is already selected.  Select a different object or constraint point.";
+    pub const INVALID_LINE: &'static str = "Invalid selection for Aligned. Select a line segment, polyline segment, text, MText, major or minor axis of ellipse or elliptical arc.";
 
     pub fn new(axis: DimConstraintAxis, default_name: String) -> Self {
         Self {
@@ -127,9 +177,72 @@ impl DimConstraintCommand {
         Some(DVec3::new(point.x, point.y, point.z))
     }
 
+    /// The line a Point & line or 2Lines pick measures against: a line
+    /// entity as a whole, or the picked polyline segment.
+    fn line_target(entity: &EntityType, handle: Handle, point: DVec3) -> Option<LineTarget> {
+        let (line, first, second) = match entity {
+            EntityType::Line(_) => (
+                ParametricRef::whole(handle),
+                ParametricRef::point(handle, 0),
+                ParametricRef::point(handle, 1),
+            ),
+            EntityType::LwPolyline(_) | EntityType::Polyline2D(_) => {
+                let (source, _, _) =
+                    crate::scene::centerline::picked_source(entity, handle, point)?;
+                let index = source.segment_index;
+                if index < 0 {
+                    return None;
+                }
+                let end = if resolve_point(entity, index + 1).is_some() {
+                    index + 1
+                } else {
+                    0
+                };
+                (
+                    ParametricRef::segment(handle, index as usize),
+                    ParametricRef::point(handle, index),
+                    ParametricRef::point(handle, end),
+                )
+            }
+            _ => return None,
+        };
+        let start = Self::world(entity, first)?;
+        let finish = Self::world(entity, second)?;
+        let dir = (finish - start).try_normalize()?;
+        Some(LineTarget {
+            line,
+            dir,
+            ends: [(first, start), (second, finish)],
+        })
+    }
+
+    /// A picked line for the current line step, or the message to show.
+    fn pick_line(&mut self, handle: Handle, point: DVec3) -> Result<LineTarget, &'static str> {
+        if handle.is_null() {
+            return Err(Self::NO_OBJECT);
+        }
+        let Some(entity) = self.picked_entity.take() else {
+            return Err("");
+        };
+        Self::line_target(&entity, handle, point).ok_or(Self::INVALID_LINE)
+    }
+
     /// The measured kind and axis: Linear reads the dimension line location
-    /// the way a linear dimension does, the others are fixed.
-    fn decide(&self, first: DVec3, second: DVec3, location: DVec3) -> (ConstraintKind, DVec3) {
+    /// the way a linear dimension does, the others are fixed; a Point & line
+    /// or 2Lines distance runs perpendicular to its line.
+    fn decide(
+        &self,
+        first: DVec3,
+        second: DVec3,
+        location: DVec3,
+        direction: Option<LineTarget>,
+    ) -> (ConstraintKind, DVec3) {
+        if let Some(line) = direction {
+            return (
+                ConstraintKind::DistanceDirected,
+                DVec3::new(line.dir.y, -line.dir.x, 0.0),
+            );
+        }
         match self.axis {
             DimConstraintAxis::Linear => {
                 let axis =
@@ -149,10 +262,11 @@ impl DimConstraintCommand {
         }
     }
 
-    fn measured(kind: ConstraintKind, first: DVec3, second: DVec3) -> f64 {
+    fn measured(kind: ConstraintKind, first: DVec3, second: DVec3, axis: DVec3) -> f64 {
         match kind {
             ConstraintKind::DistanceX => (second.x - first.x).abs(),
             ConstraintKind::DistanceY => (second.y - first.y).abs(),
+            ConstraintKind::DistanceDirected => (second - first).dot(axis).abs(),
             _ => (second - first).length(),
         }
     }
@@ -166,6 +280,7 @@ impl DimConstraintCommand {
             location,
             axis,
             kind,
+            direction,
             ..
         } = self.step
         else {
@@ -182,6 +297,7 @@ impl DimConstraintCommand {
             second_point,
             location,
             axis,
+            direction: direction.map(|line| line.line),
             name,
             expression,
             label: match self.axis {
@@ -202,11 +318,23 @@ impl CadCommand for DimConstraintCommand {
     fn prompt(&self) -> String {
         let name = self.command_name();
         match self.step {
+            Step::First if self.axis == DimConstraintAxis::Aligned => format!(
+                "{name}  Specify first constraint point or [Object/Point & line/2Lines] <Object>:"
+            ),
             Step::First => {
                 format!("{name}  Specify first constraint point or [Object] <Object>:")
             }
             Step::Object => format!("{name}  Select object:"),
             Step::Second { .. } => format!("{name}  Specify second constraint point:"),
+            Step::PointLinePoint => {
+                format!("{name}  Specify constraint point or [Line] <Line>:")
+            }
+            Step::PointLineLine { .. } | Step::LineFirst => format!("{name}  Select line:"),
+            Step::LinePoint { .. } => format!("{name}  Select constraint point:"),
+            Step::TwoLinesFirst => format!("{name}  Select first line:"),
+            Step::TwoLinesSecond { .. } | Step::TwoLinesParallel { .. } => {
+                format!("{name}  Select second line to make parallel:")
+            }
             Step::Location { .. } => format!("{name}  Specify dimension line location:"),
             Step::Value { measured, .. } => format!(
                 "{name}  Enter value or name and value <{}={}>:",
@@ -217,9 +345,16 @@ impl CadCommand for DimConstraintCommand {
     }
 
     fn options(&self) -> Vec<CmdOption> {
-        matches!(self.step, Step::First)
-            .then(|| vec![CmdOption::new("Object", "O")])
-            .unwrap_or_default()
+        match self.step {
+            Step::First if self.axis == DimConstraintAxis::Aligned => vec![
+                CmdOption::new("Object", "O"),
+                CmdOption::new("Point & line", "P"),
+                CmdOption::new("2Lines", "2L"),
+            ],
+            Step::First => vec![CmdOption::new("Object", "O")],
+            Step::PointLinePoint => vec![CmdOption::new("Line", "L")],
+            _ => Vec::new(),
+        }
     }
 
     fn wants_text_input(&self) -> bool {
@@ -227,15 +362,31 @@ impl CadCommand for DimConstraintCommand {
     }
 
     fn point_step_accepts_keywords(&self) -> bool {
-        matches!(self.step, Step::First | Step::Value { .. })
+        matches!(
+            self.step,
+            Step::First | Step::PointLinePoint | Step::Value { .. }
+        )
     }
 
     fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
         match self.step {
             Step::First => {
                 let keyword = text.trim().trim_start_matches('_').to_ascii_uppercase();
-                if matches!(keyword.as_str(), "O" | "OBJECT") {
-                    self.step = Step::Object;
+                let aligned = self.axis == DimConstraintAxis::Aligned;
+                match keyword.as_str() {
+                    "O" | "OBJECT" => self.step = Step::Object,
+                    "P" | "POINT" | "POINT & LINE" | "POINT&LINE" if aligned => {
+                        self.step = Step::PointLinePoint
+                    }
+                    "2L" | "2LINES" if aligned => self.step = Step::TwoLinesFirst,
+                    _ => return None,
+                }
+                Some(CmdResult::NeedPoint)
+            }
+            Step::PointLinePoint => {
+                let keyword = text.trim().trim_start_matches('_').to_ascii_uppercase();
+                if matches!(keyword.as_str(), "L" | "LINE") {
+                    self.step = Step::LineFirst;
                     return Some(CmdResult::NeedPoint);
                 }
                 None
@@ -253,7 +404,18 @@ impl CadCommand for DimConstraintCommand {
     }
 
     fn needs_entity_pick(&self) -> bool {
-        matches!(self.step, Step::First | Step::Object | Step::Second { .. })
+        matches!(
+            self.step,
+            Step::First
+                | Step::Object
+                | Step::Second { .. }
+                | Step::PointLinePoint
+                | Step::PointLineLine { .. }
+                | Step::LineFirst
+                | Step::LinePoint { .. }
+                | Step::TwoLinesFirst
+                | Step::TwoLinesSecond { .. }
+        )
     }
 
     fn entity_pick_accepts_points(&self) -> bool {
@@ -280,11 +442,72 @@ impl CadCommand for DimConstraintCommand {
         match self.step {
             // The host resolves the constraint point and hands it back
             // through `accept_constraint_point`.
-            Step::First | Step::Second { .. } => CmdResult::CheckConstraintPoint(CoincidentPick {
-                handle: (!handle.is_null()).then_some(handle),
-                point,
-                whole_curve: false,
-            }),
+            Step::First | Step::Second { .. } | Step::PointLinePoint | Step::LinePoint { .. } => {
+                CmdResult::CheckConstraintPoint(CoincidentPick {
+                    handle: (!handle.is_null()).then_some(handle),
+                    point,
+                    whole_curve: false,
+                })
+            }
+            Step::PointLineLine { point: first, point_pos } => {
+                match self.pick_line(handle, point) {
+                    Ok(line) => {
+                        if line.line.entity == first.entity {
+                            return Self::report(Self::SAME_POINT);
+                        }
+                        let (second, second_point) = line.nearest_end(point_pos);
+                        self.step = Step::Location {
+                            first,
+                            second,
+                            first_point: point_pos,
+                            second_point,
+                            direction: Some(line),
+                        };
+                        CmdResult::NeedPoint
+                    }
+                    Err("") => CmdResult::NeedPoint,
+                    Err(message) => Self::report(message),
+                }
+            }
+            Step::LineFirst => match self.pick_line(handle, point) {
+                Ok(line) => {
+                    self.step = Step::LinePoint { line };
+                    CmdResult::NeedPoint
+                }
+                Err("") => CmdResult::NeedPoint,
+                Err(message) => Self::report(message),
+            },
+            Step::TwoLinesFirst => match self.pick_line(handle, point) {
+                Ok(line) => {
+                    self.step = Step::TwoLinesSecond { line };
+                    CmdResult::NeedPoint
+                }
+                Err("") => CmdResult::NeedPoint,
+                Err(message) => Self::report(message),
+            },
+            Step::TwoLinesSecond { line: first_line } => match self.pick_line(handle, point) {
+                Ok(second_line) => {
+                    if second_line.line == first_line.line {
+                        return Self::report(Self::SAME_POINT);
+                    }
+                    // The host makes the second line parallel first; the
+                    // distance is measured on the solved geometry.
+                    self.step = Step::TwoLinesParallel {
+                        first: first_line,
+                        second: second_line,
+                        pick: point,
+                    };
+                    CmdResult::MakeParallel {
+                        first_line: first_line.line,
+                        first_ends: [first_line.ends[0].0, first_line.ends[1].0],
+                        second_line: second_line.line,
+                        second_ends: [second_line.ends[0].0, second_line.ends[1].0],
+                    }
+                }
+                Err("") => CmdResult::NeedPoint,
+                Err(message) => Self::report(message),
+            },
+            Step::TwoLinesParallel { .. } => CmdResult::NeedPoint,
             Step::Object => {
                 if handle.is_null() {
                     return Self::report(Self::NO_OBJECT);
@@ -308,11 +531,38 @@ impl CadCommand for DimConstraintCommand {
                     second,
                     first_point,
                     second_point,
+                    direction: None,
                 };
                 CmdResult::NeedPoint
             }
             Step::Location { .. } | Step::Value { .. } => self.on_point(point),
         }
+    }
+
+    fn accept_parallel_line(&mut self, ends: [(ParametricRef, DVec3); 2]) -> CmdResult {
+        let Step::TwoLinesParallel { first, second, pick } = self.step else {
+            return CmdResult::NeedPoint;
+        };
+        let Some(dir) = (ends[1].1 - ends[0].1).try_normalize() else {
+            return Self::report(Self::NO_POINT);
+        };
+        let second = LineTarget {
+            line: second.line,
+            dir,
+            ends,
+        };
+        // The first line's end nearest the second pick, then the second
+        // line's end nearest that end.
+        let (first_ref, first_point) = first.nearest_end(pick);
+        let (second_ref, second_point) = second.nearest_end(first_point);
+        self.step = Step::Location {
+            first: first_ref,
+            second: second_ref,
+            first_point,
+            second_point,
+            direction: Some(first),
+        };
+        CmdResult::NeedPoint
     }
 
     fn accept_constraint_point(&mut self, reference: ParametricRef, point: DVec3) -> CmdResult {
@@ -333,6 +583,28 @@ impl CadCommand for DimConstraintCommand {
                     second: reference,
                     first_point,
                     second_point: point,
+                    direction: None,
+                };
+                CmdResult::NeedPoint
+            }
+            Step::PointLinePoint => {
+                self.step = Step::PointLineLine {
+                    point: reference,
+                    point_pos: point,
+                };
+                CmdResult::NeedPoint
+            }
+            Step::LinePoint { line } => {
+                if line.line.entity == reference.entity {
+                    return Self::report(Self::SAME_POINT);
+                }
+                let (first, first_point) = line.nearest_end(point);
+                self.step = Step::Location {
+                    first,
+                    second: reference,
+                    first_point,
+                    second_point: point,
+                    direction: Some(line),
                 };
                 CmdResult::NeedPoint
             }
@@ -342,20 +614,27 @@ impl CadCommand for DimConstraintCommand {
 
     fn on_point(&mut self, point: DVec3) -> CmdResult {
         match self.step {
-            Step::First | Step::Second { .. } => CmdResult::CheckConstraintPoint(CoincidentPick {
-                handle: None,
-                point,
-                whole_curve: false,
-            }),
-            Step::Object => Self::report(Self::NO_OBJECT),
+            Step::First | Step::Second { .. } | Step::PointLinePoint | Step::LinePoint { .. } => {
+                CmdResult::CheckConstraintPoint(CoincidentPick {
+                    handle: None,
+                    point,
+                    whole_curve: false,
+                })
+            }
+            Step::Object
+            | Step::PointLineLine { .. }
+            | Step::LineFirst
+            | Step::TwoLinesFirst
+            | Step::TwoLinesSecond { .. } => Self::report(Self::NO_OBJECT),
             Step::Location {
                 first,
                 second,
                 first_point,
                 second_point,
+                direction,
             } => {
-                let (kind, axis) = self.decide(first_point, second_point, point);
-                let measured = Self::measured(kind, first_point, second_point);
+                let (kind, axis) = self.decide(first_point, second_point, point, direction);
+                let measured = Self::measured(kind, first_point, second_point, axis);
                 self.step = Step::Value {
                     first,
                     second,
@@ -365,10 +644,11 @@ impl CadCommand for DimConstraintCommand {
                     axis,
                     kind,
                     measured,
+                    direction,
                 };
                 CmdResult::ReportMeasurement(format!("Dimension text = {measured:.4}"))
             }
-            Step::Value { .. } => CmdResult::NeedPoint,
+            Step::TwoLinesParallel { .. } | Step::Value { .. } => CmdResult::NeedPoint,
         }
     }
 
@@ -376,6 +656,10 @@ impl CadCommand for DimConstraintCommand {
         match self.step {
             Step::First => {
                 self.step = Step::Object;
+                CmdResult::NeedPoint
+            }
+            Step::PointLinePoint => {
+                self.step = Step::LineFirst;
                 CmdResult::NeedPoint
             }
             Step::Value { measured, .. } => self

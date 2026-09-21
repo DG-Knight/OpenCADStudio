@@ -3259,6 +3259,16 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
     }
 
     pub(super) fn on_prop_geom_commit(&mut self, field: &'static str) -> Task<Message> {
+                use crate::ui::window::named_parameters::ParamField;
+                // A dynamic dimension's Name/Expression rows edit its parameter.
+                let dynamic_field = match field {
+                    "dyn_constraint_name" => Some(ParamField::Name),
+                    "dyn_constraint_expression" => Some(ParamField::Formula),
+                    _ => None,
+                };
+                if let Some(param_field) = dynamic_field {
+                    return self.on_dynamic_dimension_field_commit(field, param_field);
+                }
                 let i = self.active_tab;
                 self.tabs[i].properties.active_field = None;
                 let handles = self.property_target_handles(i);
