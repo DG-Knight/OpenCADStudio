@@ -4140,10 +4140,23 @@ mod tests {
             Vector3::new(1.0, 0.0, 0.0),
         )));
         let refs = [ParametricRef::point(line, 0), ParametricRef::point(line, 1)];
+        // A distance keeps a negative value's sign in the parameter and
+        // measures its magnitude (`d1=-50`); a radius has no such reading.
         assert!(scene
             .validate_parametric_constraint(
                 ConstraintKind::Distance,
                 &refs,
+                Some(&DrivingValue::Literal(-1.0)),
+            )
+            .is_ok());
+        let circle = scene.add_entity(EntityType::Circle(acadrust::entities::Circle::from_center_radius(
+            Vector3::new(0.0, 0.0, 0.0),
+            1.0,
+        )));
+        assert!(scene
+            .validate_parametric_constraint(
+                ConstraintKind::Radius,
+                &[ParametricRef::whole(circle)],
                 Some(&DrivingValue::Literal(-1.0)),
             )
             .is_err());
