@@ -1466,13 +1466,23 @@ fn build_constraint(
             let Some(mirror) = whole_line(sys, cache, *m) else {
                 return Vec::new();
             };
+            // The connecting direction is held perpendicular to the axis as a
+            // projection onto the axis direction being zero: a polynomial
+            // residual the solver can follow from any start. The angle form
+            // (`Perpendicular`) locks its turn side at construction and stalls
+            // when the pair has to swing through the axis direction — a point
+            // starting far from its mirror image never arrived.
+            let across_axis = |sys: &mut System, pa: GPoint, pb: GPoint| -> Rc<dyn Constraint> {
+                let zero = sys.add_param(0.0, true);
+                Rc::new(ProjectedDistanceAlongLine::new(pa, pb, zero, mirror, false))
+            };
             if let (Some(pa), Some(pb)) =
                 (point_ref(sys, cache, *a), point_ref(sys, cache, *b))
             {
                 let pair = GLine { p1: pa, p2: pb };
                 return vec![
                     Rc::new(MidpointOnLine::new(pair, mirror)),
-                    Rc::new(PerpendicularConstraint::new(sys.store(), pair, mirror)),
+                    across_axis(sys, pa, pb),
                 ];
             }
             let (Some(first), Some(second)) = (
@@ -1500,11 +1510,7 @@ fn build_constraint(
                     };
                     vec![
                         Rc::new(MidpointOnLine::new(centers, mirror)),
-                        Rc::new(PerpendicularConstraint::new(
-                            sys.store(),
-                            centers,
-                            mirror,
-                        )),
+                        across_axis(sys, first.center, second.center),
                         Rc::new(Equal::new(second.rad, first.rad, 1.0)),
                     ]
                 }
@@ -1523,11 +1529,7 @@ fn build_constraint(
                     };
                     vec![
                         Rc::new(MidpointOnLine::new(centers, mirror)),
-                        Rc::new(PerpendicularConstraint::new(
-                            sys.store(),
-                            centers,
-                            mirror,
-                        )),
+                        across_axis(sys, first.center, second.center),
                         Rc::new(SymmetricLineDirections::new(
                             sys.store(),
                             first_axis,
