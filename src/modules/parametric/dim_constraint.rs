@@ -390,6 +390,70 @@ impl CadCommand for DimConstraintCommand {
     }
 }
 
+/// `DIMCONSTRAINT`: the reference's option front end for the dimensional
+/// constraint family; each choice runs the focused command.
+pub struct DimConstraintMenuCommand;
+
+impl DimConstraintMenuCommand {
+    fn dispatch(keyword: &str) -> Option<&'static str> {
+        Some(match keyword {
+            "L" | "LINEAR" => "DCLINEAR",
+            "H" | "HORIZONTAL" => "DCHORIZONTAL",
+            "V" | "VERTICAL" => "DCVERTICAL",
+            "A" | "ALIGNED" => "DCALIGNED",
+            "AN" | "ANGULAR" => "DCANGULAR",
+            "R" | "RADIAL" | "RADIUS" => "DCRADIUS",
+            "D" | "DIAMETER" => "DCDIAMETER",
+            "C" | "CONVERT" => "DCCONVERT",
+            _ => return None,
+        })
+    }
+}
+
+impl CadCommand for DimConstraintMenuCommand {
+    fn name(&self) -> &'static str {
+        "DIMCONSTRAINT"
+    }
+
+    fn prompt(&self) -> String {
+        "DIMCONSTRAINT  Enter dimensional constraint option [Linear/Horizontal/Vertical/Aligned/ANgular/Radial/Diameter/Convert] <Aligned>:".to_string()
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        vec![
+            CmdOption::new("Linear", "L"),
+            CmdOption::new("Horizontal", "H"),
+            CmdOption::new("Vertical", "V"),
+            CmdOption::new("Aligned", "A"),
+            CmdOption::new("ANgular", "AN"),
+            CmdOption::new("Radial", "R"),
+            CmdOption::new("Diameter", "D"),
+            CmdOption::new("Convert", "C"),
+        ]
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let keyword = text.trim().trim_start_matches('_').to_ascii_uppercase();
+        Self::dispatch(&keyword).map(|command| CmdResult::Dispatch(command.to_string()))
+    }
+
+    fn on_point(&mut self, _point: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Dispatch("DCALIGNED".to_string())
+    }
+
+    fn on_escape(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

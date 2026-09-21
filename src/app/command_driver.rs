@@ -3686,6 +3686,8 @@ impl OpenCADStudio {
                     &[first],
                     self.constraint_solve_mode,
                 );
+                // DYNCONSTRAINTDISPLAY 0 also keeps a new dynamic dimension off screen.
+                self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
                 self.tabs[i].dirty = true;
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;

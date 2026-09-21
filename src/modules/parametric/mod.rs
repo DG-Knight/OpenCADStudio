@@ -26,7 +26,7 @@ mod tools;
 mod value;
 pub use coincident::{coincident_tool, CoincidentConstraintCommand};
 pub use concentric::ConcentricConstraintCommand;
-pub use dim_constraint::{DimConstraintAxis, DimConstraintCommand};
+pub use dim_constraint::{DimConstraintAxis, DimConstraintCommand, DimConstraintMenuCommand};
 pub use constraint_bar::ConstraintBarOptionCommand;
 pub use equal_command::EqualConstraintCommand;
 pub use equal_distance::{equal_distance_tool, EqualDistanceConstraintCommand};
@@ -158,7 +158,7 @@ inventory::submit!(crate::command::CommandRegistration {
     names: &[
         "AUTOCONSTRAIN", "CONSTRAINTSETTINGS", "GCSMOOTH", "GCSHOW", "GCHIDE", "GCRESET",
         "GCSHOWALL", "GCHIDEALL", "DCSHOW", "DCHIDE", "DCSHOWALL", "DCHIDEALL",
-        "DCCONVERT", "DELCONSTRAINT",
+        "DCCONVERT", "DELCONSTRAINT", "DIMCONSTRAINT",
     ]
 });
 

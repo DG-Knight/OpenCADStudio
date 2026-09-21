@@ -361,6 +361,9 @@ pub(crate) fn next_dimensional_parameter_name(
         .unwrap_or_else(|| "d1".to_string())
 }
 
+/// The constraint-bar label that draws a dynamic dimension's lock mark.
+pub const DYNAMIC_DIMENSION_GLYPH: &str = "\u{1F512}";
+
 /// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
 /// 1 = value, 2 = name=value.
 pub(crate) fn dynamic_dimension_text(name: &str, value: f64, format: u8) -> String {
@@ -1561,7 +1564,43 @@ impl super::Scene {
                 self.shown_parametric_constraints.remove(&(scope, *id));
             }
         }
+        self.refresh_hidden_dynamic_dimensions();
         ids.len()
+    }
+
+    /// True for a dimension that shows a dimensional constraint.
+    pub(crate) fn is_dynamic_dimension(&self, handle: Handle) -> bool {
+        self.parametric_constraints
+            .iter()
+            .any(|set| set.dimensions.values().any(|dimension| *dimension == handle))
+    }
+
+    /// Re-derives which dynamic dimensions stay off screen (DCHIDE, or
+    /// DYNCONSTRAINTDISPLAY 0 for all of them) and redraws the ones that
+    /// changed.
+    pub(crate) fn refresh_hidden_dynamic_dimensions(&mut self) {
+        let desired: rustc_hash::FxHashSet<Handle> = self
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| {
+                set.dimensions.iter().filter_map(|(id, dimension)| {
+                    (!self.dynamic_constraint_display
+                        || !self.is_parametric_constraint_visible(set.scope, *id))
+                    .then_some(*dimension)
+                })
+            })
+            .collect();
+        if desired == self.hidden_dynamic_dimensions {
+            return;
+        }
+        let changes: Vec<_> = self
+            .hidden_dynamic_dimensions
+            .symmetric_difference(&desired)
+            .copied()
+            .map(|handle| (handle, super::ChangeKind::Modified))
+            .collect();
+        self.hidden_dynamic_dimensions = desired;
+        self.bump_entities(&changes);
     }
 
     /// Infers relations already present in the selected geometry.
@@ -1937,7 +1976,8 @@ impl super::Scene {
             let cam = self.camera.borrow();
             (cam.view_proj_rte(bounds), cam.eye())
         };
-        set.constraints
+        let mut placements = set
+            .constraints
             .iter()
             // A dynamic dimension is its constraint's whole display.
             .filter(|c| c.enabled && !set.dimensions.contains_key(&c.id))
@@ -2031,7 +2071,59 @@ impl super::Scene {
                     })
                     .collect::<Vec<_>>()
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // A dynamic dimension carries the reference's lock mark at the
+        // start of its text instead of a constraint bar.
+        for (id, dimension) in &set.dimensions {
+            let Some(constraint) = set.get(*id) else {
+                continue;
+            };
+            if !constraint.enabled || self.entity_temporarily_hidden(*dimension) {
+                continue;
+            }
+            let Some(acadrust::EntityType::Dimension(entity)) = self.document.get_entity(*dimension)
+            else {
+                continue;
+            };
+            let Some((anchor, outward)) = crate::entities::dimension::dynamic_dimension_lock_anchor(
+                &self.document,
+                entity,
+                self.annotation_scale as f64,
+            ) else {
+                continue;
+            };
+            let project = |point: Vector3| {
+                crate::scene::pick::grip::project_rte(
+                    glam::DVec3::new(point.x, point.y, point.z),
+                    view_rot,
+                    eye,
+                    bounds,
+                )
+            };
+            let (Some(screen), Some(outward_screen)) = (
+                project(anchor),
+                project(Vector3::new(
+                    anchor.x + outward.x,
+                    anchor.y + outward.y,
+                    anchor.z + outward.z,
+                )),
+            ) else {
+                continue;
+            };
+            let direction = (outward_screen - screen).normalize_or(glam::Vec2::NEG_X);
+            let point = iced::Point::new(bounds.x + screen.x, bounds.y + screen.y);
+            if point.x.is_finite() && point.y.is_finite() {
+                placements.push((
+                    *id,
+                    point,
+                    direction.to_array(),
+                    DYNAMIC_DIMENSION_GLYPH.to_string(),
+                    false,
+                    Vec::new(),
+                ));
+            }
+        }
+        placements
     }
 
     /// Hit-tests screen point `p` (same coordinate space as `p_full` in the

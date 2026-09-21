@@ -1506,6 +1506,16 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
             }
 
+            "DIMCONSTRAINT" => {
+                use crate::modules::parametric::DimConstraintMenuCommand;
+                // Only the dynamic form exists here.
+                self.command_line
+                    .push_output("Current settings: Constraint form = Dynamic");
+                let new_cmd = DimConstraintMenuCommand;
+                self.command_line.push_info(&new_cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
             "EDCONSTRAINT" => {
                 use crate::modules::parametric::EqualDistanceConstraintCommand;
                 let new_cmd = EqualDistanceConstraintCommand::new();

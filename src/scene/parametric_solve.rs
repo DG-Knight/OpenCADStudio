@@ -2441,7 +2441,31 @@ fn solve_scope(
             })
         })
         .flatten();
-        let pinned = axis_pin.unwrap_or(*reference);
+        // A transformed entity whose own end points a driving dimension
+        // measures keeps only the first constraint point where the transform
+        // put it; the dimension pulls the other end back to its value (a
+        // scaled line keeps its d1), as in the reference.
+        let dimension_pin = (reference.marker.is_none() && axis_pin.is_none())
+            .then(|| {
+                constraints.iter().find_map(|c| {
+                    (c.enabled
+                        && c.driving_param.is_some()
+                        && matches!(
+                            c.kind,
+                            ConstraintKind::Distance
+                                | ConstraintKind::DistanceX
+                                | ConstraintKind::DistanceY
+                                | ConstraintKind::DistanceDirected
+                        )
+                        && c.refs.len() >= 2
+                        && c.refs
+                            .iter()
+                            .all(|r| r.entity == reference.entity && r.marker.is_some()))
+                    .then(|| c.refs[0])
+                })
+            })
+            .flatten();
+        let pinned = axis_pin.or(dimension_pin).unwrap_or(*reference);
         // The re-aligned entity keeps the length the transform gave it (a
         // scaled vertical line stays scaled), not its pre-edit length.
         if axis_pin.is_some() {
