@@ -1131,7 +1131,26 @@ impl OpenCADStudio {
                         self.command_line.push_output("No constraints found.");
                         return None;
                     }
-                    let pending = self.begin_undo(i, "Delete constraints", handles.len(), true);
+                    let dimensions: Vec<acadrust::Handle> = ids
+                        .iter()
+                        .filter_map(|id| before.dimensions.get(id).copied())
+                        .collect();
+                    let parameters: Vec<String> = ids
+                        .iter()
+                        .filter_map(|id| before.get(*id))
+                        .filter_map(|constraint| match &constraint.driving_param {
+                            Some(crate::scene::named_parameters::DrivingValue::Named(name)) => {
+                                Some(name.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let pending = self.begin_undo(
+                        i,
+                        "Delete constraints",
+                        handles.len(),
+                        dimensions.is_empty(),
+                    );
                     self.tabs[i]
                         .scene
                         .record_undo_parametric_constraints_before(scope, before);
@@ -1139,6 +1158,7 @@ impl OpenCADStudio {
                     for id in &ids {
                         set.remove(*id);
                     }
+                    self.purge_dimensional_extras(i, dimensions, parameters);
                     let changes: Vec<_> = handles
                         .iter()
                         .copied()
@@ -1726,8 +1746,24 @@ impl OpenCADStudio {
                 }
             }
 
-            "DCONSTRAINT" | "DCLINEAR" | "DCHORIZONTAL" | "DCVERTICAL" | "DCALIGNED"
-            | "DCRADIUS" | "DCDIAMETER" => {
+            "DCLINEAR" | "DCHORIZONTAL" | "DCVERTICAL" | "DCALIGNED" => {
+                use crate::modules::parametric::{DimConstraintAxis, DimConstraintCommand};
+                use crate::scene::parametric_constraints::next_dimensional_parameter_name;
+                let axis = match cmd {
+                    "DCHORIZONTAL" => DimConstraintAxis::Horizontal,
+                    "DCVERTICAL" => DimConstraintAxis::Vertical,
+                    "DCALIGNED" => DimConstraintAxis::Aligned,
+                    _ => DimConstraintAxis::Linear,
+                };
+                let name = next_dimensional_parameter_name(self.tabs[i].scene.named_parameters());
+                // Both constraint points are picked inside the command.
+                self.tabs[i].scene.deselect_all();
+                let command = DimConstraintCommand::new(axis, name);
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+
+            "DCONSTRAINT" | "DCRADIUS" | "DCDIAMETER" => {
                 let handles = self.tabs[i].scene.selected_handles_in_order();
                 if handles.is_empty() {
                     use crate::modules::draw::select::SelectObjectsCommand;

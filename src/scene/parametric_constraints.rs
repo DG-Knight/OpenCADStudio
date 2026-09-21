@@ -351,6 +351,37 @@ pub(crate) fn equal_size_follower(
     Some(entity)
 }
 
+/// The first free `d1`, `d2`, … name a new dimensional constraint takes.
+pub(crate) fn next_dimensional_parameter_name(
+    table: &super::named_parameters::ParameterTable,
+) -> String {
+    (1..)
+        .map(|n| format!("d{n}"))
+        .find(|name| !table.contains(name))
+        .unwrap_or_else(|| "d1".to_string())
+}
+
+/// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
+/// 1 = value, 2 = name=value.
+pub(crate) fn dynamic_dimension_text(name: &str, value: f64, format: u8) -> String {
+    match format {
+        0 => name.to_string(),
+        1 => format!("{value:.4}"),
+        _ => format!("{name}={value:.4}"),
+    }
+}
+
+/// The expression a measured value seeds a parameter with (`100`, `111.8034`).
+pub(crate) fn measured_expression(value: f64) -> String {
+    let text = format!("{value:.4}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text.is_empty() || text == "-" {
+        "0".to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 /// Grabbed points are exact kernel inputs; the solver anchors the remaining
 /// endpoint coordinates according to the line's directional constraints.
 pub(crate) fn grip_solve_anchor_refs(
@@ -585,6 +616,8 @@ pub struct ParametricConstraintSet {
     /// parameter names may legitimately occur in different blocks.
     pub(crate) local_parameters: super::named_parameters::ParameterTable,
     pub(crate) retained_standard_groups: Vec<Handle>,
+    /// The dynamic dimension that shows a dimensional constraint, by id.
+    pub(crate) dimensions: std::collections::HashMap<ConstraintId, Handle>,
     /// Cached total remaining degrees of freedom, summed across every
     /// independent solve partition in this scope — updated by
     /// `parametric_solve::solve_scope` each time this set is resolved. `None`
@@ -611,6 +644,7 @@ impl ParametricConstraintSet {
             next_id: 0,
             local_parameters: super::named_parameters::ParameterTable::new(),
             retained_standard_groups: Vec::new(),
+            dimensions: std::collections::HashMap::new(),
             dof: None,
             conflicts: Vec::new(),
         }
@@ -702,6 +736,7 @@ impl ParametricConstraintSet {
 
     /// Removes a constraint by id. Returns whether one was actually removed.
     pub fn remove(&mut self, id: ConstraintId) -> bool {
+        self.dimensions.remove(&id);
         let before = self.constraints.len();
         self.constraints.retain(|c| c.id != id);
         self.constraints.len() != before
@@ -1420,6 +1455,49 @@ impl super::Scene {
         !self.hidden_parametric_constraints.contains(&(scope, id))
     }
 
+    /// Rewrites every dynamic dimension's text from its constraint's
+    /// parameter name and current value, in the CONSTRAINTNAMEFORMAT
+    /// reading `constraint_name_format` selects.
+    pub(crate) fn refresh_dynamic_dimension_texts(&mut self) {
+        let format = self.constraint_name_format;
+        let mut updates: Vec<(Handle, String)> = Vec::new();
+        for set in &self.parametric_constraints {
+            let table = if set.local_parameters.is_empty() {
+                &self.named_parameters
+            } else {
+                &set.local_parameters
+            };
+            for (id, dimension) in &set.dimensions {
+                let Some(constraint) = set.get(*id) else {
+                    continue;
+                };
+                let (name, value) = match &constraint.driving_param {
+                    Some(DrivingValue::Named(name)) => {
+                        (name.clone(), table.resolve(name).unwrap_or(f64::NAN))
+                    }
+                    Some(DrivingValue::Literal(value)) => (String::new(), *value),
+                    None => continue,
+                };
+                updates.push((*dimension, dynamic_dimension_text(&name, value, format)));
+            }
+        }
+        for (handle, text) in updates {
+            let Some(acadrust::EntityType::Dimension(mut dimension)) =
+                self.document.get_entity(handle).cloned()
+            else {
+                continue;
+            };
+            if dimension.base().user_text.as_deref() == Some(text.as_str()) {
+                continue;
+            }
+            crate::entities::dimension::set_dimension_text_override(
+                dimension.base_mut(),
+                Some(text),
+            );
+            self.update_entity(acadrust::EntityType::Dimension(dimension));
+        }
+    }
+
     pub fn should_display_parametric_constraint(
         &self,
         scope: ParametricScope,
@@ -1861,7 +1939,8 @@ impl super::Scene {
         };
         set.constraints
             .iter()
-            .filter(|c| c.enabled)
+            // A dynamic dimension is its constraint's whole display.
+            .filter(|c| c.enabled && !set.dimensions.contains_key(&c.id))
             .filter(|c| {
                 let selected = c
                     .refs

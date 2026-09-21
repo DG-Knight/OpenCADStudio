@@ -2295,6 +2295,9 @@ pub struct Scene {
     has_associative_centers: std::cell::Cell<Option<bool>>,
     /// Runtime parametric constraint sets decoded from standard graph scopes.
     pub(crate) parametric_constraints: Vec<parametric_constraints::ParametricConstraintSet>,
+    /// CONSTRAINTNAMEFORMAT: what a dynamic dimension's text shows —
+    /// 0 the parameter name, 1 the value, 2 `name=value`.
+    pub constraint_name_format: u8,
     /// Session-only visibility overrides for constraint glyphs.
     hidden_parametric_constraints: HashSet<(
         parametric_constraints::ParametricScope,
@@ -2625,6 +2628,7 @@ impl Scene {
             dependency_index_cache: RefCell::new(None),
             associative_hatch_source_cache: RefCell::new(None),
             parametric_constraints: Vec::new(),
+            constraint_name_format: 2,
             hidden_parametric_constraints: HashSet::default(),
             shown_parametric_constraints: HashSet::default(),
             named_parameters: named_parameters::ParameterTable::new(),
@@ -3319,6 +3323,7 @@ impl Scene {
             }
         }
         if !self.parametric_constraints.is_empty() || !self.named_parameters.is_empty() {
+            self.refresh_dynamic_dimension_texts();
             self.sync_native_parametric_graph();
         }
         if !changes.is_empty() {

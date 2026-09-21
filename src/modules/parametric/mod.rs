@@ -4,6 +4,7 @@
 
 mod coincident;
 mod concentric;
+mod dim_constraint;
 mod constraint_bar;
 mod equal_distance;
 #[path = "equal.rs"]
@@ -25,6 +26,7 @@ mod tools;
 mod value;
 pub use coincident::{coincident_tool, CoincidentConstraintCommand};
 pub use concentric::ConcentricConstraintCommand;
+pub use dim_constraint::{DimConstraintAxis, DimConstraintCommand};
 pub use constraint_bar::ConstraintBarOptionCommand;
 pub use equal_command::EqualConstraintCommand;
 pub use equal_distance::{equal_distance_tool, EqualDistanceConstraintCommand};
