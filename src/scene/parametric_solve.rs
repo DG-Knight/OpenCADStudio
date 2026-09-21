@@ -2443,7 +2443,32 @@ fn solve_scope(
             })
         })
         .flatten();
-        let pinned = axis_pin.unwrap_or(*reference);
+        // A transformed entity whose own end points a driving dimension
+        // measures keeps only its second constraint point where the transform
+        // put it; the dimension pulls the first end back to its value (a line
+        // scaled 2x about its start keeps its d1 by moving that start), as in
+        // the reference.
+        let dimension_pin = (reference.marker.is_none() && axis_pin.is_none())
+            .then(|| {
+                constraints.iter().find_map(|c| {
+                    (c.enabled
+                        && c.driving_param.is_some()
+                        && matches!(
+                            c.kind,
+                            ConstraintKind::Distance
+                                | ConstraintKind::DistanceX
+                                | ConstraintKind::DistanceY
+                                | ConstraintKind::DistanceDirected
+                        )
+                        && c.refs.len() >= 2
+                        && c.refs
+                            .iter()
+                            .all(|r| r.entity == reference.entity && r.marker.is_some()))
+                    .then(|| c.refs[1])
+                })
+            })
+            .flatten();
+        let pinned = axis_pin.or(dimension_pin).unwrap_or(*reference);
         // The re-aligned entity keeps the length the transform gave it (a
         // scaled vertical line stays scaled), not its pre-edit length.
         if axis_pin.is_some() {
@@ -2743,6 +2768,21 @@ fn solve_scope(
                     constraint.refs.get(2).is_some_and(|axis| axis.entity == *handle)
                 })
                 || equal_followers.iter().any(|follower| follower.entity == *handle)
+                // A driving dimension between an entity's own ends is its size;
+                // a retained length would contradict a new value.
+                || constraints.iter().any(|c| {
+                    c.enabled
+                        && c.driving_param.is_some()
+                        && matches!(
+                            c.kind,
+                            ConstraintKind::Distance
+                                | ConstraintKind::DistanceX
+                                | ConstraintKind::DistanceY
+                                | ConstraintKind::DistanceDirected
+                        )
+                        && c.refs.len() >= 2
+                        && c.refs.iter().all(|r| r.entity == *handle && r.marker.is_some())
+                })
             {
                 continue;
             }

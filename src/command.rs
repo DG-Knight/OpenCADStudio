@@ -1610,6 +1610,25 @@ pub enum CmdResult {
         multiple: bool,
         label: &'static str,
     },
+    /// Resolves a constraint-point pick against the live document and hands
+    /// it back through `CadCommand::accept_constraint_point`; a miss reports
+    /// `No valid constraint point found.` and asks again.
+    CheckConstraintPoint(CoincidentPick),
+    /// Adds a dimensional constraint between two constraint points together
+    /// with the dynamic dimension that shows it and the parameter
+    /// (`name` = `expression`) that drives it.
+    AddDimensionalConstraint {
+        kind: crate::scene::parametric_constraints::ConstraintKind,
+        first: crate::scene::parametric_constraints::ParametricRef,
+        second: crate::scene::parametric_constraints::ParametricRef,
+        first_point: DVec3,
+        second_point: DVec3,
+        location: DVec3,
+        axis: DVec3,
+        name: String,
+        expression: String,
+        label: &'static str,
+    },
     /// Adds a point or object symmetry relation around a picked line. The
     /// first reference and axis remain fixed during initial placement.
     AddSymmetricConstraint {
@@ -2451,6 +2470,16 @@ pub trait CadCommand: Send {
     /// Take a typed coordinate at an object prompt as a pick at that point.
     fn typed_point_picks_entity(&self) -> bool {
         false
+    }
+
+    /// A constraint point the host resolved for a `CheckConstraintPoint`
+    /// pick, with its world position.
+    fn accept_constraint_point(
+        &mut self,
+        _reference: crate::scene::parametric_constraints::ParametricRef,
+        _point: DVec3,
+    ) -> CmdResult {
+        CmdResult::NeedPoint
     }
 
     /// Include filled hatch / DXF SOLID regions in the entity hit-test.

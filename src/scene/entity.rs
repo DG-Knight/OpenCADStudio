@@ -1402,6 +1402,9 @@ impl Scene {
                 }
                 if self.object_isolation.hides(common.handle)
                     || (!include_preview_hidden && self.preview_hidden.contains(&common.handle))
+                    || self.hidden_dynamic_dimensions.contains(&common.handle)
+                    // A dynamic dimension never plots.
+                    || (plot_only && self.is_dynamic_dimension(common.handle))
                 {
                     return false;
                 }

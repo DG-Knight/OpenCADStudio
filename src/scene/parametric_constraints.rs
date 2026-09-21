@@ -351,6 +351,57 @@ pub(crate) fn equal_size_follower(
     Some(entity)
 }
 
+/// The first free `d1`, `d2`, … name a new dimensional constraint takes.
+pub(crate) fn next_dimensional_parameter_name(
+    table: &super::named_parameters::ParameterTable,
+) -> String {
+    (1..)
+        .map(|n| format!("d{n}"))
+        .find(|name| !table.contains(name))
+        .unwrap_or_else(|| "d1".to_string())
+}
+
+/// The constraint-bar label that draws a dynamic dimension's lock mark.
+pub const DYNAMIC_DIMENSION_GLYPH: &str = "\u{1F512}";
+
+/// The on-screen text height of a dynamic dimension, in pixels.
+pub const DYNAMIC_DIMENSION_TEXT_PX: f32 = 12.0;
+
+/// The xdata application that marks an annotational constraint dimension.
+pub const ANNOTATIONAL_DIMENSION_APP: &str = "OCS_CONSTRAINT_FORM";
+
+/// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
+/// 1 = value, 2 = name=value. A plain number shows as typed (`d1=100`); an
+/// expression shows the expression under the reference's `fx:` prefix
+/// (`fx: d2=d1*2`).
+pub(crate) fn dynamic_dimension_text(name: &str, source: &str, value: f64, format: u8) -> String {
+    let source = source.trim();
+    let literal = source.parse::<f64>().is_ok();
+    let shown = if literal {
+        source.to_string()
+    } else {
+        measured_expression(value)
+    };
+    match format {
+        0 => name.to_string(),
+        1 if literal => shown,
+        1 => format!("fx: {shown}"),
+        _ if literal => format!("{name}={shown}"),
+        _ => format!("fx: {name}={source}"),
+    }
+}
+
+/// The expression a measured value seeds a parameter with (`100`, `111.8034`).
+pub(crate) fn measured_expression(value: f64) -> String {
+    let text = format!("{value:.4}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text.is_empty() || text == "-" {
+        "0".to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 /// Grabbed points are exact kernel inputs; the solver anchors the remaining
 /// endpoint coordinates according to the line's directional constraints.
 pub(crate) fn grip_solve_anchor_refs(
@@ -585,6 +636,8 @@ pub struct ParametricConstraintSet {
     /// parameter names may legitimately occur in different blocks.
     pub(crate) local_parameters: super::named_parameters::ParameterTable,
     pub(crate) retained_standard_groups: Vec<Handle>,
+    /// The dynamic dimension that shows a dimensional constraint, by id.
+    pub(crate) dimensions: std::collections::HashMap<ConstraintId, Handle>,
     /// Cached total remaining degrees of freedom, summed across every
     /// independent solve partition in this scope — updated by
     /// `parametric_solve::solve_scope` each time this set is resolved. `None`
@@ -611,6 +664,7 @@ impl ParametricConstraintSet {
             next_id: 0,
             local_parameters: super::named_parameters::ParameterTable::new(),
             retained_standard_groups: Vec::new(),
+            dimensions: std::collections::HashMap::new(),
             dof: None,
             conflicts: Vec::new(),
         }
@@ -702,6 +756,7 @@ impl ParametricConstraintSet {
 
     /// Removes a constraint by id. Returns whether one was actually removed.
     pub fn remove(&mut self, id: ConstraintId) -> bool {
+        self.dimensions.remove(&id);
         let before = self.constraints.len();
         self.constraints.retain(|c| c.id != id);
         self.constraints.len() != before
@@ -1420,6 +1475,66 @@ impl super::Scene {
         !self.hidden_parametric_constraints.contains(&(scope, id))
     }
 
+    /// Rewrites every dynamic dimension's text from its constraint's
+    /// parameter name and current value, in the CONSTRAINTNAMEFORMAT
+    /// reading `constraint_name_format` selects.
+    pub(crate) fn refresh_dynamic_dimension_texts(&mut self) {
+        let format = self.constraint_name_format;
+        let mut updates: Vec<(Handle, String)> = Vec::new();
+        for set in &self.parametric_constraints {
+            let table = if set.local_parameters.is_empty() {
+                &self.named_parameters
+            } else {
+                &set.local_parameters
+            };
+            for (id, dimension) in &set.dimensions {
+                let Some(constraint) = set.get(*id) else {
+                    continue;
+                };
+                let (name, source, value) = match &constraint.driving_param {
+                    Some(DrivingValue::Named(name)) => (
+                        name.clone(),
+                        table
+                            .get(name)
+                            .map(|parameter| parameter.source.clone())
+                            .unwrap_or_default(),
+                        table.resolve(name).unwrap_or(f64::NAN),
+                    ),
+                    Some(DrivingValue::Literal(value)) => {
+                        (String::new(), measured_expression(*value), *value)
+                    }
+                    None => continue,
+                };
+                // An annotational dimension shows the value at dimension
+                // precision, as the reference does.
+                let source = if self.dimension_is_annotational(*dimension) {
+                    format!("{value:.4}")
+                } else {
+                    source
+                };
+                updates.push((
+                    *dimension,
+                    dynamic_dimension_text(&name, &source, value, format),
+                ));
+            }
+        }
+        for (handle, text) in updates {
+            let Some(acadrust::EntityType::Dimension(mut dimension)) =
+                self.document.get_entity(handle).cloned()
+            else {
+                continue;
+            };
+            if dimension.base().user_text.as_deref() == Some(text.as_str()) {
+                continue;
+            }
+            crate::entities::dimension::set_dimension_text_override(
+                dimension.base_mut(),
+                Some(text),
+            );
+            self.update_entity(acadrust::EntityType::Dimension(dimension));
+        }
+    }
+
     pub fn should_display_parametric_constraint(
         &self,
         scope: ParametricScope,
@@ -1483,7 +1598,160 @@ impl super::Scene {
                 self.shown_parametric_constraints.remove(&(scope, *id));
             }
         }
+        self.refresh_hidden_dynamic_dimensions();
         ids.len()
+    }
+
+    /// True for a dynamic dimension of a dimensional constraint (not an
+    /// annotational one, which is an ordinary plotted dimension).
+    pub(crate) fn is_dynamic_dimension(&self, handle: Handle) -> bool {
+        self.parametric_constraints
+            .iter()
+            .any(|set| set.dimensions.values().any(|dimension| *dimension == handle))
+            && !self.dimension_is_annotational(handle)
+    }
+
+    /// True when a dimensional constraint's dimension uses the annotational
+    /// form: drawn with its style, plotted, never rescaled to the screen.
+    pub(crate) fn dimension_is_annotational(&self, handle: Handle) -> bool {
+        self.document.get_entity(handle).is_some_and(|entity| {
+            entity
+                .common()
+                .extended_data
+                .get_record(ANNOTATIONAL_DIMENSION_APP)
+                .is_some()
+        })
+    }
+
+    /// Marks a constraint dimension as annotational (DCFORM Annotational).
+    pub(crate) fn mark_dimension_annotational(&mut self, handle: Handle) {
+        crate::scene::view::dispatch::set_entity_xdata(
+            &mut self.document,
+            handle,
+            ANNOTATIONAL_DIMENSION_APP,
+            Some(vec![acadrust::xdata::XDataValue::String(
+                "ANNOTATIONAL".to_string(),
+            )]),
+        );
+    }
+
+    /// The document as written to a file: a dynamic dimension's screen-size
+    /// overrides are a display matter and stay out of the file.
+    pub(crate) fn document_for_save(&self) -> acadrust::CadDocument {
+        use crate::entities::dim_override as ov;
+        let mut document = self.document.clone();
+        for set in &self.parametric_constraints {
+            for handle in set.dimensions.values().copied() {
+                if self.dimension_is_annotational(handle) {
+                    continue;
+                }
+                for code in [ov::DIMSCALE, ov::DIMTIH, ov::DIMTOH] {
+                    ov::set(&mut document, handle, code, None);
+                }
+            }
+        }
+        document
+    }
+
+    /// Gives every dynamic dimension a DIMSCALE override that keeps its
+    /// text, arrows and offsets at a screen size (the reference draws them
+    /// at a constant pixel size whatever the zoom). Runs whenever the camera
+    /// changed; `force` re-applies after a dimension was created or loaded.
+    pub fn refresh_dynamic_dimension_scales(&mut self, force: bool) {
+        let Some(wpp) = self.world_per_pixel() else {
+            return;
+        };
+        if !force && self.dynamic_dimension_camera_gen == Some(self.camera_generation) {
+            return;
+        }
+        self.dynamic_dimension_camera_gen = Some(self.camera_generation);
+        let handles: Vec<Handle> = self
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| set.dimensions.values().copied())
+            .collect();
+        let mut changes = Vec::new();
+        for handle in handles {
+            let Some(acadrust::EntityType::Dimension(dimension)) = self.document.get_entity(handle)
+            else {
+                continue;
+            };
+            // An annotational dimension keeps its style's size.
+            if self.dimension_is_annotational(handle) {
+                continue;
+            }
+            let style_name = dimension.base().style_name.clone();
+            let text_height = self
+                .document
+                .dim_styles
+                .iter()
+                .find(|style| {
+                    style.name.eq_ignore_ascii_case(&style_name)
+                        || (style_name.trim().is_empty()
+                            && style.name.eq_ignore_ascii_case("Standard"))
+                })
+                .map(|style| style.dimtxt)
+                .filter(|height| *height > 1e-9)
+                .unwrap_or(0.18);
+            let scale = f64::from(wpp) * f64::from(DYNAMIC_DIMENSION_TEXT_PX) / text_height;
+            use crate::entities::dim_override as ov;
+            let xdata = &dimension.base().common.extended_data;
+            let current = ov::real(xdata, ov::DIMSCALE);
+            // The reference draws dynamic dimension text horizontally.
+            let horizontal = ov::int(xdata, ov::DIMTIH) == Some(1) && ov::int(xdata, ov::DIMTOH) == Some(1);
+            if current.is_some_and(|value| (value - scale).abs() < 1e-9) && horizontal {
+                continue;
+            }
+            ov::set(
+                &mut self.document,
+                handle,
+                ov::DIMSCALE,
+                Some(acadrust::xdata::XDataValue::Real(scale)),
+            );
+            if !horizontal {
+                for code in [ov::DIMTIH, ov::DIMTOH] {
+                    ov::set(
+                        &mut self.document,
+                        handle,
+                        code,
+                        Some(acadrust::xdata::XDataValue::Integer16(1)),
+                    );
+                }
+            }
+            changes.push((handle, super::ChangeKind::Modified));
+        }
+        if !changes.is_empty() {
+            self.bump_entities(&changes);
+        }
+    }
+
+    /// Re-derives which dynamic dimensions stay off screen (DCHIDE, or
+    /// DYNCONSTRAINTDISPLAY 0 for all of them) and redraws the ones that
+    /// changed.
+    pub(crate) fn refresh_hidden_dynamic_dimensions(&mut self) {
+        let desired: rustc_hash::FxHashSet<Handle> = self
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| {
+                set.dimensions.iter().filter_map(|(id, dimension)| {
+                    (!self.dimension_is_annotational(*dimension)
+                        && (!self.dynamic_constraint_display
+                            || !self.is_parametric_constraint_visible(set.scope, *id)))
+                    .then_some(*dimension)
+                })
+            })
+            .collect();
+        if desired == self.hidden_dynamic_dimensions {
+            return;
+        }
+        let changes: Vec<_> = self
+            .hidden_dynamic_dimensions
+            .symmetric_difference(&desired)
+            .copied()
+            .map(|handle| (handle, super::ChangeKind::Modified))
+            .collect();
+        self.hidden_dynamic_dimensions = desired;
+        self.bump_entities(&changes);
     }
 
     /// Infers relations already present in the selected geometry.
@@ -1862,7 +2130,8 @@ impl super::Scene {
         let mut placements = set
             .constraints
             .iter()
-            .filter(|c| c.enabled)
+            // A dynamic dimension is its constraint's whole display.
+            .filter(|c| c.enabled && !set.dimensions.contains_key(&c.id))
             .filter(|c| {
                 let selected = c
                     .refs
@@ -1971,6 +2240,57 @@ impl super::Scene {
             equal_anchors.push(*point);
             true
         });
+        // A dynamic dimension carries the reference's lock mark at the
+        // start of its text instead of a constraint bar.
+        for (id, dimension) in &set.dimensions {
+            let Some(constraint) = set.get(*id) else {
+                continue;
+            };
+            if !constraint.enabled || self.entity_temporarily_hidden(*dimension) {
+                continue;
+            }
+            let Some(acadrust::EntityType::Dimension(entity)) = self.document.get_entity(*dimension)
+            else {
+                continue;
+            };
+            let Some((anchor, outward)) = crate::entities::dimension::dynamic_dimension_lock_anchor(
+                &self.document,
+                entity,
+                self.annotation_scale as f64,
+            ) else {
+                continue;
+            };
+            let project = |point: Vector3| {
+                crate::scene::pick::grip::project_rte(
+                    glam::DVec3::new(point.x, point.y, point.z),
+                    view_rot,
+                    eye,
+                    bounds,
+                )
+            };
+            let (Some(screen), Some(outward_screen)) = (
+                project(anchor),
+                project(Vector3::new(
+                    anchor.x + outward.x,
+                    anchor.y + outward.y,
+                    anchor.z + outward.z,
+                )),
+            ) else {
+                continue;
+            };
+            let direction = (outward_screen - screen).normalize_or(glam::Vec2::NEG_X);
+            let point = iced::Point::new(bounds.x + screen.x, bounds.y + screen.y);
+            if point.x.is_finite() && point.y.is_finite() {
+                placements.push((
+                    *id,
+                    point,
+                    direction.to_array(),
+                    DYNAMIC_DIMENSION_GLYPH.to_string(),
+                    false,
+                    Vec::new(),
+                ));
+            }
+        }
         placements
     }
 

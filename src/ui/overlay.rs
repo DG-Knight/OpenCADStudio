@@ -39,6 +39,11 @@ fn is_fixed_glyph(label: &str) -> bool {
     label == "F" || label == crate::scene::parametric_constraints::FIXED_POINT_GLYPH
 }
 
+/// The lock mark a dynamic dimension carries (`DYNAMIC_DIMENSION_GLYPH`).
+fn is_dynamic_dimension_glyph(label: &str) -> bool {
+    label == crate::scene::parametric_constraints::DYNAMIC_DIMENSION_GLYPH
+}
+
 /// Vertical's two axis-mark labels (`parametric_constraints::vertical_glyph_label`).
 fn is_vertical_glyph(label: &str) -> bool {
     label == "│" || label == crate::scene::parametric_constraints::VERTICAL_POINTS_GLYPH
@@ -48,7 +53,11 @@ fn constraint_glyph_size(label: &str) -> Size {
     if is_compact_coincident_glyph(label) {
         return Size::new(COINCIDENT_GLYPH_SIZE, COINCIDENT_GLYPH_SIZE);
     }
-    if label == "G²" || is_fixed_glyph(label) || is_vertical_glyph(label) {
+    if label == "G²"
+        || is_fixed_glyph(label)
+        || is_vertical_glyph(label)
+        || is_dynamic_dimension_glyph(label)
+    {
         let side = CONSTRAINT_GLYPH_SIZE + CONSTRAINT_GLYPH_PAD_Y * 2.0;
         return Size::new(side, side);
     }
@@ -109,15 +118,10 @@ fn draw_concentric_constraint_glyph(
 fn draw_fixed_constraint_glyph(
     frame: &mut canvas::Frame,
     center: Point,
-    text: Color,
+    lock: Color,
     badge: Color,
     point_marker: bool,
 ) {
-    let lock = if point_marker {
-        text
-    } else {
-        Color::from_rgb8(214, 76, 76)
-    };
     let shackle = canvas::Path::new(|builder| {
         let shackle_center = Point::new(center.x, center.y - 1.6);
         for step in 0..=12 {
@@ -2114,7 +2118,10 @@ impl canvas::Program<Message> for SelectionCanvas {
                     })
                     .into(),
                 );
-                frame.fill(&pill, bg);
+                // A dynamic dimension's lock sits bare on the drawing.
+                if !is_dynamic_dimension_glyph(label) {
+                    frame.fill(&pill, bg);
+                }
                 if *is_selected {
                     frame.stroke(
                         &pill,
@@ -2132,14 +2139,18 @@ impl canvas::Program<Message> for SelectionCanvas {
                         draw_smooth_constraint_glyph(&mut frame, glyph_center, fg);
                     } else if label == "◎" {
                         draw_concentric_constraint_glyph(&mut frame, glyph_center, fg);
+                    } else if is_dynamic_dimension_glyph(label) {
+                        draw_fixed_constraint_glyph(&mut frame, glyph_center, fg, bg, false);
                     } else if is_fixed_glyph(label) {
-                        draw_fixed_constraint_glyph(
-                            &mut frame,
-                            glyph_center,
-                            fg,
-                            bg,
-                            label == crate::scene::parametric_constraints::FIXED_POINT_GLYPH,
-                        );
+                        let point =
+                            label == crate::scene::parametric_constraints::FIXED_POINT_GLYPH;
+                        // The object-mode lock reads red, the point-mode one white.
+                        let lock = if point {
+                            fg
+                        } else {
+                            Color::from_rgb8(214, 76, 76)
+                        };
+                        draw_fixed_constraint_glyph(&mut frame, glyph_center, lock, bg, point);
                     } else if is_vertical_glyph(label) {
                         draw_vertical_constraint_glyph(
                             &mut frame,
