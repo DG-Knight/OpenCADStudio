@@ -1178,11 +1178,14 @@ mod tests {
             host.app.tabs[0].pending_pause_tokens,
             Some(vec!["ENTER".to_string()])
         );
-        // User clicks second point in viewport
-        let _ = host
-            .app
-            .feed_command(crate::command::StepInput::Point(glam::DVec3::new(30.0, 30.0, 0.0)));
-        // Draining should have executed ENTER and completed LINE
+        // User clicks second point in viewport (which calls on_point + apply_cmd_result)
+        let r = host.app.tabs[0]
+            .active_cmd
+            .as_mut()
+            .unwrap()
+            .on_point(glam::DVec3::new(30.0, 30.0, 0.0));
+        let _ = host.app.apply_cmd_result(r);
+        // Draining in apply_cmd_result should have executed ENTER and completed LINE
         assert!(host.app.tabs[0].active_cmd.is_none());
         assert_eq!(host.document().entities().count(), 3);
 

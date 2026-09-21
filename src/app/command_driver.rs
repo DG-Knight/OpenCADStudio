@@ -556,15 +556,9 @@ impl OpenCADStudio {
         if is_escape {
             self.tabs[i].pending_pause_tokens = None;
         }
-        let task = match result {
+        match result {
             Some(r) => self.apply_cmd_result(r),
             None => Task::none(),
-        };
-        if !is_escape && self.tabs[i].active_cmd.is_some() && self.tabs[i].pending_pause_tokens.is_some() {
-            let drain_task = self.drain_pending_pause_tokens(i);
-            Task::batch([task, drain_task])
-        } else {
-            task
         }
     }
 
@@ -1075,8 +1069,14 @@ impl OpenCADStudio {
             self.tabs[i].scene.set_hover_highlight(None);
             self.command_line.set_step_options(Vec::new());
             self.restore_add_selected_defaults();
+            self.tabs[i].pending_pause_tokens = None;
         }
-        task
+        if self.tabs[i].active_cmd.is_some() && self.tabs[i].pending_pause_tokens.is_some() {
+            let drain_task = self.drain_pending_pause_tokens(i);
+            Task::batch([task, drain_task])
+        } else {
+            task
+        }
     }
 
     /// Resolve the cell under `click` on table `handle` (or any table in the drawing
