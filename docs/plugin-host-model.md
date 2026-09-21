@@ -1,99 +1,133 @@
 # Scripting host model (API v7)
 
-The host owns the drawing. Plugins can read the full `CadDocument` snapshot and
-commit cloned `EntityType` values through IPC. `update_entities_transaction`
-validates every replacement before changing the drawing, records one undo
-entry, refreshes scene caches and the shared document view, and marks the
-document dirty. The request preserves handles, owners, and entity kinds. A
-missing or duplicate handle, a kind/owner change, or a locked source layer
-rejects the whole batch. An empty batch does nothing.
+This note describes how a script controls OCS and what the host guarantees. The
+per-kind evidence is in the [coverage ledger](plugin-host-model-coverage-ledger.md),
+the increment-by-increment record in the [completion plan](plugin-host-model-completion-plan.md),
+and the script-facing reference in `plugins/opencad-python/PLUGIN.md`.
 
-This is a full-entity replacement API, not a promise that every CAD property
-is editable through Python. A client should clone the current value and patch
-only fields it understands; unknown fields remain intact. The host can read
-all `acadrust::EntityType` variants through `document()`. Its generic write
-path accepts existing variants subject to the validation above. Entity
-creation and deletion still use `add_entity` and `remove_entity` and are not
-part of this transaction request.
+## Shape
 
-The host embeds a versioned coverage catalog generated from its traced
-`EntityType` registry and `crates/ocs_plugin_api/entity_coverage_policy.json`.
-It classifies all 48 variants: 43 canvas kinds, three internal records
-(`Block`, `BlockEnd`, `Seqend`), and two opaque fallbacks (`Extended`,
-`Unknown`). Each property records its source field, type, optional/sequence
-shape, snapshot readability, Python access (`read_write`, `read_only`, or
-`unmapped`), and validation status. `unmapped` means the typed snapshot carries
-the field but the Python document model has no getter or setter for it.
-The v7 transaction path checks changed Point locations, Line endpoints,
-Circle/Arc centers, Ray/XLine base points, and Solid/Face3D corners for finite
-coordinates. Circle/Arc radii must be finite and positive; Ray/XLine directions
-must be unit vectors; Solid normals must be nonzero, its thickness finite,
-and Face3D invisible-edge flags limited to four known bits. Insert transactions
-validate placement, finite rotation and spacing, nonzero finite scale and normal,
-and positive array counts. They reject changes to the referenced block and
-attached attribute and sequence records. Those fields report `transaction_geometry` in the
-catalog. All 43 canvas kinds also support nonempty `layer` changes through
-the same undoable transaction; internal and opaque variants remain read-only
-through the document model. The adapter accepts only `layer` patches for
-canvas kinds outside its 43 geometry converters. Other writable properties
-still report `type_conversion_only`; broader CAD range and cross-property
-checks remain outstanding.
-The host's `entity_snapshot` helper serializes any typed entity as a detached
-JSON value keyed by its catalog variant name. This read path carries every
-serializable field, including nested and unmapped values, without granting a
-write path for them. The Python adapter exposes its variant payload through
-`entity.snapshot`; changing that dictionary does not change the drawing.
-It is an inspection view: JSON converts non-finite floating-point values to
-null and cannot be used as a lossless replacement entity.
+Python runs in RustPython inside a separate plugin process
+(`plugins/opencad-python`), so a script cannot crash the editor. It talks to the
+host over the versioned IPC in `crates/ocs_plugin_api`. **The host owns the
+drawing**: it validates every request, records the undo step, refreshes scene
+caches and the shared document view, and marks the document dirty. The Python
+adapter is thin: it turns dictionaries into typed values and back, and holds no
+CAD rules of its own. Everything below is additive to API v7; a plugin built
+without it keeps working, and the default `HostApi` methods refuse.
 
-The bundled first-party adapter under `plugins/opencad-python` currently maps
-these entity kinds to Python dictionaries: Point, Line, Circle, Arc, Ellipse,
-Polyline, Polyline2D, Polyline3D, LwPolyline, Spline, Text, MText, Ray, XLine,
-Solid, Face3D, Insert, Tolerance, Shape, AttributeDefinition,
-AttributeEntity, and Hatch. An Insert is created by naming an existing
-ordinary block (the host refuses unknown blocks, model or paper space and
-containment cycles); the block name cannot be changed afterwards. Attached
-attributes stay with the AttributeEntity flow and remain in the raw snapshot.
-The legacy Polyline is update-only: create a Polyline2D or Polyline3D. The authoritative per-field mapping is
-`plugins/opencad-python/entity_manifest.json`. The generated
-mapping excludes fields it cannot represent, including common color, line
-weight, transparency, Polyline3D smooth type, and MText background color.
-Absent geometry fields are not editable through the Python document model.
-A feature test compares the generated Python keys with the
-host catalog. The adapter's `experimental-host-model` feature requires API
-v7 and builds against the repository-relative `ocs_plugin_api`. RustPython is
-loaded inside the separate plugin runner process; OCS does not link the Python
-runtime into the editor executable.
+## What the host offers
 
-API v7 also exposes a synchronous, ordered selection query and an atomic
-selection replacement scoped to the session tab. All handles must exist before
-replacement begins, duplicate handles are rejected, and the scripted
-replacement keeps exactly the requested handles and order. UI picks continue
-to group linked leaders and annotations. The V4 notification channel still broadcasts best-effort
-document and selection changes. A new `DrawingChanged` notification carries
-the scene epoch even when no shared document view is open. A new `CommandStateChanged` notification
-reports transitions of the active interactive command at app message
-boundaries, with the tab id and command name (or `None` when it ends). A
-noninteractive command that starts and finishes within one message does not
-produce an active-state transition.
+| Area | `HostApi` entry | What it does |
+|---|---|---|
+| Read | `document()`, `entity_snapshot` | The full `CadDocument` snapshot; a detached JSON view of any typed entity. |
+| Entities | `add_entity`, `remove_entity`, `update_entities_transaction` | Create, delete and replace entities. A transaction validates every replacement first and either commits all of them as one undo step or none. |
+| Selection | `selection`, `set_selection` | Ordered, tab-scoped, exact (missing or duplicate handles reject the request). |
+| Solids | `solid_operation` | Kernel-backed create, transform, booleans, extrude, region and surface from a profile, picture embedding. Every result is verified to lift back from its ACIS payload without loss; a refusal leaves the operands untouched. |
+| Tables | `table_operation` | Layers, text and dimension styles, blocks and their contents, linetypes, layouts (see below). |
+| Commands | `run_command` | Drives the real OCS command one step at a time (see below). |
+| Settings | `system_variable`, `set_system_variable` | `CLAYER`, `SNAPANG`, and a read-only `CTAB` (the current layout). |
 
-The host's existing `InteractiveCommand` machinery collects either a point or
-an entity pick. The bundled v7 adapter exposes a token-based request and
-poll API because `PY_RUN` uses a fresh Python interpreter per invocation; a
-script cannot suspend in place while the user clicks. Enter and command
-cancellation report a cancelled result. The host releases the runner's pick
-command when it ends, including Escape cancellation. Drawing, selection, and command
-notifications are retained in a bounded 256-event queue per tab between runs
-and can be drained with `doc.poll_events()`. If a tab exceeds that bound, the
-next poll begins with `{"type": "overflow", "dropped": n}`; scripts should
-refresh drawing and selection state when they receive it. Closing a tab clears
-its pending events, and a script can poll only its active tab.
-Input tokens are bound to the drawing tab that requested the pick. Polling a
-token from another tab returns no result and does not consume it.
+Entity kinds outside a generated schema still read (handle, kind, layer) and take
+`layer` changes; nothing is writable that the host has not validated.
 
-Python `doc.entities[handle]` returns a descriptor for every entity. For kinds
-outside the 43-kind generated schema it contains only handle, kind, and layer;
-`layer` is editable on canvas kinds. `doc.coverage()` enumerates the
-catalog; `doc.coverage("Line")` and `line.coverage` return one entry. For
-covered kinds, the coverage object lists actual readable and editable
-dictionary keys, plus the unmapped snapshot fields and their types.
+## Entity validation
+
+The host embeds a coverage catalog generated from its traced `EntityType`
+registry and `crates/ocs_plugin_api/entity_coverage_policy.json`. It classifies all
+48 variants: 43 canvas kinds, three internal records (`Block`, `BlockEnd`,
+`Seqend`) and two opaque fallbacks (`Extended`, `Unknown`), and records for each
+property its source field, type, shape, snapshot readability, Python access
+(`read_write`, `read_only`, `unmapped`) and validation status.
+
+Creation and edits are validated per kind (finite coordinates, positive radii and
+scales, unit directions, non-parallel vectors, in-range flags, reference targets
+that exist and have the right kind, and so on). Creation must be valid; an edit
+is refused only for problems it introduces, so already-invalid legacy values stay
+editable. Derived state is computed by the host, never trusted from a script (MLine
+geometry, Dimension measurement, Helix spline, Table merge dimensions, Spline
+rational flag, SectionSymbol counts, Viewport id and scale).
+
+Nested records are checked too. A dictionary for a vertex, edge or face may not
+carry an unknown key, and the fields that define its geometry are required
+(`entity_manifest.json`, `required_struct_fields`); a typo can no longer turn into
+a zero coordinate. Everything else in a nested record defaults when absent.
+
+Every kind is exercised through the real plugin runner by a per-kind audit that
+checks create, read, edit, delete, undo, invalid input with an atomic rollback,
+and a DWG and DXF round trip. A kind is `Complete` in the ledger only when all of
+those pass.
+
+## Tables
+
+`TableOperation` is one additive request with typed variants, executed by
+`HostSession::table_operation`. Every refusal is decided **before** the undo step is
+recorded, so a failure changes nothing and leaves the history alone.
+
+- **Layers:** create, modify, rename (entities follow), delete (refused while it
+  holds objects unless erasing them is asked for), set current. Layer `0`,
+  `Defpoints` and the current layer are protected.
+- **Text and dimension styles:** create, modify, rename, delete, set current. Dimension
+  style fields travel as a validated JSON object; handles, xref fields and the name are
+  host-managed. Renaming a text style updates the dimension styles that name it.
+  `Standard` and any style that is current or in use are protected.
+- **Blocks:** create from entities (copied in shifted by the base point, optionally
+  erasing the originals), modify, rename (inserts follow), delete (refused while
+  referenced), and add an entity to a definition through the normal validation path.
+  A block may not nest itself, directly or through other blocks.
+- **Linetypes:** simple dash, gap and dot patterns; rename follows layers and
+  entities; delete is refused while anything uses it.
+- **Layouts:** create with the default page setup and sheet viewport, rename, delete,
+  switch (through OCS's own layout switch), and page setup (paper size, rotation,
+  custom scale). `Model` is protected.
+
+Style and layout operations act on the active document, because they use the
+application's shared style and view machinery.
+
+## Commands
+
+`run_command` takes a `CommandRequest` (`Run`, `Start`, `Point`, `Text`, `Token`,
+`Entity`, `Selection`, `Enter`, `Cancel`) and answers with a `CommandOutcome`:
+whether the command is done or waiting, its prompt, what input it accepts, its
+keyword options, how many entities it added, tokens nobody asked for, and any
+error. It uses the same primitives as the automation channel and finishes each
+step synchronously on the host thread, so a step never waits for anything that has
+to arrive from outside; an earlier fire-and-forget replay could hang, this does not.
+
+Guards: refused while another command is active or off the active tab; refused for
+commands that could end the session or re-enter Python (`QUIT`, `EXIT`, `CLOSE*`,
+`NEW`, `QNEW`, `OPEN`, `SAVE*`, `RECOVER`, `SCRIPT`, `RUNSCRIPT`, `PY_*`); an editor or
+dialog a command opens is reported and closed by `Cancel`. It does not consult the
+automation on/off switch, which governs the external MCP and serve channels; a script
+is something the user chose to run. The Python layer cancels any step sequence that
+leaves a command waiting.
+
+## Python surface
+
+`ocs.active_document` exposes `entities`, `create_entity`, `delete_entity`,
+`transaction`, `selection`, `solids`, `layers`, `text_styles`, `dim_styles`, `blocks`,
+`linetypes`, `layouts`, `command`, `start_command` and `modify` (offset, trim, extend,
+fillet, chamfer, move, copy, rotate, scale, mirror, erase, rectangular, polar, path and
+3-D arrays, explode, join, break, stretch, lengthen and polyline edits). `doc.coverage()`
+lists the catalog, and `doc.entities[handle].coverage` one entry, with the readable and
+editable keys and the fields the typed snapshot carries but the model does not map.
+
+Interactive picks use a token-based request and poll API because `PY_RUN` uses a
+fresh interpreter per invocation and a script cannot suspend while the user clicks.
+Drawing, selection and command notifications are kept in a bounded 256-event queue
+per tab between runs and drained with `doc.poll_events()`; an overflow is reported
+as `{"type": "overflow", "dropped": n}`. Tokens are bound to the tab that asked.
+
+## Known limits
+
+- Twelve of the 43 canvas kinds are not yet `Complete`; each has a named blocker in the
+  ledger. Seven are cadcodec DXF bugs whose fixes are submitted upstream but not yet adopted.
+- The DXF codec also drops some table properties (text style generation flags, block
+  descriptions, a dimension style's text-style name) and mis-scales one angle; these are
+  pinned by canaries and listed in `cadcodec-reader-gaps.md`.
+- Not available from a script: complex (text and shape) linetypes, plot devices and named
+  page setups, PEDIT's fit and spline options, interactive-only commands such as HATCH, and
+  a setting to turn script-driven commands off.
+- A command step nests inside the editor's message handling; in a debug build a deep step
+  (PEDIT converting a line to a polyline) needs more than 2 MiB of stack, which the
+  application's 8 MiB main thread provides and a release build needs far less of.

@@ -17,13 +17,22 @@ found while building this: `PLUGIN.md` in this directory.
 ## Status
 
 The API v7 build provides `PY_EVAL`/`PY_RUN`, the read/write `ocs` module, and
-the ribbon integration; these have live OCS 2026.37 tests. Experimental
-`ocs.command()`/`ocs.select()` constraint work
-is documented in `PLUGIN.md` and `examples/example.py`, but those functions
-are not in the default build: their host APIs are unreleased, and nested
-command replay can hang. The general document model is built through the
-`experimental-host-model` feature until that name is retired in a later API
-cleanup.
+the ribbon integration. On top of that, the `experimental-host-model` feature
+(the name stays until a later API cleanup; the staged bundled plugin is built with
+it) adds a general Python document model over the host API:
+
+- **Entities:** create, read, edit, delete and undo for all 43 canvas kinds
+  (41 creatable), validated by the host, with per-kind DWG/DXF round-trip audits.
+- **Drawing tables:** `doc.layers`, `text_styles`, `dim_styles`, `blocks` (and their
+  contents), `linetypes` and `layouts`, plus kernel-backed solids (`doc.solids`).
+- **Commands:** `doc.command`, `doc.start_command` and `doc.modify` (offset, trim,
+  extend, fillet, chamfer, move, copy, rotate, scale, mirror, arrays, explode, join,
+  break, stretch, lengthen, PEDIT polyline edits) drive the real OCS commands.
+
+The design and guarantees are in `../../docs/plugin-host-model.md`, the per-kind
+evidence in `../../docs/plugin-host-model-coverage-ledger.md`, and the script-facing
+reference in `PLUGIN.md`. The older experimental `ocs.command()` replay is
+superseded and not in the default build.
 
 ## Files
 

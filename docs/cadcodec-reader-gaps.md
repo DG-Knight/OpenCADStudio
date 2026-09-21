@@ -1,7 +1,10 @@
 # cadcodec DXF reader/writer gaps found by the OCS Python host audit
 
-Draft issue reports for `HakanSeven12/cadcodec` (the `acadrust` crate). Nothing
-here has been filed. Every finding was made against **cadcodec revision
+Reports on `HakanSeven12/cadcodec` (the `acadrust` crate). **Status (21 September
+2026):** fixes for issues 1-6 below, with regression tests, are submitted as
+[HakanSeven12/cadcodec#48](https://github.com/HakanSeven12/cadcodec/pull/48) (branch
+`fix/dxf-reader-writer-roundtrip` on `felixriestra/cadcodec`); the five findings under
+"Observed but not filed" and the style and block ones added later are not filed. Every finding was made against **cadcodec revision
 `5b682ed`** (OCS pins `acadrust` to it) by saving a document with
 `DxfWriter` or `DwgWriter`, reloading it, and comparing entity fields.
 

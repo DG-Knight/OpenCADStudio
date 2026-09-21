@@ -117,8 +117,8 @@ expression, not statements). Phases 1.2 (read), 1.3 (2D write) and part of
 | `ocs.read_record(handle, app_name)` | Returns `{app_name, values}` for the XDATA record `app_name` on `handle`, or `None` if the entity or the record doesn't exist. See "XDATA" below for the `values` shape. |
 | `ocs.write_record(handle, app_name, values)` | Attaches an XDATA record to `handle` for `app_name`, replacing any existing record for that application. Raises if `handle` doesn't exist. |
 | `ocs.remove_record(handle, app_name)` | Removes the XDATA record for `app_name` from `handle`, if any. Returns `True` if a record was actually removed. |
-| `ocs.command(cmd)` | Experimental only; absent from the portable default build. Requires unreleased host API support and can hang on OCS 2026.37. See historical notes below. |
-| `ocs.select(handles)` | Experimental only; absent from the portable default build. Requires unreleased host API support. |
+| `ocs.command(cmd)` | Superseded. Only the `experimental-command-replay` build has it (the old fire-and-forget replay). Use `doc.command`, `doc.start_command` and `doc.modify` from the document model (see "Running OCS commands" below). |
+| `ocs.select(handles)` | Replaces the selection with exactly these handles, in order (document-model build); `doc.selection = [...]` is the same. |
 | `ocs.system_variable(name)` / `ocs.set_system_variable(name, value)` | Development-only `experimental-host-settings` feature. Reads or sets host-managed CLAYER (text) and SNAPANG (degrees) without nested command dispatch. Requires the Felix OCS fork's `plugin/host-model-api` branch; absent from the portable default build. |
 
 `add_line`/`add_circle`/`add_arc` take plain Python numbers —
@@ -325,10 +325,13 @@ is the raw single step behind all of this.
 
 ### Historical command-replay experiment (not in the default build)
 
-The following records an earlier experiment. The bundled build does **not**
-expose `ocs.command()` or `ocs.select()`. An OCS 2026.37 diagnostic found
-nested `ocs.command("CLAYER ...")` could hang, so these
-examples are not instructions to run against the released host.
+The following records an earlier experiment and is kept for the findings, not as
+instructions. It used a fire-and-forget `ocs.command()` that replayed a line through the
+message loop; on OCS 2026.37 that could hang. It has been superseded by
+`doc.command` / `doc.start_command` (see "Running OCS commands" above), which run the
+real command synchronously through the host's `run_command` step API and were exercised
+against every command tried without a hang. The prompt-sequence findings below (selection
+prompts, `ALIGN`'s extra Enters) still describe how the commands behave.
 
 **`ocs.command()` + `ocs.select()` together can apply a real, persistent
 constraint, entirely from a script** — this required two host changes
@@ -504,37 +507,12 @@ Script…` (above) is the most a plugin can do today: reuse the host's own
 native file picker via the existing `PluginFileDialog` event, which was
 already there for other plugins to import files.
 
-## lisp2py — AutoLISP macro transpiler
+## AutoLISP migration
 
-`../lisp2py/` (an independent sibling workspace — zero dependency on this
-crate or `ocs_plugin_api`) is a **best-effort, offline, source-to-source**
-translator from AutoLISP (`.lsp`) to the `ocs.*` Python dialect documented
-above. Not an interpreter: it never executes AutoLISP, and its output is a
-draft a human reviews and finishes, then runs through `PY_RUN` like any
-other script. This is Phase 2.2/2.3 of `ROADMAP.md` — see
-[`../lisp2py/README.md`](../lisp2py/README.md)
-for the full pipeline, the corpus-measured builtin coverage, and every
-known limitation; this is just the quick-start.
-
-```sh
-cargo run --manifest-path ../lisp2py/Cargo.toml --bin ocs-lisp2py -- macro.lsp > macro.py
-# then, inside OCS:
-PY_RUN macro.py
-```
-
-(Or pipe source on stdin: `cat macro.lsp | cargo run --manifest-path ../lisp2py/Cargo.toml --bin
-ocs-lisp2py -- > macro.py`.)
-
-Anything the translator can't confidently map — an unrecognized builtin, a
-construct with no Python equivalent — becomes a `_todo_manual_port(...)`
-call in the generated file (raises `NotImplementedError` if actually run)
-plus a warning printed to stderr, never a silent guess. `vla-*`/`vlax-*`
-(ActiveX/COM) and `vlr-*` (reactors) are explicitly out of scope, for the
-same reason as everywhere else in this plugin's design: COM doesn't run
-under AutoCAD for Mac either. Builtin coverage was widened using measured
-call-frequency data from a real AutoLISP corpus sample rather than
-guesswork, biased toward 2D geometry (`angle`/`distance`/`polar`) over
-3D/solid-modeling per current project priority.
+An AutoLISP-to-Python translator is a separate project and is not part of this
+repository: scripts written for this plugin use the `ocs` module and the document
+model described above, and a translated macro would run through `PY_RUN` like any
+other script. Nothing in the plugin depends on it.
 
 ## XDATA
 

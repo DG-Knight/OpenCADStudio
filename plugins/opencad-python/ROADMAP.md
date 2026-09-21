@@ -1,13 +1,10 @@
 # Open CAD Studio — Python Scripting & AutoLISP Migration Plan
 
-**Status:** Phase 1 done and host-verified; Phase 2 (the `lisp2py`
-transpiler) has progressed well past what's checked off below — see
-[`../lisp2py/README.md`](../lisp2py/README.md) and
-[`../../PLUGIN_DEVELOPMENT_RECIPE.md`](../../PLUGIN_DEVELOPMENT_RECIPE.md) for
-current status. Kept here as the original planning document and Phase 1
-build log, moved from `OpenCADStudio`'s `docs/` (where it was originally
-drafted, before this repo held the plugin work) unchanged except for
-cross-repo reference fixes below.
+**Status:** Phase 1 is done and host-verified, and the general document model that
+followed (entities, drawing tables, block contents and the command runner) is described in
+[`../../docs/plugin-host-model.md`](../../docs/plugin-host-model.md). Phase 2 (an AutoLISP
+translator) is a separate project that is not part of this repository. This file is kept as
+the original planning document and Phase 1 build log.
 
 **Author:** Open CAD Studio contributors
 **Date:** September 2026
@@ -305,8 +302,7 @@ cost.
 
 ## Phase 2 — AutoLISP → Python parser/translator
 
-**See [`../lisp2py/`](../lisp2py) — this phase has its own crate, README,
-and builtin-coverage writeup now.** The sub-goals below are the original
+**This phase lives in a separate project that is not part of this repository.** The sub-goals below are the original
 scoping; §2.2/2.3 shipped with substantially wider builtin coverage than
 first planned (measured from a real AutoLISP corpus sample, not just the
 constructs listed here).
@@ -347,7 +343,7 @@ them).
 - [x] `getvar`/`setvar` — confirmed no host system-variable surface exists;
       documented as unsupported rather than guessed at.
 - [x] Widened well past this original list via measured corpus frequency —
-      see `lisp2py`'s own README for the full table.
+      see that project's own README for the full table.
 
 ### 2.4 — Validation loop
 

@@ -2,20 +2,14 @@
 
 ## Goal and current state
 
-Build a general Python document model over the OCS host API for all **43 canvas kinds**. A kind is **complete** only after the per-kind gate below passes. Merely appearing in a converter or allowing a `layer` edit is partial coverage. Keep a property-level record of read/write, read-only, snapshot-only, and unsupported fields in the [43-kind coverage ledger](plugin-host-model-coverage-ledger.md). Do not resume the separate Lisp-to-Python conversion work.
+Build a general Python document model over the OCS host API so a script can control OCS: read and change every canvas entity, manage the drawing's tables, and run OCS's own commands. Keep a property-level record of read/write, read-only, snapshot-only, and unsupported fields in the [43-kind coverage ledger](plugin-host-model-coverage-ledger.md). The architecture and guarantees are in [plugin-host-model.md](plugin-host-model.md); the progress log at the end of this file records each increment with its evidence. Do not resume the separate Lisp-to-Python conversion work.
 
-As of 20 September 2026, the working branch is `plugin/host-model-api` at
-`a8dd3640` plus the Leader increment, published as draft PR
-[#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391). Host API is
-v7. The Python feature has explicit writes for **43 of 43** canvas kinds: 41
-are creatable (the legacy `Polyline` and `Body` are update-only). This is **not** 41 completed
-kinds: Tolerance, Shape, AttributeEntity, Hatch, MLine, Dimension, MultiLeader, Table, PolygonMesh, PolyfaceMesh, Mesh, Wipeout, Point, Line, Circle, Arc, Ellipse, LwPolyline, Spline, Text, MText, Ray, XLine, Solid, Face3D, Solid3D, Region, Surface, Ole2Frame and Viewport pass every completion gate; Insert now passes every gate too; the audited Polyline (update-only by decision), Polyline2D and Polyline3D pass every gate that their format allows.
-AttributeDefinition passes its host and real IPC lifecycle but remains short of
-`Complete` because the previously pinned CAD codec dropped optional ATTDEF
-fields during DXF reads; revalidate that blocker against the current
-`acadrust` revision `7ea4247`. Leader is mapped and integration-tested but blocked at W by three acadrust persistence gaps (see the ledger). Leader, Helix, Underlay, ViewBorder, Light and SectionSymbol are mapped and integration-tested but blocked at W by acadrust persistence gaps, and RasterImage is held short of `Complete` by unverifiable image-dictionary linkage (see the ledger). RasterImage is mapped and integration-tested, held short of `Complete` by unverifiable image-dictionary linkage. Every canvas kind now has explicit writes; SectionSymbol is mapped and integration-tested but blocked at DXF persistence by cadcodec
-writes through the document model. All 43 have raw typed snapshots. There are
-three internal records and two opaque fallbacks outside the 43 canvas kinds.
+**State as of 21 September 2026.** The working branch is `plugin/host-model-api` (host API v7), backed up on the `felixriestra/OpenCADStudio` fork. The first draft PR, [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391), was closed on 21 September with a note that a more complete version will follow; no new PR will be opened until the work is finished and tested as far as it can be.
+
+- **Entities:** explicit writes for all 43 canvas kinds (41 creatable; the legacy `Polyline` and `Body` are update-only). **31 kinds are `Complete`** (every C/R/E/D/U/I/W/V/P gate passes). The remaining kinds are integration-tested and held short of `Complete` by a named blocker in the ledger: seven by cadcodec DXF bugs (fixes submitted as [cadcodec#48](https://github.com/HakanSeven12/cadcodec/pull/48), not yet merged, so OCS still pins the unfixed revision), Polyline3D by the DWG format, Polyline2D by a kind change on DXF save, RasterImage by an image-reactor structure that cannot be verified, and Body by having no creation path.
+- **Drawing tables:** layers, text and dimension styles, blocks and their contents, linetypes and layouts, through the additive `TableOperation` request (see the log entries dated 2026-09-21).
+- **Commands:** `HostApi::run_command` drives the real OCS commands step by step; `doc.command`, `doc.start_command` and `doc.modify` build on it.
+- **Known open items:** the unfiled cadcodec findings (`cadcodec-reader-gaps.md`), complex (text and shape) linetypes, plot devices and named page setups, PEDIT's remaining options, and an on/off setting for script-driven commands.
 
 Repositories:
 
@@ -31,9 +25,8 @@ Repositories:
 
 Preserve unrelated untracked files. Host and adapter changes now live in the
 same OCS repository and commit. Push the feature branch only to the
-`felixriestra/OpenCADStudio` fork; PR #1391 updates automatically. Never push a
-feature commit directly to H7's `main`. Verify both upstream `main` and the fork
-branch before each push.
+`felixriestra/OpenCADStudio` fork, and only when asked. Never push to H7's
+repository. Verify both upstream `main` and the fork branch before each push.
 
 ## First: complete the originally agreed Phase 8
 
