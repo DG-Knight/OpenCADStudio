@@ -1,0 +1,121 @@
+name: Fork build (Linux and Windows)
+
+# Portable builds of this branch, with the bundled Python plugin staged next to
+# the executable (`plugins/opencad.python`, where the host looks for it on Linux
+# and Windows). Nothing is published. Start it by pushing a tag named
+# `fork-build-<anything>` (a tag run uses this file from the tagged commit, so it
+# works from any branch), or from the Actions tab once this file is on the default
+# branch. It is
+# separate from release.yml, which builds the upstream installers (AppImage,
+# snap, MSI) and stages the plugin only in the macOS bundle.
+
+on:
+  push:
+    tags: ['fork-build-*']
+  workflow_dispatch:
+    inputs:
+      run_plugin_tests:
+        description: Run the real-IPC Python plugin tests on each platform
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build.rs measures the distance from the last release tag.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            plugins/opencad-python
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype6-dev
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Stage package
+        run: |
+          DIST=dist/OpenCADStudio-linux-x86_64
+          mkdir -p "$DIST"
+          cp target/release/OpenCADStudio "$DIST/"
+          bash plugins/opencad-python/tools/stage-bundled.sh "$DIST/plugins/opencad.python"
+          ls -R "$DIST"
+
+      - name: Plugin tests (real IPC)
+        if: ${{ github.event_name == 'push' || inputs.run_plugin_tests }}
+        env:
+          OCS_TEST_PYTHON_PLUGIN: ${{ github.workspace }}/dist/OpenCADStudio-linux-x86_64/plugins/opencad.python/libopencad_python.so
+          OCS_PLUGIN_RUNNER_EXE: ${{ github.workspace }}/dist/OpenCADStudio-linux-x86_64/OpenCADStudio
+        run: cargo test --locked --release --lib -- --test-threads=1 python
+
+      - name: Pack
+        run: tar -C dist -czf OpenCADStudio-linux-x86_64.tar.gz OpenCADStudio-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenCADStudio-linux-x86_64
+          path: OpenCADStudio-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            plugins/opencad-python
+
+      - name: Build
+        run: cargo build --locked --release
+
+      - name: Stage package
+        shell: bash
+        run: |
+          DIST=dist/OpenCADStudio-windows-x86_64
+          mkdir -p "$DIST"
+          cp target/release/OpenCADStudio.exe "$DIST/"
+          bash plugins/opencad-python/tools/stage-bundled.sh "$DIST/plugins/opencad.python"
+          ls -R "$DIST"
+
+      - name: Plugin tests (real IPC)
+        if: ${{ github.event_name == 'push' || inputs.run_plugin_tests }}
+        shell: bash
+        env:
+          OCS_TEST_PYTHON_PLUGIN: ${{ github.workspace }}/dist/OpenCADStudio-windows-x86_64/plugins/opencad.python/opencad_python.dll
+          OCS_PLUGIN_RUNNER_EXE: ${{ github.workspace }}/dist/OpenCADStudio-windows-x86_64/OpenCADStudio.exe
+        run: cargo test --locked --release --lib -- --test-threads=1 python
+
+      - name: Pack
+        shell: pwsh
+        run: Compress-Archive -Path dist/OpenCADStudio-windows-x86_64 -DestinationPath OpenCADStudio-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenCADStudio-windows-x86_64
+          path: OpenCADStudio-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 14
