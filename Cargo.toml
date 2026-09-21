@@ -55,9 +55,6 @@ ttf-parser = "0.25"
 cosmic-text = "0.15"
 unicode-bidi = "0.3"
 lyon_tessellation = "1.0.20"
-# Big-font (.shx) lookups: encode a char to the font's Big5 / GBK / Shift_JIS
-# / EUC-KR double-byte code. Already in the tree through other deps.
-encoding_rs = "0.8"
 pollster = "0.4"
 
 [dev-dependencies]
@@ -93,8 +90,6 @@ i18n-embed = { version = "0.16", features = ["desktop-requester"] }
 rayon = "1"
 open = "5"
 printpdf = { version = "0.9.1", default-features = false, features = ["images"] }
-# The lopdf printpdf builds on: used to Flate-compress the exported PDF streams.
-lopdf = { version = "0.39.0", default-features = false, features = ["time"] }
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "win-system-proxy"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

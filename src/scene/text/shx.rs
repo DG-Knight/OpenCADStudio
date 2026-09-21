@@ -203,25 +203,24 @@ pub fn is_bigfont(path: &str) -> bool {
     load_file(path).is_some_and(|f| f.kind == ShxKind::Bigfont)
 }
 
-/// The double-byte legacy encodings a big font may be keyed by, most likely
-/// first for this file name. The font itself does not say; try them in turn
-/// and take the first code the font actually has.
-fn bigfont_encodings(path: &str) -> [&'static encoding_rs::Encoding; 4] {
-    use encoding_rs::{BIG5, EUC_KR, GBK, SHIFT_JIS};
+/// The code pages a big font's double-byte codes may be in, most likely
+/// first, guessed from the file name. The codec maps a name to its encoding
+/// (`ansi_950` Big5, `ansi_936` GBK, `ansi_932` Shift_JIS, `ansi_949` EUC-KR).
+fn bigfont_code_pages(path: &str) -> [&'static str; 4] {
     let name = path
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(path)
         .to_ascii_lowercase();
     if name.contains("gb") || name.contains("hz") || name.contains("china") {
-        [GBK, BIG5, SHIFT_JIS, EUC_KR]
+        ["ansi_936", "ansi_950", "ansi_932", "ansi_949"]
     } else if name.contains("bigfont") || name.contains("extfont") || name.contains("jp") {
-        [SHIFT_JIS, BIG5, GBK, EUC_KR]
+        ["ansi_932", "ansi_950", "ansi_936", "ansi_949"]
     } else if name.contains("whg") || name.contains("kor") || name.contains("han") {
-        [EUC_KR, BIG5, GBK, SHIFT_JIS]
+        ["ansi_949", "ansi_950", "ansi_936", "ansi_932"]
     } else {
         // `chineset.shx` and most Taiwanese fonts.
-        [BIG5, GBK, SHIFT_JIS, EUC_KR]
+        ["ansi_950", "ansi_936", "ansi_932", "ansi_949"]
     }
 }
 
@@ -235,7 +234,10 @@ pub fn bigfont_glyph(path: &str, ch: char) -> Option<Arc<crate::scene::text::lff
     }
     let mut buf = [0u8; 4];
     let s = ch.encode_utf8(&mut buf);
-    for enc in bigfont_encodings(path) {
+    for page in bigfont_code_pages(path) {
+        let Some(enc) = acadrust::io::dxf::code_page::encoding_from_code_page(page) else {
+            continue;
+        };
         let (bytes, _, unmappable) = enc.encode(s);
         if unmappable || bytes.len() != 2 {
             continue;
