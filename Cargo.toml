@@ -55,6 +55,9 @@ ttf-parser = "0.25"
 cosmic-text = "0.15"
 unicode-bidi = "0.3"
 lyon_tessellation = "1.0.20"
+# Big-font (.shx) lookups: encode a char to the font's Big5 / GBK / Shift_JIS
+# / EUC-KR double-byte code. Already in the tree through other deps.
+encoding_rs = "0.8"
 pollster = "0.4"
 
 [dev-dependencies]

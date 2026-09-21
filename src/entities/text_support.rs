@@ -77,6 +77,27 @@ pub fn resolve_text_style(style_name: &str, document: &CadDocument) -> ResolvedT
         }
     }
 
+    // A style's "Big Font" (`chineset.shx`, `hztxt.shx`, …) supplies the
+    // double-byte characters. Resolve it like the primary font (next to the
+    // drawing, then the per-user fonts folder) and pair it with the face; an
+    // unresolvable big font just leaves those characters to the fallback.
+    if let Some(big) = style
+        .map(|s| s.big_font_file.trim())
+        .filter(|big| !big.is_empty() && big.to_ascii_lowercase().ends_with(".shx"))
+    {
+        let base = document
+            .source_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(|p| p.parent());
+        let big_path = crate::io::resolve_image_file(big, base).or_else(|| {
+            crate::io::font_repo::local_font_file(big).map(|p| p.to_string_lossy().into_owned())
+        });
+        if let Some(big_path) = big_path {
+            font_name = Face::with_big_font(&font_name, &big_path);
+        }
+    }
+
     ResolvedTextStyle {
         font_name,
         width_factor: style.map(|s| s.width_factor as f32).unwrap_or(1.0),
