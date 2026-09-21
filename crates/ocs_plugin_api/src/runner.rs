@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::host::{BuiltinPlugin, InteractiveCommand};
+use crate::host::{BuiltinPlugin, CommandStep, InteractiveCommand};
 use crate::ipc::client::{InteractiveRegistry, IpcClient, PluginHostApi};
 use crate::ipc::protocol::{
     HostRequest, HostResponse, HostToPlugin, InteractiveEvent, PluginToHost, PLUGIN_TOKEN_ENV,
@@ -170,7 +170,11 @@ fn handle_host_request(
             }
         }
         HostRequest::InteractiveEvent { command_id, event } => {
-            let step = {
+            if matches!(event, InteractiveEvent::Cancel) {
+                interactive.borrow_mut().remove(&command_id);
+                return HostResponse::CommandStep(Box::new(CommandStep::Cancel));
+            }
+            let (step, done) = {
                 let mut registry = interactive.borrow_mut();
                 let Some(cmd) = registry.get_mut(&command_id) else {
                     return HostResponse::Error(format!(
@@ -178,14 +182,30 @@ fn handle_host_request(
                     ));
                 };
                 let cmd_ref: &mut dyn InteractiveCommand = cmd.as_mut();
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match event {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match event {
                     InteractiveEvent::Point(pt) => cmd_ref.on_point(pt),
                     InteractiveEvent::Enter => cmd_ref.on_enter(),
                     InteractiveEvent::ObjectPick { handle, pt } => {
                         cmd_ref.on_object_pick(handle, pt)
                     }
-                }))
+                    InteractiveEvent::Cancel => CommandStep::Cancel,
+                }));
+                match res {
+                    Ok(s) => {
+                        let is_done = matches!(
+                            s,
+                            CommandStep::Done
+                                | CommandStep::Cancel
+                                | CommandStep::CommitAndEnd(_)
+                        );
+                        (Ok(s), is_done)
+                    }
+                    Err(_) => (Err(()), true),
+                }
             };
+            if done {
+                interactive.borrow_mut().remove(&command_id);
+            }
             match step {
                 Ok(s) => HostResponse::CommandStep(Box::new(s)),
                 Err(_) => HostResponse::Error("interactive command panicked".to_string()),
@@ -269,7 +289,11 @@ fn handle_host_request_v4(
             }
         }
         HostRequest::InteractiveEvent { command_id, event } => {
-            let step = {
+            if matches!(event, InteractiveEvent::Cancel) {
+                interactive.borrow_mut().remove(&command_id);
+                return Some(HostResponse::CommandStep(Box::new(CommandStep::Cancel)));
+            }
+            let (step, done) = {
                 let mut registry = interactive.borrow_mut();
                 let Some(cmd) = registry.get_mut(&command_id) else {
                     return Some(HostResponse::Error(format!(
@@ -277,14 +301,30 @@ fn handle_host_request_v4(
                     )));
                 };
                 let cmd_ref: &mut dyn InteractiveCommand = cmd.as_mut();
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match event {
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match event {
                     InteractiveEvent::Point(pt) => cmd_ref.on_point(pt),
                     InteractiveEvent::Enter => cmd_ref.on_enter(),
                     InteractiveEvent::ObjectPick { handle, pt } => {
                         cmd_ref.on_object_pick(handle, pt)
                     }
-                }))
+                    InteractiveEvent::Cancel => CommandStep::Cancel,
+                }));
+                match res {
+                    Ok(s) => {
+                        let is_done = matches!(
+                            s,
+                            CommandStep::Done
+                                | CommandStep::Cancel
+                                | CommandStep::CommitAndEnd(_)
+                        );
+                        (Ok(s), is_done)
+                    }
+                    Err(_) => (Err(()), true),
+                }
             };
+            if done {
+                interactive.borrow_mut().remove(&command_id);
+            }
             match step {
                 Ok(s) => Some(HostResponse::CommandStep(Box::new(s))),
                 Err(_) => Some(HostResponse::Error("interactive command panicked".to_string())),

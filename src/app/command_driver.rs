@@ -4872,7 +4872,7 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
-                dispatched = self.dispatch_command(&cmd);
+                dispatched = self.dispatch_command_without_plugins(&cmd);
             }
             CmdResult::EditTableCell { handle, point } => {
                 // TABLEDIT's pick: end the pick phase and hand (table, point)

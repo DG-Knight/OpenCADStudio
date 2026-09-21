@@ -2710,8 +2710,19 @@ impl OpenCADStudio {
                         .push_output(crate::tf!("CLAYER = \"{cur}\"").as_ref());
                 } else {
                     if self.tabs[i].scene.document.layers.contains(name_arg) {
+                        let handle = self.tabs[i]
+                            .scene
+                            .document
+                            .layers
+                            .get(name_arg)
+                            .map(|l| l.handle)
+                            .unwrap_or(acadrust::types::Handle::NULL);
                         self.tabs[i].scene.document.header.current_layer_name =
                             name_arg.to_string();
+                        self.tabs[i].scene.document.header.current_layer_handle = handle;
+                        self.tabs[i].active_layer = name_arg.to_string();
+                        self.tabs[i].layers.current_layer = name_arg.to_string();
+                        self.ribbon.active_layer = name_arg.to_string();
                         self.tabs[i].dirty = true;
                         self.command_line
                             .push_output(crate::tf!("CLAYER set to \"{name_arg}\"").as_ref());

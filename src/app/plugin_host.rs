@@ -429,10 +429,23 @@ impl<'a> HostSession<'a> {
         let tab = self.tab;
         let is_new_cmd = self.app.tabs[tab].active_cmd.is_none();
         if is_new_cmd {
+            // Check if the complete command string is handled directly by command families
+            // (e.g. "CLAYER TEST", "ZOOM EXTENTS", "COLOR RED", "VSCURRENT FLATSHADED", etc.) without needing token-by-token feeding
+            let full_resolved = self.app.resolve_alias(trimmed);
+            let full_effective = full_resolved.as_deref().unwrap_or(trimmed);
+            if let Some(task) = self.app.dispatch_families(full_effective, tab) {
+                let _ = self.app.drive_headless_task(task);
+                self.app.command_line.record_recent(full_effective);
+                self.app.refresh_layer_panel();
+                self.publish_document_view();
+                return true;
+            }
+
             let cmd_name = parts[0];
             let resolved = self.app.resolve_alias(cmd_name);
             let effective = resolved.as_deref().unwrap_or(cmd_name);
-            let _ = self.app.dispatch_command_without_plugins(effective);
+            let task = self.app.dispatch_command_without_plugins(effective);
+            let _ = self.app.drive_headless_task(task);
         }
 
         let mut paused = false;
@@ -451,15 +464,17 @@ impl<'a> HostSession<'a> {
                 paused = true;
                 break;
             }
-            if part.eq_ignore_ascii_case("ENTER") || part.eq_ignore_ascii_case("RETURN") {
-                let _ = self.app.feed_command(crate::command::StepInput::Enter);
+            let task = if part.eq_ignore_ascii_case("ENTER") || part.eq_ignore_ascii_case("RETURN") {
+                self.app.feed_command(crate::command::StepInput::Enter)
             } else {
-                let _ = self.app.feed_active_cmd(part);
-            }
+                self.app.feed_active_cmd(part)
+            };
+            let _ = self.app.drive_headless_task(task);
         }
 
         if !paused && has_newline && self.app.tabs[tab].active_cmd.is_some() {
-            let _ = self.app.feed_command(crate::command::StepInput::Enter);
+            let task = self.app.feed_command(crate::command::StepInput::Enter);
+            let _ = self.app.drive_headless_task(task);
         }
 
         self.app.refresh_layer_panel();
@@ -646,6 +661,7 @@ pub(crate) struct PluginProcessInteractiveAdapter {
     pub command_id: u64,
     prompt: Option<String>,
     needs_entity_pick: Option<bool>,
+    is_done: bool,
 }
 
 impl PluginProcessInteractiveAdapter {
@@ -660,12 +676,27 @@ impl PluginProcessInteractiveAdapter {
             command_id,
             prompt,
             needs_entity_pick,
+            is_done: false,
         }
     }
 
     fn refresh(&mut self) {
         self.prompt = self.process.get_prompt(self.command_id).ok();
         self.needs_entity_pick = self.process.needs_entity_pick(self.command_id).ok();
+    }
+
+    fn cancel(&mut self) {
+        if !self.is_done {
+            self.is_done = true;
+            use ocs_plugin_api::ipc::protocol::InteractiveEvent;
+            let _ = self.process.interactive_event(self.command_id, InteractiveEvent::Cancel);
+        }
+    }
+}
+
+impl Drop for PluginProcessInteractiveAdapter {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -686,6 +717,9 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
             )
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
+        if matches!(result, crate::command::CmdResult::CommitAndExit(_) | crate::command::CmdResult::Cancel) {
+            self.is_done = true;
+        }
         self.refresh();
         result
     }
@@ -696,8 +730,15 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
             .interactive_event(self.command_id, InteractiveEvent::Enter)
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
+        if matches!(result, crate::command::CmdResult::CommitAndExit(_) | crate::command::CmdResult::Cancel) {
+            self.is_done = true;
+        }
         self.refresh();
         result
+    }
+    fn on_escape(&mut self) -> crate::command::CmdResult {
+        self.cancel();
+        crate::command::CmdResult::Cancel
     }
     fn needs_entity_pick(&self) -> bool {
         self.needs_entity_pick.unwrap_or(false)
@@ -715,6 +756,9 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
             )
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
+        if matches!(result, crate::command::CmdResult::CommitAndExit(_) | crate::command::CmdResult::Cancel) {
+            self.is_done = true;
+        }
         self.refresh();
         result
     }
@@ -1200,5 +1244,48 @@ mod tests {
         assert!(host.execute_command("ESC"));
         assert!(host.app.tabs[0].active_cmd.is_none());
         assert_eq!(host.app.tabs[0].pending_pause_tokens, None);
+
+        // 5. CLAYER command
+        host.add_layer(ocs_plugin_api::host::LayerConfig {
+            name: "TEST".to_string(),
+            ..Default::default()
+        });
+        assert!(host.execute_command("CLAYER TEST\n"));
+        assert_eq!(host.document().header.current_layer_name, "TEST");
+
+        // 6. Non-typical command: POINT
+        assert!(host.execute_command("POINT 50,50\n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 4);
+
+        // 7. Non-typical command: DONUT
+        assert!(host.execute_command("DONUT 10 30 100,100 \n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert!(host.document().entities().count() >= 5);
+
+        // 8. Non-typical command: ELLIPSE
+        assert!(host.execute_command("ELLIPSE 0,0 80,0 30\n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+
+        // 9. Non-typical inline commands: UCS
+        assert!(host.execute_command("UCS ORIGIN 50,50,0\n"));
+        assert!(host.app.tabs[0].active_ucs.is_some());
+        assert!(host.execute_command("UCS W\n"));
+        assert!(host.app.tabs[0].active_ucs.is_none());
+
+        // 10. Non-typical inline commands: SETVAR
+        assert!(host.execute_command("SETVAR PDMODE 35\n"));
+
+        // 11. Viewport visual style via drive_headless_task
+        assert!(host.execute_command("VSCURRENT FLATSHADED\n"));
+        assert_eq!(
+            host.app.tabs[0].render_mode,
+            ocs_plugin_api::host::acadrust::entities::ViewportRenderMode::FlatShaded
+        );
+
+        // 12. Drafting aids toggle via drive_headless_task
+        let initial_grid = host.app.show_grid;
+        assert!(host.execute_command("GRID\n"));
+        assert_eq!(host.app.show_grid, !initial_grid);
     }
 }

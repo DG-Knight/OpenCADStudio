@@ -244,7 +244,7 @@ impl OpenCADStudio {
     /// `Some(task)` for an arm it owns (early-returning or falling through to
     /// `finish_dispatch`), or `None` to defer to the next — equivalent to one
     /// sequential `match` over all arms.
-    fn dispatch_families(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+    pub(crate) fn dispatch_families(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         if let Some(t) = self.dispatch_fileops(cmd, i) {
             return Some(t);
         }
