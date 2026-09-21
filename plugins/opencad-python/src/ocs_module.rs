@@ -1606,6 +1606,60 @@ mod ocs {
         Ok(vm.ctx.new_list(output).into())
     }
 
+    /// One step of driving a real OCS command. `kind` is `run` (`line`),
+    /// `start` (`name`), `point` (`point`), `text` (`text`), `token` (`text`),
+    /// `entity` (`handle`, `point`), `selection`, `enter` or `cancel`. Returns
+    /// where the command stands: `status`, `blocked_by`, `command`, `prompt`,
+    /// `accepts`, `options`, `entities`, `added`, `unconsumed`, `error`.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn command_step(kind: String, options: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        use ocs_plugin_api::host::CommandRequest as R;
+        let options = if vm.is_none(&options) {
+            vm.ctx.new_dict()
+        } else {
+            options.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?
+        };
+        let required = |key: &str| -> PyResult<PyObjectRef> {
+            options
+                .get_item_opt(key, vm)?
+                .ok_or_else(|| vm.new_value_error(format!("ocs.command_step: {kind} needs {key}")))
+        };
+        let request = match kind.as_str() {
+            "run" => R::Run { line: required("line")?.try_into_value::<String>(vm)? },
+            "start" => R::Start { name: required("name")?.try_into_value::<String>(vm)? },
+            "point" => R::Point { point: py_to_f64_array::<3>(required("point")?, vm)? },
+            "text" => R::Text { text: required("text")?.try_into_value::<String>(vm)? },
+            "token" => R::Token { text: required("text")?.try_into_value::<String>(vm)? },
+            "entity" => R::Entity {
+                handle: Handle::new(required("handle")?.try_into_value::<u64>(vm)?),
+                point: py_to_f64_array::<3>(required("point")?, vm)?,
+            },
+            "selection" => R::Selection,
+            "enter" => R::Enter,
+            "cancel" => R::Cancel,
+            other => return Err(vm.new_value_error(format!("ocs.command_step: unknown step {other:?}"))),
+        };
+        let outcome = host_ctx::with_host(|host| host.run_command(request))
+            .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?
+            .map_err(|error| vm.new_runtime_error(format!("ocs.command_step: {error}")))?;
+        let dict = vm.ctx.new_dict();
+        let strings = |items: &[String]| -> PyObjectRef {
+            PyObjectRef::from(vm.ctx.new_list(items.iter().map(|v| vm.new_pyobj(v.clone())).collect()))
+        };
+        dict.set_item("status", vm.new_pyobj(outcome.status.clone()), vm)?;
+        dict.set_item("blocked_by", outcome.blocked_by.clone().map_or_else(|| vm.ctx.none(), |v| vm.new_pyobj(v)), vm)?;
+        dict.set_item("command", vm.new_pyobj(outcome.command.clone()), vm)?;
+        dict.set_item("prompt", vm.new_pyobj(outcome.prompt.clone()), vm)?;
+        dict.set_item("accepts", strings(&outcome.accepts), vm)?;
+        dict.set_item("options", strings(&outcome.options), vm)?;
+        dict.set_item("entities", vm.new_pyobj(outcome.entities), vm)?;
+        dict.set_item("added", vm.new_pyobj(outcome.added), vm)?;
+        dict.set_item("unconsumed", strings(&outcome.unconsumed), vm)?;
+        dict.set_item("error", outcome.error.clone().map_or_else(|| vm.ctx.none(), |v| vm.new_pyobj(v)), vm)?;
+        Ok(dict.into())
+    }
+
     /// Every layer with its full properties, in table order.
     #[cfg(feature = "experimental-host-model")]
     #[pyfunction]

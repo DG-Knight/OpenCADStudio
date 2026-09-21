@@ -1273,6 +1273,178 @@ impl<'a> HostSession<'a> {
         }
     }
 
+    /// Drive a real OCS command one step at a time (see
+    /// `ocs_plugin_api::host::CommandRequest`). The same primitives the
+    /// automation channel uses, run synchronously on this thread, so a step
+    /// never waits on anything that has to arrive from outside.
+    pub fn run_command(
+        &mut self,
+        request: ocs_plugin_api::host::CommandRequest,
+    ) -> Result<ocs_plugin_api::host::CommandOutcome, String> {
+        use crate::command::StepInput;
+        use ocs_plugin_api::host::CommandRequest as R;
+        if self.tab != self.app.active_tab {
+            return Err("commands act on the active document; switch to it first".to_owned());
+        }
+        let tab = self.tab;
+        let refuse = |line: &str| -> Option<String> {
+            let first = line.split_whitespace().next()?.trim_start_matches(['\'', '_']).to_uppercase();
+            const DENIED: &[&str] = &[
+                "QUIT", "EXIT", "CLOSE", "CLOSEALL", "NEW", "QNEW", "OPEN", "SAVE", "QSAVE", "SAVEAS",
+                "SAVEALL", "RECOVER", "SCRIPT", "RUNSCRIPT",
+            ];
+            if DENIED.contains(&first.as_str()) || first.starts_with("PY_") {
+                Some(format!("the command {first} cannot be run from a script"))
+            } else {
+                None
+            }
+        };
+        let active = self.app.tabs[tab].active_cmd.is_some();
+        let before = self.document().entities().count() as i64;
+        let error_revision = self.app.command_line.error_revision;
+        let editor_before = self.app.text_inline.is_some();
+        let mtext_before = self.app.mtext_editor.is_some();
+        let modal_before = self.app.active_modal.is_some();
+        self.app.command_line.unconsumed.clear();
+        let task = match request {
+            R::Run { line } => {
+                if line.trim().is_empty() {
+                    return Err("a command line is empty".to_owned());
+                }
+                if let Some(reason) = refuse(&line) {
+                    return Err(reason);
+                }
+                if active {
+                    return Err("a command is already active; cancel it first".to_owned());
+                }
+                self.app.run_command_line(&line)
+            }
+            R::Start { name } => {
+                if name.trim().is_empty() || name.split_whitespace().count() != 1 {
+                    return Err("a command name is one word".to_owned());
+                }
+                if let Some(reason) = refuse(&name) {
+                    return Err(reason);
+                }
+                if active {
+                    return Err("a command is already active; cancel it first".to_owned());
+                }
+                self.app.dispatch_command(name.trim())
+            }
+            R::Cancel => {
+                let task = self.app.update(crate::app::Message::CommandEscape);
+                self.app.drive_headless_task(task)?;
+                // Close what the command opened: an editor or a dialog would leave
+                // the interface waiting on a script that has moved on.
+                if !editor_before {
+                    self.app.text_inline = None;
+                }
+                if !mtext_before {
+                    self.app.mtext_editor = None;
+                }
+                if !modal_before {
+                    self.app.active_modal = None;
+                }
+                return Ok(self.command_outcome(before, None));
+            }
+            other => {
+                if !active {
+                    return Err("no command is waiting for input".to_owned());
+                }
+                let input = match other {
+                    R::Point { point } => {
+                        if point.iter().any(|v| !v.is_finite()) {
+                            return Err("a point must be finite".to_owned());
+                        }
+                        StepInput::Point(glam::DVec3::new(point[0], point[1], point[2]))
+                    }
+                    R::Text { text } => StepInput::Text(text),
+                    R::Token { text } => {
+                        let task = self.app.feed_active_cmd(&text);
+                        self.app.drive_headless_task(task)?;
+                        return Ok(self.finish_command_step(before, error_revision, editor_before, mtext_before, modal_before));
+                    }
+                    R::Entity { handle, point } => {
+                        if point.iter().any(|v| !v.is_finite()) {
+                            return Err("a point must be finite".to_owned());
+                        }
+                        if self.document().get_entity(handle).is_none() {
+                            return Err(format!("entity {} does not exist", handle.value()));
+                        }
+                        StepInput::EntityPick(handle, glam::DVec3::new(point[0], point[1], point[2]))
+                    }
+                    R::Selection => StepInput::SelectionComplete(self.app.tabs[tab].scene.selected_handles_in_order()),
+                    R::Enter => StepInput::Enter,
+                    R::Run { .. } | R::Start { .. } | R::Cancel => unreachable!(),
+                };
+                self.app.feed_command(input)
+            }
+        };
+        self.app.drive_headless_task(task)?;
+        Ok(self.finish_command_step(before, error_revision, editor_before, mtext_before, modal_before))
+    }
+
+    fn finish_command_step(
+        &mut self,
+        before: i64,
+        error_revision: u64,
+        editor_before: bool,
+        mtext_before: bool,
+        modal_before: bool,
+    ) -> ocs_plugin_api::host::CommandOutcome {
+        let error = (self.app.command_line.error_revision != error_revision)
+            .then(|| self.app.command_line.last_error.clone().unwrap_or_default());
+        let blocked = if self.app.tabs[self.tab].active_cmd.is_some() {
+            Some("command".to_owned())
+        } else if let (false, Some(modal)) = (modal_before, self.app.active_modal.as_ref()) {
+            Some(format!("modal:{modal:?}"))
+        } else if !editor_before && self.app.text_inline.is_some() {
+            Some("text_editor".to_owned())
+        } else if !mtext_before && self.app.mtext_editor.is_some() {
+            Some("mtext_editor".to_owned())
+        } else {
+            None
+        };
+        self.set_dirty();
+        self.publish_document_view();
+        let mut outcome = self.command_outcome(before, blocked);
+        outcome.error = error;
+        outcome
+    }
+
+    fn command_outcome(&self, before: i64, blocked_by: Option<String>) -> ocs_plugin_api::host::CommandOutcome {
+        let now = self.document().entities().count() as i64;
+        let metadata = self.app.tabs[self.tab]
+            .active_cmd
+            .as_deref()
+            .map(crate::app::control::active_command_metadata);
+        let text = |key: &str| metadata.as_ref().and_then(|m| m[key].as_str()).unwrap_or("").to_owned();
+        let list = |key: &str| -> Vec<String> {
+            metadata
+                .as_ref()
+                .and_then(|m| m[key].as_array())
+                .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                .unwrap_or_default()
+        };
+        let options = metadata
+            .as_ref()
+            .and_then(|m| m["options"].as_array())
+            .map(|items| items.iter().filter_map(|o| o["keyword"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).collect())
+            .unwrap_or_default();
+        ocs_plugin_api::host::CommandOutcome {
+            status: if blocked_by.is_some() { "waiting_input" } else { "completed" }.to_owned(),
+            blocked_by,
+            command: text("name"),
+            prompt: text("prompt"),
+            accepts: list("accepts"),
+            options,
+            entities: now as u64,
+            added: now - before,
+            unconsumed: self.app.command_line.unconsumed.clone(),
+            error: None,
+        }
+    }
+
     /// Simple linetype create/modify/rename/delete.
     fn linetype_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
         use ocs_plugin_api::host::TableOperation;
@@ -2366,6 +2538,9 @@ impl HostApi for HostSession<'_> {
     }
     fn table_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
         self.table_operation(operation)
+    }
+    fn run_command(&mut self, request: ocs_plugin_api::host::CommandRequest) -> Result<ocs_plugin_api::host::CommandOutcome, String> {
+        self.run_command(request)
     }
 }
 
@@ -7828,6 +8003,207 @@ LT.delete('Temp')
         let names = app.tabs[0].scene.layout_names();
         assert!(names.contains(&"Sheet1".to_owned()) && names.contains(&"Details".to_owned()), "undo restored the layouts: {names:?}");
         assert!(document.entities().any(|e| matches!(e, EntityType::Circle(_))), "undo restored the sheet's circle");
+    }
+
+    /// The modify wrappers through Python over the real runner: each drives
+    /// the real OCS command and the resulting geometry is checked exactly.
+    #[test]
+    fn audit_python_modify_wrappers_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dir = std::env::temp_dir();
+        let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+            let script = dir.join(format!("ocs_modify_{tag}_{}.py", std::process::id()));
+            std::fs::write(&script, format!(concat!(
+                "def P(x, y, z=0.0): return {{'x': x, 'y': y, 'z': z}}\n",
+                "doc = ocs.active_document\nM = doc.modify\nL = doc.layers\n",
+                "refused, failed = [], []\n",
+                "def check(tag, fn):\n",
+                "    try:\n        fn()\n    except (RuntimeError, TypeError, ValueError):\n        refused.append(tag)\n",
+                "    else:\n        failed.append('ACCEPTED_' + tag)\n",
+                "def step(tag, fn):\n",
+                "    try:\n        return fn()\n    except Exception as error:\n",
+                "        failed.append(tag + '_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:70])\n",
+                "{body}\n",
+                "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(failed))\n",
+            ), body = body)).unwrap();
+            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            let _ = std::fs::remove_file(&script);
+        };
+        let report = |document: &CadDocument| -> (usize, Vec<String>) {
+            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+                .expect("script report layer");
+            let (refused, failed) = name["REPORT".len()..].split_once('~').unwrap();
+            (refused.trim().parse().unwrap(), failed.split_whitespace().map(str::to_owned).collect())
+        };
+
+        run(&mut host, "build", r#"
+def line(a, b): return doc.create_entity('Line', start=P(*a), end=P(*b))
+def circle(c, r): return doc.create_entity('Circle', center=P(*c), radius=r)
+a = line((0, 0), (10, 0))
+step('offset', lambda: M.offset(a, 2, (5, 5)))
+h = line((100, 0), (110, 0)); v = line((105, -5), (105, 5))
+step('trim', lambda: M.trim(h, (108, 0)))
+h2 = line((200, 0), (209, 0)); w = line((215, -5), (215, 5))
+step('extend', lambda: M.extend(h2, (208, 0)))
+f1 = line((300, 0), (310, 0)); f2 = line((300, 0), (300, 10))
+step('fillet', lambda: M.fillet(f1, f2, 2, (308, 0), (300, 8)))
+m = circle((400, 0), 1)
+step('move', lambda: M.move([m], (0, 0, 0), (5, 5, 0)))
+c = circle((500, 0), 1)
+step('copy', lambda: M.copy([c], (0, 0, 0), (0, 10, 0)))
+r = line((600, 0), (610, 0))
+step('rotate', lambda: M.rotate([r], (600, 0, 0), 90))
+sc = line((700, 0), (710, 0))
+step('scale', lambda: M.scale([sc], (700, 0, 0), 2))
+mi = line((800, 0), (810, 0))
+step('mirror', lambda: M.mirror([mi], (0, 5, 0), (1, 5, 0)))
+e = line((900, 0), (910, 0))
+step('erase', lambda: M.erase([e]))
+step('run_line', lambda: doc.command('LINE 1100,0 1110,10'))
+def interactive():
+    with doc.start_command('CIRCLE') as c:
+        c.point((1200, 0, 0))
+        c.text(3)
+        if c.waiting:
+            raise RuntimeError('circle still waiting')
+step('interactive', interactive)
+check('quit', lambda: doc.start_command('QUIT'))
+check('newdoc', lambda: doc.command('NEW'))
+check('py', lambda: doc.command('PY_RUN nothing'))
+check('unknown', lambda: doc.start_command('NOSUCHCOMMAND'))
+check('incomplete', lambda: doc.command('OFFSET'))
+check('input_without_command', lambda: ocs.command_step('point', {'point': [0, 0, 0]}))
+open_command = doc.start_command('LINE')
+check('second_command', lambda: doc.start_command('CIRCLE'))
+check('run_while_active', lambda: doc.command('POINT 1,1'))
+open_command.cancel()
+check('bad_point', lambda: ocs.command_step('point', {'point': [0, 0, 0]}))
+"#);
+        let (refused, failed) = report(host.document());
+        assert!(failed.is_empty(), "wrapper failures: {failed:?}");
+        assert_eq!(refused, 9);
+
+        let lines: Vec<acadrust::entities::Line> = host.document().entities().filter_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None }).collect();
+        let circles: Vec<acadrust::entities::Circle> = host.document().entities().filter_map(|e| match e { EntityType::Circle(c) => Some(c.clone()), _ => None }).collect();
+        let arcs: Vec<acadrust::entities::Arc> = host.document().entities().filter_map(|e| match e { EntityType::Arc(a) => Some(a.clone()), _ => None }).collect();
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        let has_line = |x1: f64, y1: f64, x2: f64, y2: f64| lines.iter().any(|l| {
+            (near(l.start.x, x1) && near(l.start.y, y1) && near(l.end.x, x2) && near(l.end.y, y2))
+                || (near(l.start.x, x2) && near(l.start.y, y2) && near(l.end.x, x1) && near(l.end.y, y1))
+        });
+        let describe = || lines.iter().map(|l| format!("({},{})-({},{})", l.start.x, l.start.y, l.end.x, l.end.y)).collect::<Vec<_>>();
+        assert!(has_line(0.0, 0.0, 10.0, 0.0) && has_line(0.0, 2.0, 10.0, 2.0), "offset: {:?}", describe());
+        assert!(has_line(100.0, 0.0, 105.0, 0.0), "trim: {:?}", describe());
+        assert!(has_line(200.0, 0.0, 215.0, 0.0), "extend: {:?}", describe());
+        assert!(arcs.iter().any(|a| near(a.radius, 2.0) && near(a.center.x, 302.0) && near(a.center.y, 2.0)), "fillet arc: {arcs:?}");
+        assert!(circles.iter().any(|c| near(c.center.x, 405.0) && near(c.center.y, 5.0)), "move: {circles:?}");
+        assert!(!circles.iter().any(|c| near(c.center.x, 400.0)), "move left the original: {circles:?}");
+        assert!(circles.iter().any(|c| near(c.center.x, 500.0) && near(c.center.y, 0.0)) && circles.iter().any(|c| near(c.center.x, 500.0) && near(c.center.y, 10.0)), "copy: {circles:?}");
+        assert!(has_line(600.0, 0.0, 600.0, 10.0), "rotate: {:?}", describe());
+        assert!(has_line(700.0, 0.0, 720.0, 0.0), "scale: {:?}", describe());
+        assert!(has_line(800.0, 0.0, 810.0, 0.0) && has_line(800.0, 10.0, 810.0, 10.0), "mirror keeps the source and adds the reflection: {:?}", describe());
+        assert!(!has_line(900.0, 0.0, 910.0, 0.0), "erase: {:?}", describe());
+        assert!(has_line(1100.0, 0.0, 1110.0, 10.0), "doc.command run: {:?}", describe());
+        assert!(circles.iter().any(|c| near(c.center.x, 1200.0) && near(c.radius, 3.0)), "start_command session: {circles:?}");
+        assert!(host.app.tabs[0].active_cmd.is_none(), "no command is left running");
+
+        // U: a wrapper's change is one undoable step (the report layer is the other).
+        run(&mut host, "undo", r#"
+u = doc.create_entity('Circle', center=P(1000, 0), radius=1)
+step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
+"#);
+        assert!(report(host.document()).1.is_empty());
+        let moved = |document: &CadDocument, x: f64| document.entities().any(|e| matches!(e, EntityType::Circle(c) if near(c.center.x, x) && near(c.center.y, 0.0)));
+        assert!(moved(host.document(), 1007.0));
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(2);
+        assert!(moved(&app.tabs[0].scene.document, 1000.0), "undo put the circle back");
+        assert!(!moved(&app.tabs[0].scene.document, 1007.0));
+    }
+
+    /// Exploration harness (not a gate): prints how the real commands answer
+    /// each step so the wrappers are written against observed prompts.
+    #[test]
+    #[ignore]
+    #[allow(unused_must_use)]
+    fn spike_command_runner_prompts() {
+        use ocs_plugin_api::host::CommandRequest as R;
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let show = |label: &str, r: &Result<ocs_plugin_api::host::CommandOutcome, String>| match r {
+            Ok(o) => eprintln!("SPIKE {label}: {} cmd={} prompt={:?} accepts={:?} opts={:?} added={} unconsumed={:?} err={:?}",
+                o.status, o.command, o.prompt, o.accepts, o.options, o.added, o.unconsumed, o.error),
+            Err(e) => eprintln!("SPIKE {label}: ERR {e}"),
+        };
+        let run = |host: &mut HostSession<'_>, label: &str, r: R| { let out = host.run_command(r); show(label, &out); out };
+        let mk = |host: &mut HostSession<'_>, lines: &[&str]| -> Vec<Handle> {
+            for l in lines { host.run_command(R::Run { line: (*l).into() }).unwrap(); }
+            host.document().entities().map(|e| e.common().handle).collect()
+        };
+        let cancel = |host: &mut HostSession<'_>| { let _ = host.run_command(R::Cancel); };
+        let hs = mk(&mut host, &["LINE 0,0 10,0", "LINE 5,-5 5,5", "LINE 20,0 30,0", "LINE 0,10 10,10", "LINE 0,20 10,20"]);
+        // EXTEND: extend line 3 toward line 2? use boundary line 2 at x=5; extend line hs[0]'s end at x=10? Extend hs[2] (20..30) leftwards to x=5 no; use hs[0] end to the wall at x=15
+        let _ = mk(&mut host, &["LINE 15,-5 15,5"]);
+        let wall = *host.document().entities().last().map(|e| &e.common().handle).unwrap();
+        run(&mut host, "EXTEND start", R::Start { name: "EXTEND".into() });
+        run(&mut host, "EXTEND pick", R::Entity { handle: hs[0], point: [9.0, 0.0, 0.0] });
+        run(&mut host, "EXTEND enter", R::Enter);
+        cancel(&mut host);
+        // FILLET
+        run(&mut host, "FILLET start", R::Start { name: "FILLET".into() });
+        run(&mut host, "FILLET R", R::Token { text: "R".into() });
+        run(&mut host, "FILLET radius", R::Text { text: "2".into() });
+        run(&mut host, "FILLET first", R::Entity { handle: hs[3], point: [2.0, 10.0, 0.0] });
+        run(&mut host, "FILLET second", R::Entity { handle: hs[4], point: [2.0, 20.0, 0.0] });
+        cancel(&mut host);
+        let _ = wall;
+        // CHAMFER
+        run(&mut host, "CHAMFER start", R::Start { name: "CHAMFER".into() });
+        cancel(&mut host);
+        // selection commands
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[3]]);
+        run(&mut host, "COPY run", R::Run { line: "COPY 0,0 0,3".into() });
+        run(&mut host, "COPY leftover", R::Enter);
+        cancel(&mut host);
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[3]]);
+        run(&mut host, "ROTATE run", R::Run { line: "ROTATE 0,0 90".into() });
+        cancel(&mut host);
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
+        run(&mut host, "SCALE run", R::Run { line: "SCALE 0,0 2".into() });
+        cancel(&mut host);
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
+        run(&mut host, "MIRROR start", R::Start { name: "MIRROR".into() });
+        run(&mut host, "MIRROR sel", R::Selection);
+        run(&mut host, "MIRROR p1", R::Point { point: [0.0, 0.0, 0.0] });
+        run(&mut host, "MIRROR p2", R::Point { point: [1.0, 0.0, 0.0] });
+        run(&mut host, "MIRROR erase?", R::Token { text: "N".into() });
+        cancel(&mut host);
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
+        run(&mut host, "ARRAYRECT start", R::Start { name: "ARRAYRECT".into() });
+        run(&mut host, "ARRAYRECT sel", R::Selection);
+        cancel(&mut host);
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[4]]);
+        run(&mut host, "ARRAYPOLAR start", R::Start { name: "ARRAYPOLAR".into() });
+        run(&mut host, "ARRAYPOLAR sel", R::Selection);
+        cancel(&mut host);
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[2]]);
+        run(&mut host, "ERASE run", R::Run { line: "ERASE".into() });
+        cancel(&mut host);
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[0]]);
+        run(&mut host, "EXPLODE run", R::Run { line: "EXPLODE".into() });
+        cancel(&mut host);
+        eprintln!("SPIKE final entity count {}", host.document().entities().count());
     }
 
     #[test]

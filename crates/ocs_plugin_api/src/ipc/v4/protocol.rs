@@ -106,6 +106,43 @@ mod tests {
     }
 
     #[test]
+    fn command_request_and_outcome_roundtrip() {
+        use crate::host::{CommandOutcome, CommandRequest};
+        for request in [
+            CommandRequest::Run { line: "LINE 0,0 1,1".into() },
+            CommandRequest::Start { name: "OFFSET".into() },
+            CommandRequest::Point { point: [1.0, 2.0, 3.0] },
+            CommandRequest::Text { text: "2".into() },
+            CommandRequest::Token { text: "R".into() },
+            CommandRequest::Entity { handle: acadrust::Handle::new(9), point: [0.0; 3] },
+            CommandRequest::Selection,
+            CommandRequest::Enter,
+            CommandRequest::Cancel,
+        ] {
+            let bytes = bincode::serialize(&PluginRequest::RunCommand { request: request.clone() }).unwrap();
+            assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
+                PluginRequest::RunCommand { request: decoded } if decoded == request));
+        }
+        let outcome = CommandOutcome {
+            status: "waiting_input".into(),
+            blocked_by: Some("command".into()),
+            command: "OFFSET".into(),
+            prompt: "Select object".into(),
+            accepts: vec!["entity".into()],
+            options: vec!["M".into()],
+            entities: 4,
+            added: -1,
+            unconsumed: vec!["x".into()],
+            error: Some("e".into()),
+        };
+        for result in [Ok(outcome), Err("refused".to_owned())] {
+            let bytes = bincode::serialize(&PluginResponse::CommandResult(result.clone())).unwrap();
+            assert!(matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+                PluginResponse::CommandResult(decoded) if decoded == result));
+        }
+    }
+
+    #[test]
     fn table_operation_request_and_response_roundtrip() {
         use crate::host::{LayerConfig, TableOperation};
         for operation in [

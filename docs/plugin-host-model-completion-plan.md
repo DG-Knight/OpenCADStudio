@@ -253,3 +253,23 @@ persistence; deleting the current layout; four-step undo restoring the layouts, 
 round-trip and Python unit tests. Not covered: complex (text/shape) linetypes, reordering layouts, plot devices and
 styles, and page-setup names. Next: headless command execution.
 
+### 2026-09-21: command runner and modify wrappers (`doc.command`, `doc.start_command`, `doc.modify`)
+
+`HostApi::run_command(CommandRequest) -> CommandOutcome` (additive v7; `Run`, `Start`, `Point`, `Text`, `Token`, `Entity`,
+`Selection`, `Enter`, `Cancel`) drives the real command through the same primitives the automation channel uses
+(`run_command_line`, `dispatch_command`, `feed_command`, `feed_active_cmd`, `CommandEscape`) and finishes each step with
+`drive_headless_task`, which is synchronous on the host thread. The earlier "nested command replay can hang" concern does not
+apply to this path: no step waits on anything that must arrive from outside, the exploration harness ran every command
+tried without a hang, and an editor or dialog a command opens is reported in `blocked_by` and closed by `Cancel`. It refuses
+while another command is active, on a denylist (`QUIT`, `EXIT`, `CLOSE*`, `NEW`, `QNEW`, `OPEN`, `SAVE*`, `RECOVER`, `SCRIPT`,
+`RUNSCRIPT`, `PY_*`), and off the active tab. It does not consult the user's automation on/off switch, which governs the
+external MCP/serve channel; a script is already something the user chose to run. Python: `doc.command`, `doc.start_command`
+(context manager that cancels a waiting command) and `doc.modify` (offset, trim, extend, fillet, move, copy, rotate, scale,
+mirror, erase). The prompt sequences were observed with `spike_command_runner_prompts` (ignored harness). Evidence:
+`audit_python_modify_wrappers_over_real_ipc` checks exact geometry for every wrapper (offset distance and side, trim and
+extend end points, fillet arc centre and radius, move, copy keeping the original, rotate, scale, mirror keeping the source,
+erase), `doc.command` and an interactive session, nine refusals (quit, new, `PY_RUN`, unknown, incomplete line, input with no
+command, second command, run while active), no command left running, and a one-step undo. IPC round-trip and Python unit tests.
+Not covered: chamfer, arrays, hatch, join, explode, break and the many other commands (reachable through `doc.command` and
+`start_command`); reading prompts for commands with a text editor; an on/off setting for script-driven commands.
+

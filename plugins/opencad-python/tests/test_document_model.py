@@ -46,10 +46,57 @@ class DocumentModelTests(unittest.TestCase):
             linetype_operation=lambda op, name, options: self.calls.append(("linetype", op, name, options)) or 9,
             layout_records=lambda: [{"name": n, "current": n == "Model"} for n in ("Model", "Sheet1")],
             layout_operation=lambda op, name, options: self.calls.append(("layout", op, name, options)) or 9,
+            command_step=self._command_step,
+            curve_samples=lambda handle, n: {"vertices": [[0, 0], [1, 0], [2, 0]], "elevation": 5.0, "closed": False},
         )
         namespace = {"ocs": self.ocs}
         exec(MODEL.read_text(), namespace)
         self.doc = self.ocs.active_document
+
+    def _command_step(self, kind, options):
+        self.calls.append(("step", kind, options))
+        outcome = {"status": "completed", "blocked_by": None, "command": "", "prompt": "", "accepts": [],
+                   "options": [], "entities": 0, "added": 0, "unconsumed": [], "error": None}
+        outcome.update(self.step_outcome.get(kind, {}))
+        if kind == "enter":
+            new = max(self.records) + 1
+            self.records[new] = {"handle": new, "kind": "Line", "layer": "0", "_editable": True}
+        return outcome
+
+    def test_command_runner(self):
+        self.step_outcome = {}
+        out = self.doc.command("CIRCLE 0,0 5")
+        self.assertEqual(self.calls[-1], ("step", "run", {"line": "CIRCLE 0,0 5"}))
+        self.assertEqual(out["status"], "completed")
+        self.step_outcome = {"run": {"status": "waiting_input", "prompt": "Select object"}}
+        with self.assertRaises(RuntimeError):
+            self.doc.command("OFFSET")
+        self.assertEqual(self.calls[-1], ("step", "cancel", None))
+        self.step_outcome = {"run": {"error": "bad"}}
+        with self.assertRaises(RuntimeError):
+            self.doc.command("X")
+        waiting = {"status": "waiting_input"}
+        self.step_outcome = {"start": waiting, "point": waiting, "entity": waiting}
+        with self.doc.start_command("OFFSET") as command:
+            command.point((1, 2))
+            self.assertEqual(self.calls[-1], ("step", "point", {"point": [1.0, 2.0, 0.0]}))
+            command.entity(self.doc.entities[1], at=(0, 0, 0))
+            self.assertEqual(self.calls[-1][2]["handle"], 1)
+        self.assertEqual(self.calls[-1], ("step", "cancel", None))
+
+    def test_modify_wrappers(self):
+        self.step_outcome = {}
+        self.doc.modify.trim(1, (3, 0, 0))
+        steps = [c for c in self.calls if c[0] == "step"]
+        self.assertEqual([c[1] for c in steps], ["start", "entity", "enter"])
+        self.calls.clear()
+        self.doc.modify.move([1, 2], (0, 0, 0), (5, 5, 0))
+        self.assertEqual(self.calls[0], ("selection", [1, 2]))
+        self.assertEqual([c[1] for c in self.calls if c[0] == "step"], ["start", "point", "point"])
+        self.calls.clear()
+        self.doc.modify.offset(1, 2, (0, 5))
+        entity_step = [c for c in self.calls if c[0] == "step" and c[1] == "entity"][0]
+        self.assertEqual(entity_step[2]["point"], [1, 0, 5.0])
 
     def test_batch_edit_and_rollback(self):
         line = self.doc.entities[1]

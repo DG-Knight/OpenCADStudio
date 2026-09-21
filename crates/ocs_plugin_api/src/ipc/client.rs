@@ -482,6 +482,18 @@ impl HostApi for PluginHostApi {
         }
     }
 
+    fn run_command(&mut self, request: crate::host::CommandRequest) -> Result<crate::host::CommandOutcome, String> {
+        match self.client.request(PluginRequest::RunCommand { request }) {
+            Ok(PluginResponse::CommandResult(result)) => {
+                self.document_cache = OnceCell::new();
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected command response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn table_operation(&mut self, operation: crate::host::TableOperation) -> Result<Handle, String> {
         match self.client.request(PluginRequest::TableOperation { operation }) {
             Ok(PluginResponse::TableResult(result)) => {

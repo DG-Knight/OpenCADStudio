@@ -580,6 +580,185 @@ class _Layouts(_Named):
         return self[name]
 
 
+def _pt(value):
+    """A point as [x, y, z] from a tuple, list or {"x", "y", "z"} dict."""
+    if isinstance(value, dict):
+        return [float(value["x"]), float(value["y"]), float(value.get("z", 0.0))]
+    coords = [float(v) for v in value]
+    if len(coords) == 2:
+        coords.append(0.0)
+    if len(coords) != 3:
+        raise ValueError("a point needs 2 or 3 coordinates")
+    return coords
+
+
+def _handle(value):
+    return value.handle if isinstance(value, _Entity) else int(value)
+
+
+class _Command:
+    """One running OCS command, driven a step at a time:
+
+        with doc.start_command("OFFSET") as c:
+            c.text(2); c.entity(line, at=(5, 0, 0)); c.point((5, 4, 0)); c.enter()
+
+    Each step returns the outcome dict (`status`, `prompt`, `accepts`,
+    `options`, `added`, `error`, ...) and raises `RuntimeError` when the command
+    reports an error. Leaving the `with` block cancels the command if it is still
+    waiting. The host runs the real command, refuses to start one while another
+    is active, and refuses commands that could end the session (QUIT, NEW, OPEN,
+    SAVE...) or re-enter Python (PY_*)."""
+
+    def __init__(self, name):
+        self.name = str(name)
+        self.outcome = None
+        self._send("start", name=self.name)
+
+    def _send(self, kind, **options):
+        outcome = ocs.command_step(kind, options)
+        self.outcome = outcome
+        if outcome["error"]:
+            raise RuntimeError("%s: %s" % (self.name, outcome["error"]))
+        return outcome
+
+    @property
+    def waiting(self):
+        return self.outcome is not None and self.outcome["status"] == "waiting_input"
+
+    def point(self, point):
+        return self._send("point", point=_pt(point))
+
+    def text(self, value):
+        return self._send("text", text=str(value))
+
+    def token(self, keyword):
+        return self._send("token", text=str(keyword))
+
+    def entity(self, entity, at):
+        return self._send("entity", handle=_handle(entity), point=_pt(at))
+
+    def selection(self):
+        """Complete an object-selection prompt with the current selection."""
+        return self._send("selection")
+
+    def enter(self):
+        return self._send("enter")
+
+    def cancel(self):
+        return self._send("cancel")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.waiting:
+            ocs.command_step("cancel", None)
+        return False
+
+
+def _finished(command, what):
+    """Require that `command` ended by itself; cancel and raise if it did not."""
+    if command.waiting:
+        prompt = command.outcome["prompt"]
+        command.cancel()
+        raise RuntimeError("%s did not finish: still asking %r" % (what, prompt))
+
+
+class _Modify:
+    """Modify tools as plain calls. Each drives the real OCS command, so it
+    behaves exactly as at the command line, and returns the entities it added.
+    A tool that needs a pick point takes `at=` (a point on or near the entity);
+    without it the middle of a line, arc or circle is used."""
+
+    def __init__(self, document):
+        self._document = document
+
+    def _at(self, entity, at):
+        if at is not None:
+            return _pt(at)
+        samples = ocs.curve_samples(_handle(entity), 4)
+        if samples is None:
+            raise ValueError("pass at=(x, y, z): the middle of this kind of entity is not known")
+        middle = samples["vertices"][len(samples["vertices"]) // 2]
+        return [middle[0], middle[1], samples["elevation"]]
+
+    def _select(self, entities):
+        ocs.select([_handle(e) for e in entities])
+
+    def _added(self, before):
+        before = set(before)
+        return [self._document.entities[h] for h in ocs.entity_handles() if h not in before]
+
+    def _run(self, name, steps, entities=None):
+        before = list(ocs.entity_handles())
+        if entities is not None:
+            self._select(entities)
+        with _Command(name) as command:
+            for step in steps:
+                step(command)
+            _finished(command, name)
+        return self._added(before)
+
+    def offset(self, entity, distance, side, at=None):
+        """Offset one entity by `distance` towards the point `side`; returns the new entity."""
+        result = self._run("OFFSET", [
+            lambda c: c.text(distance),
+            lambda c: c.entity(entity, self._at(entity, at)),
+            lambda c: c.point(side),
+            lambda c: c.enter(),
+        ])
+        if not result:
+            raise RuntimeError("OFFSET produced nothing")
+        return result[0]
+
+    def trim(self, target, at):
+        """Trim `target` at the crossing nearest the click point `at`, against every entity in the drawing."""
+        return self._run("TRIM", [lambda c: c.entity(target, at), lambda c: c.enter()])
+
+    def extend(self, target, at):
+        """Extend `target` from the end nearest `at` to the next entity in its way."""
+        return self._run("EXTEND", [lambda c: c.entity(target, at), lambda c: c.enter()])
+
+    def fillet(self, first, second, radius=0, at1=None, at2=None):
+        """Round (or, with radius 0, square) the corner between two entities."""
+        return self._run("FILLET", [
+            lambda c: c.token("R"),
+            lambda c: c.text(radius),
+            lambda c: c.entity(first, self._at(first, at1)),
+            lambda c: c.entity(second, self._at(second, at2)),
+            lambda c: c.enter(),
+        ])
+
+    def move(self, entities, base, target):
+        self._run("MOVE", [lambda c: c.point(base), lambda c: c.point(target)], entities)
+
+    def copy(self, entities, base, target):
+        """Copy the entities once from `base` to `target`; returns the copies."""
+        return self._run("COPY", [lambda c: c.point(base), lambda c: c.point(target), lambda c: c.enter()], entities)
+
+    def rotate(self, entities, base, angle):
+        """Rotate about `base` by `angle` degrees."""
+        self._run("ROTATE", [lambda c: c.point(base), lambda c: c.text(angle)], entities)
+
+    def scale(self, entities, base, factor):
+        self._run("SCALE", [lambda c: c.point(base), lambda c: c.text(factor)], entities)
+
+    def mirror(self, entities, first, second, erase_source=False):
+        """Mirror about the line through two points; returns the mirrored copies."""
+        return self._run("MIRROR", [
+            lambda c: c.point(first),
+            lambda c: c.point(second),
+            lambda c: c.token("Y" if erase_source else "N"),
+        ], entities)
+
+    def erase(self, entities):
+        before = len(list(ocs.entity_handles()))
+        self._select(entities)
+        with _Command("ERASE") as command:
+            _finished(command, "ERASE")
+        return before - len(list(ocs.entity_handles()))
+
+
 class _Document:
     def __init__(self):
         self._pending = None
@@ -589,8 +768,28 @@ class _Document:
         self.blocks = _Blocks()
         self.linetypes = _Linetypes()
         self.layouts = _Layouts()
+        self.modify = _Modify(self)
         self.entities = _Entities(self)
         self.solids = _Solids(self)
+
+    def command(self, line):
+        """Run one whole OCS command line, e.g. `"CIRCLE 5,5 3"`; the tokens after
+        the name answer the prompts in order and a final Enter finishes. Returns
+        the outcome dict. If the line leaves the command waiting for more input the
+        command is cancelled and `RuntimeError` names the prompt; use
+        `start_command` to answer prompts one at a time."""
+        outcome = ocs.command_step("run", {"line": str(line)})
+        if outcome["error"]:
+            raise RuntimeError("%s: %s" % (line, outcome["error"]))
+        if outcome["status"] != "completed":
+            prompt = outcome["prompt"] or outcome["blocked_by"]
+            ocs.command_step("cancel", None)
+            raise RuntimeError("%r did not finish: still asking %r" % (line, prompt))
+        return outcome
+
+    def start_command(self, name):
+        """Start a command and answer its prompts step by step (see `_Command`)."""
+        return _Command(name)
 
     def transaction(self, label):
         return _Transaction(self, label)

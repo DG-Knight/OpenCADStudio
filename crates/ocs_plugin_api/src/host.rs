@@ -85,6 +85,56 @@ pub enum SolidBoolean {
     Intersect,
 }
 
+/// One step of driving an OCS command from a script (API v7, additive). The
+/// host runs the real command, so every tool behaves exactly as at the command
+/// line, and answers with where the command stands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CommandRequest {
+    /// Run a whole command line (`OFFSET 5 ...`): the tokens after the name
+    /// answer the prompts in order and a final Enter finishes the command.
+    Run { line: String },
+    /// Start a command and leave it waiting for its first input.
+    Start { name: String },
+    /// Answer the current prompt with a world-coordinate point.
+    Point { point: [f64; 3] },
+    /// Answer with typed text (a distance, an angle, a name).
+    Text { text: String },
+    /// Answer with a keyword option.
+    Token { text: String },
+    /// Pick an entity at a point.
+    Entity { handle: Handle, point: [f64; 3] },
+    /// Complete an object-selection prompt with the current selection.
+    Selection,
+    /// Press Enter.
+    Enter,
+    /// Cancel the running command and close anything it left open.
+    Cancel,
+}
+
+/// Where a command stands after a [`CommandRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CommandOutcome {
+    /// `completed` when nothing is waiting, `waiting_input` when the command
+    /// (or an editor or dialog it opened) needs more.
+    pub status: String,
+    /// What is still open: `command`, `text_editor`, `mtext_editor` or `modal:<kind>`.
+    pub blocked_by: Option<String>,
+    /// The waiting command's name and prompt (empty when none).
+    pub command: String,
+    pub prompt: String,
+    /// The kinds of input the prompt accepts (`point`, `entity`, `selection`,
+    /// `text`, `token`, `enter`) and its keyword options.
+    pub accepts: Vec<String>,
+    pub options: Vec<String>,
+    /// Entities in the drawing after the step, and the change.
+    pub entities: u64,
+    pub added: i64,
+    /// Typed tokens no prompt asked for.
+    pub unconsumed: Vec<String>,
+    /// The command line's error message when the step failed.
+    pub error: Option<String>,
+}
+
 /// A change to a drawing table record (API v7, additive). The host validates
 /// the request, records one undo step and refuses without changing anything
 /// when it cannot honour it; the result is the record's handle.
@@ -806,6 +856,13 @@ pub trait HostApi {
     /// perform it losslessly (API v7, additive).
     fn solid_operation(&mut self, _operation: SolidOperation) -> Result<Handle, String> {
         Err("solid operations are not supported by this host".to_owned())
+    }
+
+    /// Drive an OCS command from a script (API v7, additive). Refused, with
+    /// nothing run, when another command is already active or the request names
+    /// a command that could end the session or re-enter the plugin.
+    fn run_command(&mut self, _request: CommandRequest) -> Result<CommandOutcome, String> {
+        Err("running commands is not supported by this host".to_owned())
     }
 
     /// Create, change, rename, delete or select a drawing table record (API v7,

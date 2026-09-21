@@ -314,7 +314,7 @@ fn command_selection_policy(name: &str) -> &'static str {
     }
 }
 
-fn active_command_metadata(command: &dyn crate::command::CadCommand) -> Value {
+pub(super) fn active_command_metadata(command: &dyn crate::command::CadCommand) -> Value {
     let options = command.options();
     let mut accepts = Vec::new();
     if command.is_selection_gathering() {

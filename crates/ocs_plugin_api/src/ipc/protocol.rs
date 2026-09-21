@@ -157,6 +157,8 @@ pub enum PluginRequest {
     SolidOperation { operation: crate::host::SolidOperation },
     /// V7 (additive): drawing table record create/modify/rename/delete.
     TableOperation { operation: crate::host::TableOperation },
+    /// V7 (additive): drive an OCS command.
+    RunCommand { request: crate::host::CommandRequest },
 }
 
 /// Responses the host sends back for `PluginRequest`.
@@ -192,6 +194,7 @@ pub enum PluginResponse {
     SelectionResult(Result<(), String>),
     SolidResult(Result<Handle, String>),
     TableResult(Result<Handle, String>),
+    CommandResult(Result<crate::host::CommandOutcome, String>),
 }
 
 /// Messages sent from the host to the plugin runner.

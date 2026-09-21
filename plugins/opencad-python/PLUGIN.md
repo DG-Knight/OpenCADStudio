@@ -258,6 +258,54 @@ layout limits. Layout operations act on the active document. Records list
 `current`, `tab_order`, `entity_count`, `viewport_count`, `paper_size`, `rotation`
 and `scale`. Reordering layouts and plot devices or styles are not available yet.
 
+### Running OCS commands: `doc.command`, `doc.start_command`, `doc.modify`
+
+Scripts can drive OCS's own tools. The host runs the real command, so it behaves
+exactly as at the command line (same prompts, same geometry, same undo), and does
+it synchronously on the editor thread, so a step never waits on outside input.
+
+```python
+doc = ocs.active_document
+doc.command("CIRCLE 5,5 3")                 # a whole line: tokens answer the prompts, then Enter
+with doc.start_command("OFFSET") as c:      # or answer prompt by prompt
+    c.text(2)                               # a typed value
+    c.entity(line, at=(5, 0, 0))            # an object pick
+    c.point((5, 4, 0))                      # a point
+    c.enter()
+    print(c.outcome["status"], c.outcome["prompt"], c.outcome["added"])
+
+M = doc.modify                              # the common tools as plain calls
+M.offset(line, 2, side=(5, 5))              # returns the new entity
+M.trim(target, at=(108, 0)); M.extend(target, at=(208, 0))
+M.fillet(first, second, radius=2)           # radius 0 squares the corner
+M.move([a, b], (0, 0, 0), (5, 5, 0)); M.copy([a], base, target)
+M.rotate([a], base, 90); M.scale([a], base, 2)
+M.mirror([a], p1, p2, erase_source=False); M.erase([a])
+```
+
+Each step returns an outcome dict: `status` (`completed` or `waiting_input`),
+`blocked_by`, `command`, `prompt`, `accepts` (`point`, `entity`, `selection`,
+`text`, `token`, `enter`), `options` (keyword tokens), `entities`, `added`,
+`unconsumed` and `error`. `c.point`, `c.text`, `c.token`, `c.entity`,
+`c.selection`, `c.enter` and `c.cancel` map to those prompts; an `error` raises
+`RuntimeError`, and leaving the `with` block cancels a command that is still waiting,
+also closing any editor or dialog it opened. `doc.command` cancels and raises when
+the line leaves a prompt open.
+
+Selection-based tools (`move`, `copy`, `rotate`, `scale`, `mirror`, `erase`) select
+the entities you pass first, so the command skips its own selection prompt. Pick
+points default to the middle of a line, arc or circle; give `at=` for anything else.
+`trim` and `extend` cut or extend against every entity in the drawing. Each command is
+undone as the editor would undo it.
+
+Guards: a command is refused while another is active (cancel it first) or when the
+line names a command that could end the session or re-enter Python: `QUIT`,
+`EXIT`, `CLOSE`, `CLOSEALL`, `NEW`, `QNEW`, `OPEN`, `SAVE`, `QSAVE`, `SAVEAS`, `SAVEALL`,
+`RECOVER`, `SCRIPT`, `RUNSCRIPT` and any `PY_*`. Commands run on the active
+document only. Commands that need an interactive surface a script cannot fill
+(the rich-text editor, a file dialog) report it in `blocked_by` and are cancelled.
+`ocs.command_step(kind, options)` is the raw single step behind all of this.
+
 ### Historical command-replay experiment (not in the default build)
 
 The following records an earlier experiment. The bundled build does **not**
