@@ -1018,6 +1018,7 @@ impl<'a> HostSession<'a> {
                 self.document().header.current_layer_name.clone(),
             )),
             "SNAPANG" => Some(HostSettingValue::Number(self.app.snap_angle_deg as f64)),
+            "CTAB" => Some(HostSettingValue::Text(self.app.tabs[self.tab].scene.current_layout.clone())),
             _ => None,
         }
     }
@@ -1259,8 +1260,375 @@ impl<'a> HostSession<'a> {
             | TableOperation::BlockRename { .. }
             | TableOperation::BlockDelete { .. }
             | TableOperation::BlockEntityAdd { .. }) => self.block_operation(other),
+            other @ (TableOperation::LinetypeCreate { .. }
+            | TableOperation::LinetypeModify { .. }
+            | TableOperation::LinetypeRename { .. }
+            | TableOperation::LinetypeDelete { .. }) => self.linetype_operation(other),
+            other @ (TableOperation::LayoutCreate { .. }
+            | TableOperation::LayoutRename { .. }
+            | TableOperation::LayoutDelete { .. }
+            | TableOperation::LayoutSetCurrent { .. }
+            | TableOperation::LayoutSetPage { .. }) => self.layout_operation(other),
             other => self.style_operation(other),
         }
+    }
+
+    /// Simple linetype create/modify/rename/delete.
+    fn linetype_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+        use ocs_plugin_api::host::TableOperation;
+        let protected = |name: &str| {
+            ["CONTINUOUS", "BYLAYER", "BYBLOCK"].contains(&name.trim().to_uppercase().as_str())
+        };
+        let check_pattern = |pattern: &[f64]| -> Result<(), String> {
+            if !(2..=12).contains(&pattern.len()) {
+                return Err("a linetype pattern needs 2 to 12 elements".to_owned());
+            }
+            if pattern.iter().any(|v| !v.is_finite() || v.abs() > 1.0e6) {
+                return Err("linetype pattern lengths must be finite and within 1e6".to_owned());
+            }
+            if !pattern.iter().any(|v| *v >= 0.0) || !pattern.iter().any(|v| *v < 0.0) {
+                return Err("a linetype pattern needs at least one dash or dot and one gap".to_owned());
+            }
+            if pattern.iter().map(|v| v.abs()).sum::<f64>() <= 0.0 {
+                return Err("a linetype pattern must have a nonzero length".to_owned());
+            }
+            Ok(())
+        };
+        let build = |lt: &mut acadrust::tables::LineType, pattern: &[f64]| {
+            lt.elements = pattern
+                .iter()
+                .map(|length| acadrust::tables::linetype::LineTypeElement { length: *length, complex: None })
+                .collect();
+            lt.pattern_length = pattern.iter().map(|v| v.abs()).sum();
+        };
+        let check_description = |text: &str| {
+            if text.chars().any(|c| c.is_control()) || text.chars().count() > 255 {
+                Err("a linetype description must be text of at most 255 characters".to_owned())
+            } else {
+                Ok(())
+            }
+        };
+        // Loading the standard linetypes first means a name that already exists as a
+        // standard pattern (Dashed, Center, ...) is seen as taken.
+        crate::io::linetypes::populate_document(self.document_mut());
+        match operation {
+            TableOperation::LinetypeCreate { name, description, pattern } => {
+                let name = validated_symbol_name(&name, "a linetype name")?;
+                if self.document().line_types.contains(&name) {
+                    return Err(format!("linetype {name:?} already exists"));
+                }
+                check_pattern(&pattern)?;
+                check_description(&description)?;
+                self.push_undo("Create linetype");
+                let mut lt = acadrust::tables::LineType::new(name.clone());
+                lt.description = description;
+                build(&mut lt, &pattern);
+                let handle = self.document_mut().allocate_handle();
+                lt.handle = handle;
+                self.document_mut().line_types.add(lt).map_err(|e| format!("the linetype could not be created: {e}"))?;
+                self.finish_linetype_change(&[name]);
+                Ok(handle)
+            }
+            TableOperation::LinetypeModify { name, description, pattern } => {
+                let existing = self
+                    .document()
+                    .line_types
+                    .get(name.trim())
+                    .cloned()
+                    .ok_or_else(|| format!("linetype {:?} does not exist", name.trim()))?;
+                if protected(&existing.name) || existing.xref_dependent {
+                    return Err(format!("linetype {:?} cannot be changed", existing.name));
+                }
+                if existing.elements.iter().any(|e| e.complex.is_some()) {
+                    return Err("a linetype with text or shape elements cannot be changed from a script".to_owned());
+                }
+                if description.is_none() && pattern.is_none() {
+                    return Err("no linetype properties to change".to_owned());
+                }
+                if let Some(text) = &description {
+                    check_description(text)?;
+                }
+                if let Some(pattern) = &pattern {
+                    check_pattern(pattern)?;
+                }
+                self.push_undo("Modify linetype");
+                let mut lt = existing.clone();
+                if let Some(text) = description {
+                    lt.description = text;
+                }
+                if let Some(pattern) = &pattern {
+                    build(&mut lt, pattern);
+                }
+                if let Some(slot) = self.document_mut().line_types.get_mut(&existing.name) {
+                    *slot = lt;
+                }
+                self.finish_linetype_change(&[existing.name.clone()]);
+                Ok(existing.handle)
+            }
+            TableOperation::LinetypeRename { from, to } => {
+                let existing = self
+                    .document()
+                    .line_types
+                    .get(from.trim())
+                    .cloned()
+                    .ok_or_else(|| format!("linetype {:?} does not exist", from.trim()))?;
+                if protected(&existing.name) || existing.xref_dependent {
+                    return Err(format!("linetype {:?} cannot be renamed", existing.name));
+                }
+                let to = validated_symbol_name(&to, "a linetype name")?;
+                if existing.name.eq_ignore_ascii_case(&to) {
+                    return Err("the new linetype name matches the current one (a case-only change is not supported)".to_owned());
+                }
+                if self.document().line_types.contains(&to) {
+                    return Err(format!("linetype {to:?} already exists"));
+                }
+                self.push_undo("Rename linetype");
+                let old = existing.name.clone();
+                let handle = existing.handle;
+                let doc = self.document_mut();
+                let mut lt = existing;
+                lt.name = to.clone();
+                doc.line_types.remove(&old);
+                doc.line_types.add(lt).map_err(|e| format!("the linetype could not be renamed: {e}"))?;
+                for layer in doc.layers.iter_mut() {
+                    if layer.line_type.eq_ignore_ascii_case(&old) {
+                        layer.line_type = to.clone();
+                    }
+                }
+                for entity in doc.entities_mut() {
+                    if entity.common().linetype.eq_ignore_ascii_case(&old) {
+                        entity.common_mut().linetype = to.clone();
+                    }
+                }
+                if doc.header.current_linetype_name.eq_ignore_ascii_case(&old) {
+                    doc.header.current_linetype_name = to.clone();
+                }
+                self.finish_linetype_change(&[old, to]);
+                Ok(handle)
+            }
+            TableOperation::LinetypeDelete { name } => {
+                let existing = self
+                    .document()
+                    .line_types
+                    .get(name.trim())
+                    .cloned()
+                    .ok_or_else(|| format!("linetype {:?} does not exist", name.trim()))?;
+                if protected(&existing.name) || existing.xref_dependent {
+                    return Err(format!("linetype {:?} cannot be deleted", existing.name));
+                }
+                let doc = self.document();
+                let in_use = doc.header.current_linetype_name.eq_ignore_ascii_case(&existing.name)
+                    || doc.layers.iter().any(|layer| layer.line_type.eq_ignore_ascii_case(&existing.name))
+                    || doc.entities().any(|entity| entity.common().linetype.eq_ignore_ascii_case(&existing.name))
+                    || doc.dim_styles.iter().any(|style| {
+                        [style.dimltex_handle, style.dimltex1_handle, style.dimltex2_handle].contains(&existing.handle)
+                    });
+                if in_use {
+                    return Err(format!("linetype {:?} is current or still in use", existing.name));
+                }
+                self.push_undo("Delete linetype");
+                self.document_mut().line_types.remove(&existing.name);
+                self.finish_linetype_change(&[existing.name]);
+                Ok(existing.handle)
+            }
+            _ => Err("unsupported table operation".to_owned()),
+        }
+    }
+
+    fn finish_linetype_change(&mut self, names: &[String]) {
+        self.app.tabs[self.tab].dirty = true;
+        self.app.tabs[self.tab].scene.invalidate_layer_dependencies(names);
+        self.app.tabs[self.tab].scene.bump_geometry();
+        self.publish_document_view();
+    }
+
+    /// Paper-space layout operations (create, rename, delete, switch, page).
+    /// They act on the active document because switching layouts drives the
+    /// application's view state.
+    fn layout_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+        use acadrust::objects::ObjectType;
+        use ocs_plugin_api::host::TableOperation;
+        if self.tab != self.app.active_tab {
+            return Err("layout operations act on the active document; switch to it first".to_owned());
+        }
+        let find = |doc: &CadDocument, name: &str| -> Result<(String, Handle), String> {
+            doc.objects
+                .values()
+                .find_map(|object| match object {
+                    ObjectType::Layout(layout)
+                        if !layout.block_record.is_null() && layout.name.eq_ignore_ascii_case(name) =>
+                    {
+                        Some((layout.name.clone(), layout.handle))
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| format!("layout {name:?} does not exist"))
+        };
+        let names_taken = |app: &crate::app::OpenCADStudio, tab: usize, name: &str| {
+            app.tabs[tab].scene.layout_names().iter().any(|existing| existing.eq_ignore_ascii_case(name))
+        };
+        match operation {
+            TableOperation::LayoutCreate { name } => {
+                let name = validated_symbol_name(&name, "a layout name")?;
+                if names_taken(self.app, self.tab, &name) {
+                    return Err(format!("layout {name:?} already exists"));
+                }
+                self.push_undo("Create layout");
+                let handle = self
+                    .document_mut()
+                    .add_layout(&name)
+                    .map_err(|e| format!("the layout could not be created: {e}"))?;
+                let flags = i16::from(self.document().header.paper_space_linetype_scaling)
+                    | (i16::from(self.document().header.paper_space_limit_check) << 1);
+                let plot_style = self
+                    .app
+                    .active_plot_style
+                    .as_ref()
+                    .map(|style| style.name.clone())
+                    .unwrap_or_default();
+                for object in self.document_mut().objects.values_mut() {
+                    if let ObjectType::Layout(layout) = object {
+                        if layout.name == name {
+                            layout.flags = flags;
+                            crate::scene::apply_default_page_setup(layout, &plot_style);
+                            break;
+                        }
+                    }
+                }
+                self.app.tabs[self.tab].scene.ensure_sheet_viewport(&name);
+                self.finish_layout_change();
+                Ok(handle)
+            }
+            TableOperation::LayoutRename { from, to } => {
+                let (from, handle) = find(self.document(), from.trim())?;
+                if from.eq_ignore_ascii_case("Model") {
+                    return Err("the Model layout cannot be renamed".to_owned());
+                }
+                let to = validated_symbol_name(&to, "a layout name")?;
+                if to.eq_ignore_ascii_case("Model") {
+                    return Err("a layout cannot be named Model".to_owned());
+                }
+                if from.eq_ignore_ascii_case(&to) {
+                    return Err("the new layout name matches the current one (a case-only change is not supported)".to_owned());
+                }
+                if names_taken(self.app, self.tab, &to) {
+                    return Err(format!("layout {to:?} already exists"));
+                }
+                self.push_undo("Rename layout");
+                self.app.tabs[self.tab].scene.rename_layout(&from, &to);
+                // The layout dictionary is keyed by name; keep it in step.
+                let dict = self.document().header.acad_layout_dict_handle;
+                if let Some(ObjectType::Dictionary(dictionary)) = self.document_mut().objects.get_mut(&dict) {
+                    for (key, _) in dictionary.entries.iter_mut() {
+                        if *key == from {
+                            *key = to.clone();
+                        }
+                    }
+                }
+                if self.app.tabs[self.tab].scene.current_layout == from {
+                    self.app.tabs[self.tab].scene.set_current_layout(to);
+                }
+                self.finish_layout_change();
+                Ok(handle)
+            }
+            TableOperation::LayoutDelete { name } => {
+                let (name, handle) = find(self.document(), name.trim())?;
+                if name.eq_ignore_ascii_case("Model") {
+                    return Err("the Model layout cannot be deleted".to_owned());
+                }
+                self.push_undo("Delete layout");
+                if self.app.tabs[self.tab].scene.current_layout == name {
+                    let _ = self.app.on_layout_switch("Model".to_owned());
+                }
+                if !self.app.tabs[self.tab].scene.delete_layout(&name) {
+                    return Err("the layout could not be deleted".to_owned());
+                }
+                self.finish_layout_change();
+                Ok(handle)
+            }
+            TableOperation::LayoutSetCurrent { name } => {
+                let name = name.trim();
+                if name.eq_ignore_ascii_case("Model") {
+                    let _ = self.app.on_layout_switch("Model".to_owned());
+                    return Ok(Handle::NULL);
+                }
+                let (name, handle) = find(self.document(), name)?;
+                let _ = self.app.on_layout_switch(name);
+                self.publish_document_view();
+                Ok(handle)
+            }
+            TableOperation::LayoutSetPage { name, paper_size, rotation, scale } => {
+                let (name, handle) = find(self.document(), name.trim())?;
+                if name.eq_ignore_ascii_case("Model") {
+                    return Err("the Model layout has no sheet setup".to_owned());
+                }
+                if paper_size.is_none() && rotation.is_none() && scale.is_none() {
+                    return Err("no page setup properties to change".to_owned());
+                }
+                if let Some([width, height]) = paper_size {
+                    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 && width <= 100_000.0 && height <= 100_000.0) {
+                        return Err("the paper size must be positive and at most 100000 mm each way".to_owned());
+                    }
+                }
+                let rotation_code = match rotation {
+                    None => None,
+                    Some(0) => Some(acadrust::objects::PlotRotation::None),
+                    Some(90) => Some(acadrust::objects::PlotRotation::Degrees90),
+                    Some(180) => Some(acadrust::objects::PlotRotation::Degrees180),
+                    Some(270) => Some(acadrust::objects::PlotRotation::Degrees270),
+                    Some(_) => return Err("the plot rotation must be 0, 90, 180 or 270 degrees".to_owned()),
+                };
+                if let Some([numerator, denominator]) = scale {
+                    if !(numerator.is_finite() && denominator.is_finite() && numerator > 0.0 && denominator > 0.0) {
+                        return Err("the plot scale numerator and denominator must be positive".to_owned());
+                    }
+                }
+                self.push_undo("Layout page setup");
+                for object in self.document_mut().objects.values_mut() {
+                    let ObjectType::Layout(layout) = object else { continue };
+                    if layout.name != name {
+                        continue;
+                    }
+                    if let Some([width, height]) = paper_size {
+                        layout.paper_width = width;
+                        layout.paper_height = height;
+                        layout.paper_size = String::new();
+                    }
+                    if let Some(code) = rotation_code {
+                        layout.plot_rotation = code.to_code();
+                    }
+                    if let Some([numerator, denominator]) = scale {
+                        layout.plot_scale_numerator = numerator;
+                        layout.plot_scale_denominator = denominator;
+                        layout.plot_scale_factor = numerator / denominator;
+                        layout.plot_scale_type = acadrust::objects::ScaledType::CustomScale.to_code();
+                        layout.plot_flags.use_standard_scale = false;
+                    }
+                    let quarter_turn = layout.plot_rotation == acadrust::objects::PlotRotation::Degrees90.to_code()
+                        || layout.plot_rotation == acadrust::objects::PlotRotation::Degrees270.to_code();
+                    let (x, y) = if quarter_turn {
+                        (layout.paper_height, layout.paper_width)
+                    } else {
+                        (layout.paper_width, layout.paper_height)
+                    };
+                    layout.min_limits = (0.0, 0.0);
+                    layout.max_limits = (x, y);
+                    layout.min_extents = (0.0, 0.0, 0.0);
+                    layout.max_extents = (x, y, 0.0);
+                    break;
+                }
+                self.app.tabs[self.tab].scene.invalidate_display_plot_style();
+                self.finish_layout_change();
+                Ok(handle)
+            }
+            _ => Err("unsupported table operation".to_owned()),
+        }
+    }
+
+    fn finish_layout_change(&mut self) {
+        self.app.tabs[self.tab].dirty = true;
+        self.app.tabs[self.tab].scene.bump_geometry();
+        self.publish_document_view();
     }
 
     /// Block definition operations: create from entities, modify settings,
@@ -7308,6 +7676,158 @@ check('unknown_insert_block', lambda: doc.create_entity('Insert', block_name='Gh
         let part = document.block_records.get("Part").unwrap();
         let existing = part.entity_handles.iter().filter(|h| document.get_entity(**h).is_some()).count();
         assert_eq!(existing, 3, "undo removed the added member");
+    }
+
+    /// Linetypes and layouts through Python over the real runner: create,
+    /// modify, rename (layers follow), guarded delete, page setup, entities
+    /// placed on a layout, DWG/DXF persistence and undo.
+    #[test]
+    fn audit_python_linetypes_and_layouts_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dir = std::env::temp_dir();
+        let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+            let script = dir.join(format!("ocs_ltlay_{tag}_{}.py", std::process::id()));
+            std::fs::write(&script, format!(concat!(
+                "def P(x, y, z): return {{'x': x, 'y': y, 'z': z}}\n",
+                "doc = ocs.active_document\nLT = doc.linetypes\nLY = doc.layouts\nL = doc.layers\n",
+                "refused, accepted = [], []\n",
+                "def check(tag, fn):\n",
+                "    try:\n        fn()\n    except (RuntimeError, TypeError, ValueError):\n        refused.append(tag)\n",
+                "    else:\n        accepted.append(tag)\n",
+                "try:\n{body}\n",
+                "except Exception as error:\n",
+                "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
+                "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
+            ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
+            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            let _ = std::fs::remove_file(&script);
+        };
+        let report = |document: &CadDocument| -> (usize, Vec<String>) {
+            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+                .expect("script report layer");
+            let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
+            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+        };
+
+        run(&mut host, "build", r#"
+LT.create('Bracket', [12, -3, 2, -3], 'Phantom test')
+LT.create('Dots', [0, -2], 'dots')
+LT.modify('Dots', pattern=[0, -4], description='sparse dots')
+LT.create('Temp', [1, -1])
+L.create('Hidden2', linetype='Bracket')
+L.create('Dotted2', linetype='Dots')
+LT.rename('Dots', 'Sparse')
+LY.create('Sheet1')
+LY.create('Sheet2')
+LY.set_page('Sheet1', paper_size=(420, 297), rotation=0, scale=(1, 50))
+LY.rename('Sheet2', 'Details')
+LY.set_current('Sheet1')
+doc.create_entity('Circle', center=P(50, 50, 0), radius=5)
+LY.set_current('Model')
+check('lt_dup', lambda: LT.create('bracket', [1, -1]))
+check('lt_standard_dup', lambda: LT.create('Dashed', [1, -1]))
+check('lt_badname', lambda: LT.create('a|b', [1, -1]))
+check('lt_empty', lambda: LT.create('X1', []))
+check('lt_single', lambda: LT.create('X2', [1]))
+check('lt_nogap', lambda: LT.create('X3', [1, 2]))
+check('lt_nodash', lambda: LT.create('X4', [-1, -2]))
+check('lt_nonfinite', lambda: LT.create('X5', [1e999, -1]))
+check('lt_toomany', lambda: LT.create('X6', [1, -1] * 7))
+check('lt_modnone', lambda: LT.modify('Bracket'))
+check('lt_modmissing', lambda: LT.modify('Nope', description='x'))
+check('lt_modcontinuous', lambda: LT.modify('Continuous', description='x'))
+check('lt_renamecontinuous', lambda: LT.rename('Continuous', 'Solid2'))
+check('lt_renameclash', lambda: LT.rename('Temp', 'BRACKET'))
+check('lt_renamecase', lambda: LT.rename('Temp', 'TEMP'))
+check('lt_delcontinuous', lambda: LT.delete('ByLayer'))
+check('lt_delinuse', lambda: LT.delete('Bracket'))
+check('lt_delmissing', lambda: LT.delete('Nope'))
+check('ly_dup', lambda: LY.create('sheet1'))
+check('ly_model', lambda: LY.create('Model'))
+check('ly_badname', lambda: LY.create('a<b'))
+check('ly_renamemodel', lambda: LY.rename('Model', 'X'))
+check('ly_renamemissing', lambda: LY.rename('Nope', 'X'))
+check('ly_renameclash', lambda: LY.rename('Details', 'SHEET1'))
+check('ly_renamecase', lambda: LY.rename('Details', 'DETAILS'))
+check('ly_deletemodel', lambda: LY.delete('Model'))
+check('ly_deletemissing', lambda: LY.delete('Nope'))
+check('ly_currentmissing', lambda: LY.set_current('Nope'))
+check('ly_pagemissing', lambda: LY.set_page('Nope', rotation=0))
+check('ly_pagemodel', lambda: LY.set_page('Model', rotation=0))
+check('ly_pagenone', lambda: LY.set_page('Sheet1'))
+check('ly_badsize', lambda: LY.set_page('Sheet1', paper_size=(0, 10)))
+check('ly_badrotation', lambda: LY.set_page('Sheet1', rotation=45))
+check('ly_badscale', lambda: LY.set_page('Sheet1', scale=(0, 1)))
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert_eq!(refused, 34);
+
+        let check_state = |label: &str, document: &CadDocument| {
+            assert!(document.line_types.get("Dots").is_none(), "{label}: old linetype name gone");
+            let phantom = document.line_types.get("Bracket").unwrap_or_else(|| panic!("{label}: Bracket missing"));
+            let lengths: Vec<f64> = phantom.elements.iter().map(|e| e.length).collect();
+            assert_eq!(lengths, vec![12.0, -3.0, 2.0, -3.0], "{label}: pattern");
+            assert_eq!(phantom.pattern_length, 20.0, "{label}");
+            let sparse = document.line_types.get("Sparse").unwrap_or_else(|| panic!("{label}: Sparse missing"));
+            assert_eq!(sparse.elements.iter().map(|e| e.length).collect::<Vec<_>>(), vec![0.0, -4.0], "{label}: modified pattern");
+            assert_eq!(document.layers.get("Dotted2").unwrap().line_type, "Sparse", "{label}: layer followed the rename");
+            assert_eq!(document.layers.get("Hidden2").unwrap().line_type, "Bracket", "{label}");
+            let layouts = |name: &str| document.objects.values().find_map(|o| match o {
+                acadrust::objects::ObjectType::Layout(l) if l.name == name && !l.block_record.is_null() => Some(l.clone()),
+                _ => None,
+            });
+            assert!(layouts("Sheet2").is_none(), "{label}: old layout name gone");
+            let sheet = layouts("Sheet1").unwrap_or_else(|| panic!("{label}: Sheet1 missing"));
+            assert_eq!((sheet.paper_width, sheet.paper_height), (420.0, 297.0), "{label}: paper size");
+            assert_eq!(sheet.plot_rotation, 0, "{label}: rotation");
+            assert_eq!((sheet.plot_scale_numerator, sheet.plot_scale_denominator), (1.0, 50.0), "{label}: scale");
+            assert!(layouts("Details").is_some(), "{label}: Details missing");
+            let on_sheet = document.entities().filter(|e| e.common().owner_handle == sheet.block_record && matches!(e, EntityType::Circle(_))).count();
+            assert_eq!(on_sheet, 1, "{label}: the circle was created on the sheet");
+            assert!(!document.entities().any(|e| matches!(e, EntityType::Circle(_)) && document.block_records.iter().any(|r| r.name == "*Model_Space" && r.handle == e.common().owner_handle)),
+                "{label}: no circle in model space");
+        };
+        check_state("live", host.document());
+        assert_eq!(host.app.tabs[0].scene.current_layout, "Model", "the script switched back to Model");
+        let dwg = crate::io::load_bytes("ltl.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("ltl.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        check_state("DWG", &dwg);
+        check_state("DXF", &dxf);
+
+        run(&mut host, "destroy", r#"
+LY.set_current('Details')
+LY.delete('Details')
+LY.delete('Sheet1')
+LT.delete('Temp')
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "{accepted:?}");
+        assert_eq!(refused, 0);
+        let document = host.document();
+        assert!(document.line_types.get("Temp").is_none());
+        assert!(!document.objects.values().any(|o| matches!(o, acadrust::objects::ObjectType::Layout(l) if l.name == "Sheet1" || l.name == "Details")));
+        assert!(!document.entities().any(|e| matches!(e, EntityType::Circle(_))), "the sheet's circle went with its layout");
+        assert_eq!(host.app.tabs[0].scene.current_layout, "Model", "deleting the current layout fell back to Model");
+
+        // U: the report layer and the three deletes; undoing them restores the layouts and the linetype.
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(4);
+        let document = &app.tabs[0].scene.document;
+        assert!(document.line_types.get("Temp").is_some(), "undo restored the linetype");
+        let names = app.tabs[0].scene.layout_names();
+        assert!(names.contains(&"Sheet1".to_owned()) && names.contains(&"Details".to_owned()), "undo restored the layouts: {names:?}");
+        assert!(document.entities().any(|e| matches!(e, EntityType::Circle(_))), "undo restored the sheet's circle");
     }
 
     #[test]

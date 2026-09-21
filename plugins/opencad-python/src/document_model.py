@@ -460,6 +460,126 @@ class _Blocks:
         ocs.block_operation("delete", str(name), None)
 
 
+class _Named:
+    """Shared lookup for the linetype and layout collections."""
+
+    _RECORDS = None
+
+    def _records(self):
+        return getattr(ocs, self._RECORDS)()
+
+    def __iter__(self):
+        return iter(self._records())
+
+    def __len__(self):
+        return len(self._records())
+
+    def __contains__(self, name):
+        wanted = str(name).strip().upper()
+        return any(r["name"].upper() == wanted for r in self._records())
+
+    def __getitem__(self, name):
+        wanted = str(name).strip().upper()
+        for record in self._records():
+            if record["name"].upper() == wanted:
+                return record
+        raise KeyError(name)
+
+    def get(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+    def names(self):
+        return [r["name"] for r in self._records()]
+
+
+class _Linetypes(_Named):
+    """`ocs.active_document.linetypes`. A pattern is signed lengths in drawing
+    units: positive is a dash, negative a gap, zero a dot (2-12 elements with at
+    least one gap and one dash or dot). Text and shape linetypes can be read
+    but not created or edited. Every change is validated by the host, is one
+    undo step, and a refusal raises `RuntimeError` without changing anything.
+    `Continuous`, `ByLayer` and `ByBlock` are never changed; a linetype used by
+    a layer, an entity, a dimension style or the current setting is never
+    deleted."""
+
+    _RECORDS = "linetype_records"
+
+    def create(self, name, pattern, description=""):
+        ocs.linetype_operation("create", str(name), {"pattern": [float(v) for v in pattern],
+                                                     "description": str(description)})
+        return self[name]
+
+    def modify(self, name, pattern=None, description=None):
+        options = {}
+        if pattern is not None:
+            options["pattern"] = [float(v) for v in pattern]
+        if description is not None:
+            options["description"] = str(description)
+        ocs.linetype_operation("modify", str(name), options)
+        return self[name]
+
+    def rename(self, name, new_name):
+        ocs.linetype_operation("rename", str(name), {"to": str(new_name)})
+        return self[new_name]
+
+    def delete(self, name):
+        ocs.linetype_operation("delete", str(name), None)
+
+
+class _Layouts(_Named):
+    """`ocs.active_document.layouts`: `Model` and the paper-space layouts in tab
+    order. Creation entities into a layout by making it current first
+    (`layouts.current = "Sheet1"`), then `create_entity(...)`. Every change is
+    validated by the host and is one undo step (switching layout is not); a
+    refusal raises `RuntimeError`. Layout operations act on the active
+    document."""
+
+    _RECORDS = "layout_records"
+
+    @property
+    def current(self):
+        for record in self._records():
+            if record["current"]:
+                return record
+        return None
+
+    @current.setter
+    def current(self, name):
+        self.set_current(name)
+
+    def create(self, name):
+        ocs.layout_operation("create", str(name), None)
+        return self[name]
+
+    def rename(self, name, new_name):
+        ocs.layout_operation("rename", str(name), {"to": str(new_name)})
+        return self[new_name]
+
+    def delete(self, name):
+        """Delete a paper-space layout and everything on it (never `Model`)."""
+        ocs.layout_operation("delete", str(name), None)
+
+    def set_current(self, name):
+        ocs.layout_operation("set_current", str(name), None)
+        return self[name]
+
+    def set_page(self, name, paper_size=None, rotation=None, scale=None):
+        """`paper_size` is (width, height) in mm, `rotation` 0/90/180/270 degrees
+        and `scale` a custom plot scale (numerator, denominator)."""
+        options = {}
+        if paper_size is not None:
+            options["paper_size"] = [float(v) for v in paper_size]
+        if rotation is not None:
+            options["rotation"] = int(rotation)
+        if scale is not None:
+            options["scale"] = [float(v) for v in scale]
+        ocs.layout_operation("set_page", str(name), options)
+        return self[name]
+
+
 class _Document:
     def __init__(self):
         self._pending = None
@@ -467,6 +587,8 @@ class _Document:
         self.text_styles = _TextStyles()
         self.dim_styles = _DimStyles()
         self.blocks = _Blocks()
+        self.linetypes = _Linetypes()
+        self.layouts = _Layouts()
         self.entities = _Entities(self)
         self.solids = _Solids(self)
 

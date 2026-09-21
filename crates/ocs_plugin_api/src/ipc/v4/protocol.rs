@@ -145,6 +145,15 @@ mod tests {
                 block: "C".into(),
                 entity: acadrust::EntityType::Line(acadrust::entities::Line::new()),
             },
+            TableOperation::LinetypeCreate { name: "L".into(), description: "d".into(), pattern: vec![1.0, -1.0] },
+            TableOperation::LinetypeModify { name: "L".into(), description: None, pattern: Some(vec![2.0, -2.0]) },
+            TableOperation::LinetypeRename { from: "L".into(), to: "M".into() },
+            TableOperation::LinetypeDelete { name: "M".into() },
+            TableOperation::LayoutCreate { name: "S".into() },
+            TableOperation::LayoutRename { from: "S".into(), to: "T".into() },
+            TableOperation::LayoutDelete { name: "T".into() },
+            TableOperation::LayoutSetCurrent { name: "Model".into() },
+            TableOperation::LayoutSetPage { name: "S".into(), paper_size: Some([420.0, 297.0]), rotation: Some(90), scale: Some([1.0, 50.0]) },
         ] {
             let bytes = bincode::serialize(&PluginRequest::TableOperation { operation: operation.clone() }).unwrap();
             assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),

@@ -42,6 +42,10 @@ class DocumentModelTests(unittest.TestCase):
             block_records=lambda: [{"name": n, "entities": []} for n in ("Widget", "Gadget")],
             block_operation=lambda op, name, options: self.calls.append(("block", op, name, options)) or 9,
             add_to_block=lambda block, entity: self.calls.append(("add_to_block", block, entity)) or 1,
+            linetype_records=lambda: [{"name": n} for n in ("Continuous", "Bracket")],
+            linetype_operation=lambda op, name, options: self.calls.append(("linetype", op, name, options)) or 9,
+            layout_records=lambda: [{"name": n, "current": n == "Model"} for n in ("Model", "Sheet1")],
+            layout_operation=lambda op, name, options: self.calls.append(("layout", op, name, options)) or 9,
         )
         namespace = {"ocs": self.ocs}
         exec(MODEL.read_text(), namespace)
@@ -104,6 +108,28 @@ class DocumentModelTests(unittest.TestCase):
         self.assertNotIn("block", self.calls[-1][2])
         self.doc.create_entity("Line", start={"x": 0, "y": 0, "z": 0}, end={"x": 1, "y": 0, "z": 0})
         self.assertEqual(self.calls[-1][0], "add")
+
+    def test_linetypes_and_layouts(self):
+        lt, ly = self.doc.linetypes, self.doc.layouts
+        self.assertIn("bracket", lt)
+        lt.create("Bracket", [12, -3], "test")
+        self.assertEqual(self.calls[-1], ("linetype", "create", "Bracket", {"pattern": [12.0, -3.0], "description": "test"}))
+        lt.modify("Bracket", pattern=[1, -1])
+        self.assertEqual(self.calls[-1], ("linetype", "modify", "Bracket", {"pattern": [1.0, -1.0]}))
+        lt.rename("Bracket", "Bracket")
+        lt.delete("Bracket")
+        self.assertEqual(self.calls[-1], ("linetype", "delete", "Bracket", None))
+        self.assertEqual(ly.current["name"], "Model")
+        ly.create("Sheet1")
+        ly.set_page("Sheet1", paper_size=(420, 297), rotation=0, scale=(1, 50))
+        self.assertEqual(self.calls[-1], ("layout", "set_page", "Sheet1",
+            {"paper_size": [420.0, 297.0], "rotation": 0, "scale": [1.0, 50.0]}))
+        ly.current = "Sheet1"
+        self.assertEqual(self.calls[-1], ("layout", "set_current", "Sheet1", None))
+        ly.delete("Sheet1")
+        self.assertEqual(self.calls[-1], ("layout", "delete", "Sheet1", None))
+        with self.assertRaises(KeyError):
+            ly["Nope"]
 
     def test_blocks(self):
         blocks = self.doc.blocks

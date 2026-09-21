@@ -240,3 +240,16 @@ already do. Evidence: `audit_python_block_contents_over_real_ipc` (9 refusals; c
 attribute definition inside a block; nested insert; live/DWG/DXF persistence; undo), IPC and Python unit tests.
 Next: linetypes and layouts, then headless commands.
 
+### 2026-09-21: linetypes and layouts (`doc.linetypes`, `doc.layouts`)
+
+`TableOperation` gained `LinetypeCreate/Modify/Rename/Delete` (simple patterns only, standard names taken, rename
+follows layers and entities, delete refused while a layer, entity, dimension style or the current setting uses it) and
+`LayoutCreate/Rename/Delete/SetCurrent/SetPage` (reusing `add_layout`, the default page setup, the sheet viewport,
+`rename_layout` plus the layout dictionary key, `delete_layout`, and the application's own `on_layout_switch`; `Model` is
+protected; `set_page` sets paper size, rotation and a custom scale and refreshes the limits). The host system variable
+`CTAB` now reports the current layout. Evidence: `audit_python_linetypes_and_layouts_over_real_ipc` (34 refusals; patterns,
+modify, rename following layers; page setup; an entity created on a sheet and not in model space; live/DWG/DXF
+persistence; deleting the current layout; four-step undo restoring the layouts, their entity and the linetype), IPC
+round-trip and Python unit tests. Not covered: complex (text/shape) linetypes, reordering layouts, plot devices and
+styles, and page-setup names. Next: headless command execution.
+

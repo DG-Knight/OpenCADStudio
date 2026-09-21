@@ -147,6 +147,34 @@ pub enum TableOperation {
     /// new entity's handle. Edit and delete members with the ordinary entity
     /// operations.
     BlockEntityAdd { block: String, entity: EntityType },
+    /// Create a simple linetype. `pattern` is signed lengths in drawing units:
+    /// positive is a dash, negative a gap, zero a dot (2-12 elements with at
+    /// least one dash or dot and one gap). Returns the linetype's handle.
+    LinetypeCreate { name: String, description: String, pattern: Vec<f64> },
+    /// Change a simple linetype's description or pattern in place.
+    LinetypeModify { name: String, description: Option<String>, pattern: Option<Vec<f64>> },
+    /// Rename a linetype; layers and entities that use it follow.
+    LinetypeRename { from: String, to: String },
+    /// Delete a linetype that no layer, entity, dimension style or the current
+    /// setting uses. `Continuous`, `ByLayer` and `ByBlock` are never deleted.
+    LinetypeDelete { name: String },
+    /// Create a paper-space layout with the default page setup and sheet viewport.
+    LayoutCreate { name: String },
+    /// Rename a paper-space layout (never `Model`).
+    LayoutRename { from: String, to: String },
+    /// Delete a paper-space layout and everything on it (never `Model`).
+    LayoutDelete { name: String },
+    /// Switch the active layout (`Model` or a paper-space layout).
+    LayoutSetCurrent { name: String },
+    /// Change a paper-space layout's sheet: size in millimetres, rotation in
+    /// degrees (0, 90, 180 or 270) and a custom plot scale (numerator,
+    /// denominator).
+    LayoutSetPage {
+        name: String,
+        paper_size: Option<[f64; 2]>,
+        rotation: Option<u16>,
+        scale: Option<[f64; 2]>,
+    },
 }
 
 /// The style tables `TableOperation` can rename, delete or make current.

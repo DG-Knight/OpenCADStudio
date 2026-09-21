@@ -1398,6 +1398,214 @@ mod ocs {
         Ok(vm.ctx.new_list(output).into())
     }
 
+    /// Linetype change through the host. `op` is `create` or `modify`
+    /// (`description`, `pattern`: signed lengths, positive dash, negative gap,
+    /// zero dot), `rename` (`to`) or `delete`. Returns the linetype's handle.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn linetype_operation(op: String, name: String, options: PyObjectRef, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::TableOperation;
+        let options = if vm.is_none(&options) {
+            vm.ctx.new_dict()
+        } else {
+            options.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?
+        };
+        let present = |key: &str| -> PyResult<Option<PyObjectRef>> {
+            Ok(options.get_item_opt(key, vm)?.filter(|v| !vm.is_none(v)))
+        };
+        let pattern = |value: PyObjectRef| -> PyResult<Vec<f64>> {
+            let items: Vec<PyObjectRef> = value.try_into_value(vm)?;
+            items.into_iter().map(|item| py_number_to_f64(item, vm)).collect()
+        };
+        let operation = match op.as_str() {
+            "create" => {
+                ensure_known_entity_keys(&options, "linetype", &["description", "pattern"], vm)?;
+                TableOperation::LinetypeCreate {
+                    name,
+                    description: get_opt_string(&options, "description", "", vm)?,
+                    pattern: pattern(present("pattern")?.ok_or_else(|| vm.new_value_error("ocs: a linetype needs a pattern".to_owned()))?)?,
+                }
+            }
+            "modify" => {
+                ensure_known_entity_keys(&options, "linetype", &["description", "pattern"], vm)?;
+                TableOperation::LinetypeModify {
+                    name,
+                    description: present("description")?.map(|v| v.try_into_value::<String>(vm)).transpose()?,
+                    pattern: present("pattern")?.map(pattern).transpose()?,
+                }
+            }
+            "rename" => {
+                ensure_known_entity_keys(&options, "linetype rename", &["to"], vm)?;
+                let to = options
+                    .get_item_opt("to", vm)?
+                    .ok_or_else(|| vm.new_value_error("ocs: rename needs the new name".to_owned()))?
+                    .try_into_value::<String>(vm)?;
+                TableOperation::LinetypeRename { from: name, to }
+            }
+            "delete" => {
+                ensure_known_entity_keys(&options, "linetype delete", &[], vm)?;
+                TableOperation::LinetypeDelete { name }
+            }
+            other => return Err(vm.new_value_error(format!("ocs.linetype_operation: unknown operation {other:?}"))),
+        };
+        let result = host_ctx::with_host(|host| host.table_operation(operation))
+            .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.linetype_operation: {error}")))
+    }
+
+    /// Every linetype: pattern as signed lengths plus how many layers and
+    /// entities use it.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn linetype_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        let rows = host_ctx::with_host(|host| {
+            let document = host.document();
+            let mut uses = std::collections::HashMap::<String, usize>::new();
+            for layer in document.layers.iter() {
+                *uses.entry(layer.line_type.to_uppercase()).or_default() += 1;
+            }
+            for entity in document.entities() {
+                *uses.entry(entity.common().linetype.to_uppercase()).or_default() += 1;
+            }
+            document
+                .line_types
+                .iter()
+                .map(|lt| (lt.clone(), uses.get(&lt.name.to_uppercase()).copied().unwrap_or(0)))
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        let mut output = Vec::with_capacity(rows.len());
+        for (lt, used) in rows {
+            let dict = vm.ctx.new_dict();
+            dict.set_item("handle", vm.new_pyobj(lt.handle.value()), vm)?;
+            dict.set_item("name", vm.new_pyobj(lt.name.clone()), vm)?;
+            dict.set_item("description", vm.new_pyobj(lt.description.clone()), vm)?;
+            let pattern: Vec<PyObjectRef> = lt.elements.iter().map(|e| vm.new_pyobj(e.length)).collect();
+            dict.set_item("pattern", PyObjectRef::from(vm.ctx.new_list(pattern)), vm)?;
+            dict.set_item("pattern_length", vm.new_pyobj(lt.pattern_length), vm)?;
+            dict.set_item("complex", vm.new_pyobj(lt.elements.iter().any(|e| e.complex.is_some())), vm)?;
+            dict.set_item("used_by", vm.new_pyobj(used), vm)?;
+            output.push(dict.into());
+        }
+        Ok(vm.ctx.new_list(output).into())
+    }
+
+    /// Layout change through the host. `op` is `create`, `rename` (`to`),
+    /// `delete`, `set_current` or `set_page` (`paper_size`: (width, height) mm,
+    /// `rotation`: 0/90/180/270, `scale`: (numerator, denominator)).
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn layout_operation(op: String, name: String, options: PyObjectRef, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::TableOperation;
+        let options = if vm.is_none(&options) {
+            vm.ctx.new_dict()
+        } else {
+            options.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?
+        };
+        let present = |key: &str| -> PyResult<Option<PyObjectRef>> {
+            Ok(options.get_item_opt(key, vm)?.filter(|v| !vm.is_none(v)))
+        };
+        let operation = match op.as_str() {
+            "create" => TableOperation::LayoutCreate { name },
+            "delete" => TableOperation::LayoutDelete { name },
+            "set_current" => TableOperation::LayoutSetCurrent { name },
+            "rename" => {
+                ensure_known_entity_keys(&options, "layout rename", &["to"], vm)?;
+                let to = options
+                    .get_item_opt("to", vm)?
+                    .ok_or_else(|| vm.new_value_error("ocs: rename needs the new name".to_owned()))?
+                    .try_into_value::<String>(vm)?;
+                TableOperation::LayoutRename { from: name, to }
+            }
+            "set_page" => {
+                ensure_known_entity_keys(&options, "layout page", &["paper_size", "rotation", "scale"], vm)?;
+                TableOperation::LayoutSetPage {
+                    name,
+                    paper_size: present("paper_size")?.map(|v| py_to_f64_array::<2>(v, vm)).transpose()?,
+                    rotation: present("rotation")?
+                        .map(|v| -> PyResult<u16> {
+                            let degrees = v.try_into_value::<i64>(vm)?;
+                            u16::try_from(degrees).map_err(|_| vm.new_value_error("ocs: the rotation must be 0, 90, 180 or 270".to_owned()))
+                        })
+                        .transpose()?,
+                    scale: present("scale")?.map(|v| py_to_f64_array::<2>(v, vm)).transpose()?,
+                }
+            }
+            other => return Err(vm.new_value_error(format!("ocs.layout_operation: unknown operation {other:?}"))),
+        };
+        let result = host_ctx::with_host(|host| host.table_operation(operation))
+            .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.layout_operation: {error}")))
+    }
+
+    /// `Model` and every paper-space layout in tab order with its page setup.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn layout_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        use acadrust::objects::ObjectType;
+        let rows = host_ctx::with_host(|host| {
+            let current = match host.system_variable("CTAB") {
+                Some(ocs_plugin_api::host::HostSettingValue::Text(name)) => name,
+                _ => "Model".to_owned(),
+            };
+            let document = host.document();
+            let mut owned = std::collections::HashMap::<u64, usize>::new();
+            let mut viewports = std::collections::HashMap::<u64, usize>::new();
+            for entity in document.entities() {
+                let owner = entity.common().owner_handle.value();
+                *owned.entry(owner).or_default() += 1;
+                if matches!(entity, acadrust::entities::EntityType::Viewport(_)) {
+                    *viewports.entry(owner).or_default() += 1;
+                }
+            }
+            let mut layouts: Vec<_> = document
+                .objects
+                .values()
+                .filter_map(|object| match object {
+                    ObjectType::Layout(layout) if !layout.block_record.is_null() => Some(layout.clone()),
+                    _ => None,
+                })
+                .collect();
+            layouts.sort_by_key(|layout| (layout.name != "Model", layout.tab_order));
+            layouts
+                .into_iter()
+                .map(|layout| {
+                    let count = owned.get(&layout.block_record.value()).copied().unwrap_or(0);
+                    let vps = viewports.get(&layout.block_record.value()).copied().unwrap_or(0);
+                    let is_current = layout.name == current;
+                    (layout, count, vps, is_current)
+                })
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        let mut output = Vec::with_capacity(rows.len());
+        for (layout, count, vps, is_current) in rows {
+            let dict = vm.ctx.new_dict();
+            dict.set_item("handle", vm.new_pyobj(layout.handle.value()), vm)?;
+            dict.set_item("name", vm.new_pyobj(layout.name.clone()), vm)?;
+            dict.set_item("current", vm.new_pyobj(is_current), vm)?;
+            dict.set_item("tab_order", vm.new_pyobj(i64::from(layout.tab_order)), vm)?;
+            dict.set_item("entity_count", vm.new_pyobj(count), vm)?;
+            dict.set_item("viewport_count", vm.new_pyobj(vps), vm)?;
+            dict.set_item("paper_size", PyObjectRef::from(vm.ctx.new_list(vec![vm.new_pyobj(layout.paper_width), vm.new_pyobj(layout.paper_height)])), vm)?;
+            dict.set_item("paper_name", vm.new_pyobj(layout.paper_size.clone()), vm)?;
+            let rotation = match layout.plot_rotation {
+                1 => 90,
+                2 => 180,
+                3 => 270,
+                _ => 0,
+            };
+            dict.set_item("rotation", vm.new_pyobj(rotation), vm)?;
+            dict.set_item("scale", PyObjectRef::from(vm.ctx.new_list(vec![vm.new_pyobj(layout.plot_scale_numerator), vm.new_pyobj(layout.plot_scale_denominator)])), vm)?;
+            output.push(dict.into());
+        }
+        Ok(vm.ctx.new_list(output).into())
+    }
+
     /// Every layer with its full properties, in table order.
     #[cfg(feature = "experimental-host-model")]
     #[pyfunction]

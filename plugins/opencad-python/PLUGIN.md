@@ -224,6 +224,40 @@ block marker or nested attribute, an entity on a locked layer, and an insert tha
 would nest a block inside itself directly or through other blocks. Adding while the
 block editor is open is refused. Each add or delete is one undo step.
 
+### Linetypes and layouts: `doc.linetypes`, `doc.layouts`
+
+```python
+doc = ocs.active_document
+LT, LY = doc.linetypes, doc.layouts
+LT.create("Bracket", [12, -3, 2, -3], "bracket line")   # dash 12, gap 3, dash 2, gap 3
+LT.modify("Bracket", description="renamed"); LT.rename("Bracket", "Cut")
+doc.layers.create("Cuts", linetype="Cut")
+LT.delete("Cut")                                          # refused while a layer uses it
+
+LY.create("Sheet1")
+LY.set_page("Sheet1", paper_size=(420, 297), rotation=0, scale=(1, 50))
+LY.current = "Sheet1"                                     # create_entity now draws on the sheet
+doc.create_entity("Circle", center={"x": 50, "y": 50, "z": 0}, radius=5)
+LY.current = "Model"
+LY.rename("Sheet1", "Plan"); LY.delete("Plan")            # deletes the sheet's entities too
+LY.names(), LY.current["name"], LY["Plan"]["paper_size"]
+```
+
+Both follow the same rules as the other tables: host-validated, one undo step
+(switching layout is not one), a refusal raises `RuntimeError` and changes
+nothing. A linetype pattern is signed lengths (positive dash, negative gap, zero
+dot; 2-12 elements with a gap and a dash or dot); text and shape linetypes can be
+read (`complex`) but not created or edited. `Continuous`, `ByLayer` and `ByBlock`
+are never changed, names of standard linetypes are taken, renaming updates the
+layers and entities that use it, and a linetype used by a layer, entity, dimension
+style or the current setting is never deleted. Layouts: `Model` cannot be created,
+renamed or deleted; deleting the current layout falls back to `Model`; a
+case-only rename is refused. `set_page` takes the sheet in millimetres, a rotation
+of 0/90/180/270 and a custom scale `(numerator, denominator)`, and updates the
+layout limits. Layout operations act on the active document. Records list
+`current`, `tab_order`, `entity_count`, `viewport_count`, `paper_size`, `rotation`
+and `scale`. Reordering layouts and plot devices or styles are not available yet.
+
 ### Historical command-replay experiment (not in the default build)
 
 The following records an earlier experiment. The bundled build does **not**
