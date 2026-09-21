@@ -341,3 +341,13 @@ test-harness path problem, not a product one, and is fixed by handing the script
 suite on those platforms (only the Python-related tests run), the macOS-only bundle path, and an installer (AppImage or MSI) that
 includes the plugin.
 
+### 2026-09-21: pull-request check (`python-host-check.yml`)
+
+`.github/workflows/python-host-check.yml` runs on `pull_request` (path-filtered to the plugin API, the plugin, the host's plugin and command
+files, settings and the lockfile), on a `pr-check-*` tag and by hand, on `ubuntu-22.04` and `windows-latest`. Steps: the plugin API tests
+(`--features host`), staging the bundled plugin and building the runner, the plugin crate tests, the Python model unit tests, and the host's
+real-IPC tests. It fails outright if the staged plugin or the runner is missing, because those tests otherwise skip and report success. First run
+(`pr-check-1`, commit `1f8cbb81`, all green on both platforms): 115 plugin API tests, 20 plugin crate tests, 16 Python model tests and 60 real-IPC
+host tests on each. Debug build, so a cold run is about 30 minutes and a cached one much less. The whole lib suite is deliberately not run there:
+two unrelated tests fail on upstream `main` in the environments checked (see the earlier notes).
+
