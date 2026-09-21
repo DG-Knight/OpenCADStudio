@@ -329,3 +329,15 @@ and the DIMSTYLE text-style name (resolved from the group 340 handle). Three com
 an XDATA layout that cannot be verified here. OCS still pins the unfixed revision, so the canaries in
 `audit_python_text_and_dim_styles_over_real_ipc` still assert the wrong result until #51 is merged and OCS repins.
 
+### 2026-09-21: Linux and Windows verification (`fork-build.yml`)
+
+`.github/workflows/fork-build.yml` builds this branch in release on `ubuntu-22.04` and `windows-latest`, stages the Python plugin
+beside the executable (`plugins/opencad.python`, where the host looks on both platforms) and runs the real-IPC plugin tests
+against that build. It publishes nothing; a run is started by pushing a `fork-build-*` tag to the fork and leaves a downloadable
+package per platform for 14 days. Result: the second run (`fork-build-2`, commit `20f75c34`) passed **60 of 60** plugin tests on
+Linux and on Windows. The first run passed 60 of 60 on Linux and 58 of 60 on Windows: the RasterImage and OLE lifecycle tests
+substituted the Windows temp directory (`C:\Users\...`) into a Python string literal, where `\U` is a unicode escape. That was a
+test-harness path problem, not a product one, and is fixed by handing the scripts a forward-slash path. Not covered: the whole lib
+suite on those platforms (only the Python-related tests run), the macOS-only bundle path, and an installer (AppImage or MSI) that
+includes the plugin.
+
