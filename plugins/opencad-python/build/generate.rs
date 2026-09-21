@@ -587,6 +587,7 @@ fn gen_unit_enum(name: &str, info: &TypeInfo) -> String {
 {name_arms}    }}
 }}
 
+#[allow(dead_code)]
 fn str_to_{snake}(value: String, vm: &VirtualMachine) -> PyResult<{path}> {{
     match value.as_str() {{
 {parse_arms}        other => Err(vm.new_value_error(format!("ocs: unsupported {name} value: {{other}}"))),
@@ -656,6 +657,7 @@ fn gen_tagged_enum(name: &str, info: &TypeInfo, registry: &TypeRegistry) -> Stri
 {to_arms}    }}
 }}
 
+#[allow(dead_code)]
 fn dict_to_{snake}(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<{path}> {{
     let dict = value.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?;
     let kind = dict.get_item("kind", vm)?.try_into_value::<String>(vm)?;
@@ -732,6 +734,7 @@ fn gen_struct(name: &str, info: &TypeInfo, registry: &TypeRegistry, required: &[
 {to_dict_body}    Ok(dict.into())
 }}
 
+#[allow(dead_code)]
 fn dict_to_{snake}(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<{path}> {{
     let dict = value.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?;
     let allowed: &[&str] = &[{allowed_list}];

@@ -7100,7 +7100,7 @@ mod tests {
         let mut app = OpenCADStudio::new_for_test();
         app.tabs[0].is_start = false;
         let mut host = HostSession::new(&mut app, 0);
-        let mut object = |host: &mut HostSession<'_>, data: ClassObjectData| {
+        let object = |host: &mut HostSession<'_>, data: ClassObjectData| {
             let handle = host.document_mut().allocate_handle();
             let mut class_object = ClassObject::new(data);
             class_object.handle = handle;
@@ -7340,7 +7340,7 @@ mod tests {
             std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
         ).unwrap();
         let dir = std::env::temp_dir();
-        let mut run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+        let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
             let script = dir.join(format!("ocs_layers_{tag}_{}.py", std::process::id()));
             std::fs::write(&script, format!(concat!(
                 "def P(x, y, z): return {{'x': x, 'y': y, 'z': z}}\n",
