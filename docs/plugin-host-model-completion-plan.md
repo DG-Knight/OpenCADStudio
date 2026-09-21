@@ -9,7 +9,7 @@ Build a general Python document model over the OCS host API so a script can cont
 - **Entities:** explicit writes for all 43 canvas kinds (41 creatable; the legacy `Polyline` and `Body` are update-only). **31 kinds are `Complete`** (every C/R/E/D/U/I/W/V/P gate passes). The remaining kinds are integration-tested and held short of `Complete` by a named blocker in the ledger: seven by cadcodec DXF bugs (fixes submitted as [cadcodec#48](https://github.com/HakanSeven12/cadcodec/pull/48), not yet merged, so OCS still pins the unfixed revision), Polyline3D by the DWG format, Polyline2D by a kind change on DXF save, RasterImage by an image-reactor structure that cannot be verified, and Body by having no creation path.
 - **Drawing tables:** layers, text and dimension styles, blocks and their contents, linetypes and layouts, through the additive `TableOperation` request (see the log entries dated 2026-09-21).
 - **Commands:** `HostApi::run_command` drives the real OCS commands step by step; `doc.command`, `doc.start_command` and `doc.modify` build on it.
-- **Known open items:** the unfiled cadcodec findings (`cadcodec-reader-gaps.md`), complex (text and shape) linetypes, plot devices and named page setups, PEDIT's remaining options, and an on/off setting for script-driven commands.
+- **Known open items:** the unfiled cadcodec findings (`cadcodec-reader-gaps.md`), complex (text and shape) linetypes, plot devices and named page setups, and PEDIT's remaining options.
 
 Repositories:
 
@@ -301,4 +301,22 @@ positions (2600 to 2650 in 12.5 steps), and all eight members of the 3-D array (
 step needs between 2 and 4 MiB of stack in a debug build, more than a test thread's 2 MiB, so that audit runs on a 64 MiB thread; the
 application's main thread has 8 MiB, and a release build uses far less. Not wrapped: PEDIT fit, spline, decurve, linetype generation and
 vertex editing.
+
+### 2026-09-21: guardrails (`SCRIPTCOMMANDS`, stack)
+
+**On/off setting.** A saved user preference, `UserSettings::script_commands` (on by default, so an existing config keeps
+scripts allowed), toggled by the `SCRIPTCOMMANDS [0|1]` command, gates `HostApi::run_command`: while it is off every `Run`,
+`Start` and input request is refused (`Cancel` stays allowed so a waiting command is never stranded) with a message that says how to turn it back on. The runner refuses the command
+itself (it joins `QUIT`, `NEW`, `PY_*` and the rest on the denylist), so a script cannot switch it. It is a command and a
+persisted flag only; there is no Options-page control, which would need locale and layout work in files outside this feature.
+Evidence: `script_commands_setting_gates_the_runner` (default on; a script cannot change it; the user turns it off and nothing
+runs, `Run` and `Start` both refused, no entity added; back on and it runs) and `script_commands_default_on_and_survive_a_round_trip`.
+Checked that the test did not write the setting into the real user config.
+
+**Stack.** The planned large-stack thread for command steps was not built, on the evidence: the native builds already link with
+at least 8 MiB (`.cargo/config.toml` raises Windows to 16 MiB), the deepest step found (PEDIT converting a line to a polyline)
+needs 2 to 4 MiB in a debug build, and the nesting depth is fixed because `PY_*` is refused, so it cannot recurse. Moving the step
+to a helper thread would be unsound here (the editor state is not `Send` and some of it has thread affinity), and the alternative,
+a stack-growing dependency such as `stacker`, adds a crate to H7's tree to guard a case that cannot occur. The 64 MiB thread in the
+PEDIT audit stays, because a test thread gets only 2 MiB.
 

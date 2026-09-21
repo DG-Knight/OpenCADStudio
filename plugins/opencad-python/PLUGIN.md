@@ -312,9 +312,13 @@ points default to the middle of a line, arc or circle and the first vertex of a 
 undone as the editor would undo it.
 
 Guards: a command is refused while another is active (cancel it first) or when the
-line names a command that could end the session or re-enter Python: `QUIT`,
-`EXIT`, `CLOSE`, `CLOSEALL`, `NEW`, `QNEW`, `OPEN`, `SAVE`, `QSAVE`, `SAVEAS`, `SAVEALL`,
-`RECOVER`, `SCRIPT`, `RUNSCRIPT` and any `PY_*`. Commands run on the active
+line names a command that could end the session, re-enter Python or change this
+setting: `QUIT`, `EXIT`, `CLOSE`, `CLOSEALL`, `NEW`, `QNEW`, `OPEN`, `SAVE`, `QSAVE`,
+`SAVEAS`, `SAVEALL`, `RECOVER`, `SCRIPT`, `RUNSCRIPT`, `SCRIPTCOMMANDS` and any `PY_*`.
+The user can switch the whole facility off with the `SCRIPTCOMMANDS 0` command (`1`
+turns it back on, plain `SCRIPTCOMMANDS` shows it); it is a saved preference, on by
+default, and while it is off every `doc.command`, `start_command` and `doc.modify` call
+raises `RuntimeError`. Only the command line can change it, never a script. Commands run on the active
 document only. Commands that need an interactive surface a script cannot fill
 (the rich-text editor, a file dialog) report it in `blocked_by` and are cancelled.
 PEDIT's fit, spline, decurve and vertex-edit options are not wrapped (reach them with

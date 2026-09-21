@@ -2894,6 +2894,25 @@ impl OpenCADStudio {
                     _ => self.command_line.push_error(crate::t!("Requires 0 or 1").as_ref()),
                 }
             }
+            cmd if cmd == "SCRIPTCOMMANDS" || cmd.starts_with("SCRIPTCOMMANDS ") => {
+                // A user setting, deliberately outside the script's reach: it is refused by
+                // the script command runner, so only the command line can change it.
+                let arg = cmd.trim_start_matches("SCRIPTCOMMANDS").trim();
+                match arg {
+                    "" => {}
+                    "1" | "ON" | "YES" => self.script_commands = true,
+                    "0" | "OFF" | "NO" => self.script_commands = false,
+                    _ => {
+                        self.command_line.push_error("SCRIPTCOMMANDS takes 1 (scripts may run commands) or 0 (they may not)");
+                        return Some(Task::none());
+                    }
+                }
+                if !arg.is_empty() {
+                    self.persist_settings_if_changed();
+                }
+                let state = if self.script_commands { 1 } else { 0 };
+                self.command_line.push_output(&format!("SCRIPTCOMMANDS = {state}"));
+            }
             "SAVETIME" => {
                 use crate::command::ValuePromptCommand;
                 let c = ValuePromptCommand::new(

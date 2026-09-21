@@ -619,6 +619,7 @@ impl OpenCADStudio {
             constraint_bar_display: self.constraint_bar_display,
             constraint_bar_mode: self.constraint_bar_mode,
             savetime_min: self.savetime_min,
+            script_commands: self.script_commands,
             default_save_format: self.default_save_format.clone(),
             pick_add: self.pick_add,
             pick_drag_rect: self.pick_drag_rect,
@@ -723,6 +724,7 @@ impl OpenCADStudio {
         self.constraint_bar_display = s.constraint_bar_display.clamp(0, 3);
         self.constraint_bar_mode = s.constraint_bar_mode.clamp(0, 4095);
         self.savetime_min = s.savetime_min;
+        self.script_commands = s.script_commands;
         self.default_save_format =
             crate::io::canonical_save_format(&s.default_save_format).to_string();
         self.pick_add = s.pick_add;

@@ -1291,7 +1291,7 @@ impl<'a> HostSession<'a> {
             let first = line.split_whitespace().next()?.trim_start_matches(['\'', '_']).to_uppercase();
             const DENIED: &[&str] = &[
                 "QUIT", "EXIT", "CLOSE", "CLOSEALL", "NEW", "QNEW", "OPEN", "SAVE", "QSAVE", "SAVEAS",
-                "SAVEALL", "RECOVER", "SCRIPT", "RUNSCRIPT",
+                "SAVEALL", "RECOVER", "SCRIPT", "RUNSCRIPT", "SCRIPTCOMMANDS",
             ];
             if DENIED.contains(&first.as_str()) || first.starts_with("PY_") {
                 Some(format!("the command {first} cannot be run from a script"))
@@ -1299,6 +1299,11 @@ impl<'a> HostSession<'a> {
                 None
             }
         };
+        // Cancel stays allowed: if the user turns scripts off mid-run, a command a script left
+        // waiting must still be closable rather than stranded.
+        if !self.app.script_commands && !matches!(request, R::Cancel) {
+            return Err("running commands from a script is turned off (SCRIPTCOMMANDS = 0); turn it on at the command line with SCRIPTCOMMANDS 1".to_owned());
+        }
         let active = self.app.tabs[tab].active_cmd.is_some();
         let before = self.document().entities().count() as i64;
         let error_revision = self.app.command_line.error_revision;
@@ -8263,6 +8268,39 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         assert_eq!(document.entities().filter(|e| matches!(e, EntityType::Polyline2D(_))).count(), 1);
         assert!(!document.entities().any(|e| matches!(e, EntityType::PolygonMesh(_))));
         drop(process);
+    }
+
+    /// The user's SCRIPTCOMMANDS setting gates the command runner, and a script cannot change it.
+    #[test]
+    fn script_commands_setting_gates_the_runner() {
+        use ocs_plugin_api::host::CommandRequest as R;
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        assert!(app.script_commands, "scripts may run commands by default");
+        let run = |app: &mut OpenCADStudio, line: &str| HostSession::new(app, 0).run_command(R::Run { line: line.into() });
+        assert!(run(&mut app, "LINE 0,0 10,0").is_ok());
+
+        // A script cannot touch the setting, on or off.
+        let refused = run(&mut app, "SCRIPTCOMMANDS 0").unwrap_err();
+        assert!(refused.contains("cannot be run from a script"), "{refused}");
+        assert!(app.script_commands);
+
+        // The user turns it off at the command line.
+        let reply = app.automation_op(r#"{"op":"run","cmd":"SCRIPTCOMMANDS 0"}"#);
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert!(!app.script_commands);
+        let refused = run(&mut app, "LINE 0,0 20,0").unwrap_err();
+        assert!(refused.contains("turned off"), "{refused}");
+        let refused = HostSession::new(&mut app, 0).run_command(R::Start { name: "LINE".into() }).unwrap_err();
+        assert!(refused.contains("turned off"), "{refused}");
+        assert_eq!(app.tabs[0].scene.document.entities().count(), 1, "nothing ran while it was off");
+        assert!(HostSession::new(&mut app, 0).run_command(R::Cancel).is_ok(), "Cancel is still allowed while it is off");
+
+        // And back on.
+        app.automation_op(r#"{"op":"run","cmd":"SCRIPTCOMMANDS 1"}"#);
+        assert!(app.script_commands);
+        assert!(run(&mut app, "LINE 0,0 20,0").is_ok());
+        assert_eq!(app.tabs[0].scene.document.entities().count(), 2);
     }
 
     /// Exploration harness (not a gate): prints how the real commands answer

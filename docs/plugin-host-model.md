@@ -96,11 +96,14 @@ to arrive from outside; an earlier fire-and-forget replay could hang, this does 
 
 Guards: refused while another command is active or off the active tab; refused for
 commands that could end the session or re-enter Python (`QUIT`, `EXIT`, `CLOSE*`,
-`NEW`, `QNEW`, `OPEN`, `SAVE*`, `RECOVER`, `SCRIPT`, `RUNSCRIPT`, `PY_*`); an editor or
-dialog a command opens is reported and closed by `Cancel`. It does not consult the
-automation on/off switch, which governs the external MCP and serve channels; a script
-is something the user chose to run. The Python layer cancels any step sequence that
-leaves a command waiting.
+`NEW`, `QNEW`, `OPEN`, `SAVE*`, `RECOVER`, `SCRIPT`, `RUNSCRIPT`, `SCRIPTCOMMANDS`, `PY_*`); an editor or
+dialog a command opens is reported and closed by `Cancel`. The user can turn the whole
+facility off with the saved `SCRIPTCOMMANDS` preference (on by default; `SCRIPTCOMMANDS 0`
+at the command line): while it is off, every request except `Cancel` is refused (so a command a script left
+waiting can still be closed). A script cannot change
+it, because the runner refuses that command. The runner does not consult the automation
+on/off switch, which governs the external MCP and serve channels. The Python layer cancels
+any step sequence that leaves a command waiting.
 
 ## Python surface
 
@@ -126,8 +129,8 @@ as `{"type": "overflow", "dropped": n}`. Tokens are bound to the tab that asked.
   descriptions, a dimension style's text-style name) and mis-scales one angle; these are
   pinned by canaries and listed in `cadcodec-reader-gaps.md`.
 - Not available from a script: complex (text and shape) linetypes, plot devices and named
-  page setups, PEDIT's fit and spline options, interactive-only commands such as HATCH, and
-  a setting to turn script-driven commands off.
-- A command step nests inside the editor's message handling; in a debug build a deep step
-  (PEDIT converting a line to a polyline) needs more than 2 MiB of stack, which the
-  application's 8 MiB main thread provides and a release build needs far less of.
+  page setups, PEDIT's fit and spline options, and interactive-only commands such as HATCH.
+- A command step nests inside the editor's message handling. In a debug build a deep step
+  (PEDIT converting a line to a polyline) needs between 2 and 4 MiB of stack; the native
+  builds link with at least 8 MiB (16 MiB on Windows, `.cargo/config.toml`), the nesting depth
+  is fixed rather than recursive (`PY_*` is refused), and a release build uses far less.
