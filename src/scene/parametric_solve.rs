@@ -2442,9 +2442,10 @@ fn solve_scope(
         })
         .flatten();
         // A transformed entity whose own end points a driving dimension
-        // measures keeps only the first constraint point where the transform
-        // put it; the dimension pulls the other end back to its value (a
-        // scaled line keeps its d1), as in the reference.
+        // measures keeps only its second constraint point where the transform
+        // put it; the dimension pulls the first end back to its value (a line
+        // scaled 2x about its start keeps its d1 by moving that start), as in
+        // the reference.
         let dimension_pin = (reference.marker.is_none() && axis_pin.is_none())
             .then(|| {
                 constraints.iter().find_map(|c| {
@@ -2461,7 +2462,7 @@ fn solve_scope(
                         && c.refs
                             .iter()
                             .all(|r| r.entity == reference.entity && r.marker.is_some()))
-                    .then(|| c.refs[0])
+                    .then(|| c.refs[1])
                 })
             })
             .flatten();

@@ -2302,6 +2302,9 @@ pub struct Scene {
     pub dynamic_constraint_display: bool,
     /// Dynamic dimensions DCHIDE or DYNCONSTRAINTDISPLAY 0 keep off screen.
     hidden_dynamic_dimensions: HashSet<Handle>,
+    /// The zoom band (`quantize_wpp`) the dynamic dimensions were last
+    /// scaled for; 0 until the first scaling.
+    dynamic_dimension_band: f32,
     /// Session-only visibility overrides for constraint glyphs.
     hidden_parametric_constraints: HashSet<(
         parametric_constraints::ParametricScope,
@@ -2635,6 +2638,7 @@ impl Scene {
             constraint_name_format: 2,
             dynamic_constraint_display: true,
             hidden_dynamic_dimensions: HashSet::default(),
+            dynamic_dimension_band: 0.0,
             hidden_parametric_constraints: HashSet::default(),
             shown_parametric_constraints: HashSet::default(),
             named_parameters: named_parameters::ParameterTable::new(),

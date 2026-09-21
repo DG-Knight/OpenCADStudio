@@ -2810,6 +2810,9 @@ impl Scene {
 
     pub(crate) fn load_parametric_constraints_from_document(&mut self) {
         self.parametric_constraints.clear();
+        // Dynamic dimensions read from the file get their screen size on the
+        // first tick after the view is known.
+        self.dynamic_dimension_band = 0.0;
         let owners: Vec<_> = self
             .document
             .block_records

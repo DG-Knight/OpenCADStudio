@@ -364,6 +364,9 @@ pub(crate) fn next_dimensional_parameter_name(
 /// The constraint-bar label that draws a dynamic dimension's lock mark.
 pub const DYNAMIC_DIMENSION_GLYPH: &str = "\u{1F512}";
 
+/// The on-screen text height of a dynamic dimension, in pixels.
+pub const DYNAMIC_DIMENSION_TEXT_PX: f32 = 12.0;
+
 /// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
 /// 1 = value, 2 = name=value.
 pub(crate) fn dynamic_dimension_text(name: &str, value: f64, format: u8) -> String {
@@ -1573,6 +1576,63 @@ impl super::Scene {
         self.parametric_constraints
             .iter()
             .any(|set| set.dimensions.values().any(|dimension| *dimension == handle))
+    }
+
+    /// Gives every dynamic dimension a DIMSCALE override that keeps its
+    /// text, arrows and offsets at a screen size (the reference draws them
+    /// at a constant pixel size whatever the zoom). Runs once per zoom band;
+    /// `force` re-applies after a dimension was created or loaded.
+    pub fn refresh_dynamic_dimension_scales(&mut self, force: bool) {
+        let Some(band) = super::Scene::quantize_wpp(self.world_per_pixel()) else {
+            return;
+        };
+        if !force && band == self.dynamic_dimension_band {
+            return;
+        }
+        self.dynamic_dimension_band = band;
+        let handles: Vec<Handle> = self
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| set.dimensions.values().copied())
+            .collect();
+        let mut changes = Vec::new();
+        for handle in handles {
+            let Some(acadrust::EntityType::Dimension(dimension)) = self.document.get_entity(handle)
+            else {
+                continue;
+            };
+            let style_name = dimension.base().style_name.clone();
+            let text_height = self
+                .document
+                .dim_styles
+                .iter()
+                .find(|style| {
+                    style.name.eq_ignore_ascii_case(&style_name)
+                        || (style_name.trim().is_empty()
+                            && style.name.eq_ignore_ascii_case("Standard"))
+                })
+                .map(|style| style.dimtxt)
+                .filter(|height| *height > 1e-9)
+                .unwrap_or(0.18);
+            let scale = f64::from(band) * f64::from(DYNAMIC_DIMENSION_TEXT_PX) / text_height;
+            let current = crate::entities::dim_override::real(
+                &dimension.base().common.extended_data,
+                crate::entities::dim_override::DIMSCALE,
+            );
+            if current.is_some_and(|value| (value - scale).abs() < 1e-9) {
+                continue;
+            }
+            crate::entities::dim_override::set(
+                &mut self.document,
+                handle,
+                crate::entities::dim_override::DIMSCALE,
+                Some(acadrust::xdata::XDataValue::Real(scale)),
+            );
+            changes.push((handle, super::ChangeKind::Modified));
+        }
+        if !changes.is_empty() {
+            self.bump_entities(&changes);
+        }
     }
 
     /// Re-derives which dynamic dimensions stay off screen (DCHIDE, or
