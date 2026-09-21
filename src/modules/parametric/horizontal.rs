@@ -200,7 +200,7 @@ impl HorizontalConstraintCommand {
         if first.handle == second.handle && (first.point - second.point).length() <= 1.0e-9 {
             self.step = Step::SecondPoint(first);
             return CmdResult::ReportError(
-                "The object or point is already selected. Select a different object or constraint point."
+                "The object or point is already selected.  Select a different object or constraint point."
                     .to_string(),
             );
         }

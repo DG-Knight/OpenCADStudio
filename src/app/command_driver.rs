@@ -3357,8 +3357,13 @@ impl OpenCADStudio {
                         || equal_size_follower(&self.tabs[i].scene.document, first, other)
                             .is_none()
                     {
-                        self.command_line
-                            .push_error(EqualConstraintCommand::INVALID_OBJECT);
+                        // The reference names the kind the first object
+                        // asks for.
+                        let message = match equal_size(&self.tabs[i].scene.document, first) {
+                            Some(EqualSize::Radius(_)) => EqualConstraintCommand::INVALID_RADIUS_OBJECT,
+                            _ => EqualConstraintCommand::INVALID_LENGTH_OBJECT,
+                        };
+                        self.command_line.push_error(message);
                         continue;
                     }
                     let exists = self.tabs[i]
@@ -3378,7 +3383,10 @@ impl OpenCADStudio {
                     }
                     followers.push(other);
                 }
-                if multiple && !finishing {
+                // A refused second object is asked for again, as in the
+                // reference; Multiple keeps asking anyway.
+                let keep = (multiple && !finishing) || (!multiple && followers.is_empty());
+                if keep {
                     if let Some(prompt) =
                         self.tabs[i].active_cmd.as_ref().map(|command| command.prompt())
                     {
@@ -3601,7 +3609,7 @@ impl OpenCADStudio {
                                     ("No valid constraint point found.", Some(first))
                                 } else {
                                     (
-                                        "The object or point is already selected. Select a different object or constraint point.",
+                                        "The object or point is already selected.  Select a different object or constraint point.",
                                         Some(first),
                                     )
                                 };
