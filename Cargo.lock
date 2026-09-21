@@ -38,6 +38,7 @@ dependencies = [
  "js-sys",
  "libloading",
  "log",
+ "lopdf",
  "lyon_tessellation",
  "meshopt",
  "naga 27.0.3",

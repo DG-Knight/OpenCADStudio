@@ -93,6 +93,8 @@ i18n-embed = { version = "0.16", features = ["desktop-requester"] }
 rayon = "1"
 open = "5"
 printpdf = { version = "0.9.1", default-features = false, features = ["images"] }
+# The lopdf printpdf builds on: used to Flate-compress the exported PDF streams.
+lopdf = { version = "0.39.0", default-features = false, features = ["time"] }
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "win-system-proxy"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
