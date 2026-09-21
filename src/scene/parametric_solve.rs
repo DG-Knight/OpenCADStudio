@@ -2766,6 +2766,21 @@ fn solve_scope(
                     constraint.refs.get(2).is_some_and(|axis| axis.entity == *handle)
                 })
                 || equal_followers.iter().any(|follower| follower.entity == *handle)
+                // A driving dimension between an entity's own ends is its size;
+                // a retained length would contradict a new value.
+                || constraints.iter().any(|c| {
+                    c.enabled
+                        && c.driving_param.is_some()
+                        && matches!(
+                            c.kind,
+                            ConstraintKind::Distance
+                                | ConstraintKind::DistanceX
+                                | ConstraintKind::DistanceY
+                                | ConstraintKind::DistanceDirected
+                        )
+                        && c.refs.len() >= 2
+                        && c.refs.iter().all(|r| r.entity == *handle && r.marker.is_some())
+                })
             {
                 continue;
             }

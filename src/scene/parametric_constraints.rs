@@ -367,6 +367,9 @@ pub const DYNAMIC_DIMENSION_GLYPH: &str = "\u{1F512}";
 /// The on-screen text height of a dynamic dimension, in pixels.
 pub const DYNAMIC_DIMENSION_TEXT_PX: f32 = 12.0;
 
+/// The xdata application that marks an annotational constraint dimension.
+pub const ANNOTATIONAL_DIMENSION_APP: &str = "OCS_CONSTRAINT_FORM";
+
 /// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
 /// 1 = value, 2 = name=value. A plain number shows as typed (`d1=100`); an
 /// expression shows the expression under the reference's `fx:` prefix
@@ -1502,6 +1505,13 @@ impl super::Scene {
                     }
                     None => continue,
                 };
+                // An annotational dimension shows the value at dimension
+                // precision, as the reference does.
+                let source = if self.dimension_is_annotational(*dimension) {
+                    format!("{value:.4}")
+                } else {
+                    source
+                };
                 updates.push((
                     *dimension,
                     dynamic_dimension_text(&name, &source, value, format),
@@ -1592,25 +1602,69 @@ impl super::Scene {
         ids.len()
     }
 
-    /// True for a dimension that shows a dimensional constraint.
+    /// True for a dynamic dimension of a dimensional constraint (not an
+    /// annotational one, which is an ordinary plotted dimension).
     pub(crate) fn is_dynamic_dimension(&self, handle: Handle) -> bool {
         self.parametric_constraints
             .iter()
             .any(|set| set.dimensions.values().any(|dimension| *dimension == handle))
+            && !self.dimension_is_annotational(handle)
+    }
+
+    /// True when a dimensional constraint's dimension uses the annotational
+    /// form: drawn with its style, plotted, never rescaled to the screen.
+    pub(crate) fn dimension_is_annotational(&self, handle: Handle) -> bool {
+        self.document.get_entity(handle).is_some_and(|entity| {
+            entity
+                .common()
+                .extended_data
+                .get_record(ANNOTATIONAL_DIMENSION_APP)
+                .is_some()
+        })
+    }
+
+    /// Marks a constraint dimension as annotational (DCFORM Annotational).
+    pub(crate) fn mark_dimension_annotational(&mut self, handle: Handle) {
+        crate::scene::view::dispatch::set_entity_xdata(
+            &mut self.document,
+            handle,
+            ANNOTATIONAL_DIMENSION_APP,
+            Some(vec![acadrust::xdata::XDataValue::String(
+                "ANNOTATIONAL".to_string(),
+            )]),
+        );
+    }
+
+    /// The document as written to a file: a dynamic dimension's screen-size
+    /// overrides are a display matter and stay out of the file.
+    pub(crate) fn document_for_save(&self) -> acadrust::CadDocument {
+        use crate::entities::dim_override as ov;
+        let mut document = self.document.clone();
+        for set in &self.parametric_constraints {
+            for handle in set.dimensions.values().copied() {
+                if self.dimension_is_annotational(handle) {
+                    continue;
+                }
+                for code in [ov::DIMSCALE, ov::DIMTIH, ov::DIMTOH] {
+                    ov::set(&mut document, handle, code, None);
+                }
+            }
+        }
+        document
     }
 
     /// Gives every dynamic dimension a DIMSCALE override that keeps its
     /// text, arrows and offsets at a screen size (the reference draws them
-    /// at a constant pixel size whatever the zoom). Runs once per zoom band;
-    /// `force` re-applies after a dimension was created or loaded.
+    /// at a constant pixel size whatever the zoom). Runs whenever the camera
+    /// changed; `force` re-applies after a dimension was created or loaded.
     pub fn refresh_dynamic_dimension_scales(&mut self, force: bool) {
-        let Some(band) = super::Scene::quantize_wpp(self.world_per_pixel()) else {
+        let Some(wpp) = self.world_per_pixel() else {
             return;
         };
-        if !force && band == self.dynamic_dimension_band {
+        if !force && self.dynamic_dimension_camera_gen == Some(self.camera_generation) {
             return;
         }
-        self.dynamic_dimension_band = band;
+        self.dynamic_dimension_camera_gen = Some(self.camera_generation);
         let handles: Vec<Handle> = self
             .parametric_constraints
             .iter()
@@ -1622,6 +1676,10 @@ impl super::Scene {
             else {
                 continue;
             };
+            // An annotational dimension keeps its style's size.
+            if self.dimension_is_annotational(handle) {
+                continue;
+            }
             let style_name = dimension.base().style_name.clone();
             let text_height = self
                 .document
@@ -1635,7 +1693,7 @@ impl super::Scene {
                 .map(|style| style.dimtxt)
                 .filter(|height| *height > 1e-9)
                 .unwrap_or(0.18);
-            let scale = f64::from(band) * f64::from(DYNAMIC_DIMENSION_TEXT_PX) / text_height;
+            let scale = f64::from(wpp) * f64::from(DYNAMIC_DIMENSION_TEXT_PX) / text_height;
             use crate::entities::dim_override as ov;
             let xdata = &dimension.base().common.extended_data;
             let current = ov::real(xdata, ov::DIMSCALE);
@@ -1676,8 +1734,9 @@ impl super::Scene {
             .iter()
             .flat_map(|set| {
                 set.dimensions.iter().filter_map(|(id, dimension)| {
-                    (!self.dynamic_constraint_display
-                        || !self.is_parametric_constraint_visible(set.scope, *id))
+                    (!self.dimension_is_annotational(*dimension)
+                        && (!self.dynamic_constraint_display
+                            || !self.is_parametric_constraint_visible(set.scope, *id)))
                     .then_some(*dimension)
                 })
             })

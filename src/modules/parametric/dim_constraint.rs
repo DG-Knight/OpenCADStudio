@@ -392,9 +392,16 @@ impl CadCommand for DimConstraintCommand {
 
 /// `DIMCONSTRAINT`: the reference's option front end for the dimensional
 /// constraint family; each choice runs the focused command.
-pub struct DimConstraintMenuCommand;
+pub struct DimConstraintMenuCommand {
+    /// The option Enter takes: the dimensional constraint used last.
+    default: &'static str,
+}
 
 impl DimConstraintMenuCommand {
+    pub fn new(default: &'static str) -> Self {
+        Self { default }
+    }
+
     fn dispatch(keyword: &str) -> Option<&'static str> {
         Some(match keyword {
             "L" | "LINEAR" => "DCLINEAR",
@@ -404,9 +411,23 @@ impl DimConstraintMenuCommand {
             "AN" | "ANGULAR" => "DCANGULAR",
             "R" | "RADIAL" | "RADIUS" => "DCRADIUS",
             "D" | "DIAMETER" => "DCDIAMETER",
+            "F" | "FORM" => "DCFORM",
             "C" | "CONVERT" => "DCCONVERT",
             _ => return None,
         })
+    }
+
+    fn command_for_label(label: &str) -> &'static str {
+        match label {
+            "Linear" => "DCLINEAR",
+            "Horizontal" => "DCHORIZONTAL",
+            "Vertical" => "DCVERTICAL",
+            "ANgular" => "DCANGULAR",
+            "Radius" => "DCRADIUS",
+            "Diameter" => "DCDIAMETER",
+            "Convert" => "DCCONVERT",
+            _ => "DCALIGNED",
+        }
     }
 }
 
@@ -416,7 +437,10 @@ impl CadCommand for DimConstraintMenuCommand {
     }
 
     fn prompt(&self) -> String {
-        "DIMCONSTRAINT  Enter dimensional constraint option [Linear/Horizontal/Vertical/Aligned/ANgular/Radial/Diameter/Convert] <Aligned>:".to_string()
+        format!(
+            "DIMCONSTRAINT  Enter a dimensional constraint option [Linear/Horizontal/Vertical/Aligned/ANgular/Radius/Diameter/Form/Convert] <{}>:",
+            self.default
+        )
     }
 
     fn options(&self) -> Vec<CmdOption> {
@@ -426,8 +450,9 @@ impl CadCommand for DimConstraintMenuCommand {
             CmdOption::new("Vertical", "V"),
             CmdOption::new("Aligned", "A"),
             CmdOption::new("ANgular", "AN"),
-            CmdOption::new("Radial", "R"),
+            CmdOption::new("Radius", "R"),
             CmdOption::new("Diameter", "D"),
+            CmdOption::new("Form", "F"),
             CmdOption::new("Convert", "C"),
         ]
     }
@@ -446,7 +471,129 @@ impl CadCommand for DimConstraintMenuCommand {
     }
 
     fn on_enter(&mut self) -> CmdResult {
-        CmdResult::Dispatch("DCALIGNED".to_string())
+        CmdResult::Dispatch(Self::command_for_label(self.default).to_string())
+    }
+
+    fn on_escape(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+}
+
+/// `DCFORM`: `Enter constraint form [Annotational/Dynamic] <current>:`;
+/// the host records the answer and continues into DIMCONSTRAINT's option
+/// prompt, as the reference does.
+pub struct ConstraintFormCommand {
+    annotational: bool,
+}
+
+impl ConstraintFormCommand {
+    pub fn new(annotational: bool) -> Self {
+        Self { annotational }
+    }
+
+    fn current(&self) -> &'static str {
+        if self.annotational {
+            "Annotational"
+        } else {
+            "Dynamic"
+        }
+    }
+}
+
+impl CadCommand for ConstraintFormCommand {
+    fn name(&self) -> &'static str {
+        "DCFORM"
+    }
+
+    fn prompt(&self) -> String {
+        format!(
+            "DCFORM  Enter constraint form [Annotational/Dynamic] <{}>:",
+            self.current()
+        )
+    }
+
+    fn options(&self) -> Vec<CmdOption> {
+        vec![
+            CmdOption::new("Annotational", "A"),
+            CmdOption::new("Dynamic", "D"),
+        ]
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let keyword = text.trim().trim_start_matches('_').to_ascii_uppercase();
+        let form = match keyword.as_str() {
+            "A" | "ANNOTATIONAL" => "Annotational",
+            "D" | "DYNAMIC" => "Dynamic",
+            _ => return None,
+        };
+        Some(CmdResult::Dispatch(format!("DCFORM_SET {form}")))
+    }
+
+    fn on_point(&mut self, _point: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Dispatch(format!("DCFORM_SET {}", self.current()))
+    }
+
+    fn on_escape(&mut self) -> CmdResult {
+        CmdResult::Cancel
+    }
+}
+
+/// The value prompt a double-clicked dynamic dimension opens, standing in
+/// for the reference's in-place editor; `name=expression` also renames.
+pub struct DimensionValueCommand {
+    name: String,
+    current: String,
+}
+
+impl DimensionValueCommand {
+    pub fn new(name: String, current: String) -> Self {
+        Self { name, current }
+    }
+}
+
+impl CadCommand for DimensionValueCommand {
+    fn name(&self) -> &'static str {
+        "DCVALUE"
+    }
+
+    fn prompt(&self) -> String {
+        format!(
+            "DCVALUE  Enter value or name and value <{}={}>:",
+            self.name, self.current
+        )
+    }
+
+    fn wants_text_input(&self) -> bool {
+        true
+    }
+
+    fn point_step_accepts_keywords(&self) -> bool {
+        true
+    }
+
+    fn on_text_input(&mut self, text: &str) -> Option<CmdResult> {
+        let text = text.trim();
+        (!text.is_empty()).then(|| CmdResult::Dispatch(format!("DCVALUE {} {text}", self.name)))
+    }
+
+    fn on_point(&mut self, _point: DVec3) -> CmdResult {
+        CmdResult::NeedPoint
+    }
+
+    fn on_enter(&mut self) -> CmdResult {
+        CmdResult::Cancel
     }
 
     fn on_escape(&mut self) -> CmdResult {

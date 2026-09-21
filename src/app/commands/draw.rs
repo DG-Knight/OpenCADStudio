@@ -1310,6 +1310,7 @@ impl OpenCADStudio {
             }
 
             "DCCONVERT" => {
+                self.dim_constraint_last = "Convert";
                 let handles = self.tabs[i].scene.selected_handles_in_order();
                 if handles.is_empty() {
                     use crate::modules::draw::select::SelectObjectsCommand;
@@ -1508,12 +1509,127 @@ impl OpenCADStudio {
 
             "DIMCONSTRAINT" => {
                 use crate::modules::parametric::DimConstraintMenuCommand;
-                // Only the dynamic form exists here.
-                self.command_line
-                    .push_output("Current settings: Constraint form = Dynamic");
-                let new_cmd = DimConstraintMenuCommand;
+                self.command_line.push_output(&format!(
+                    "Current settings:  Constraint form = {}",
+                    self.constraint_form_name()
+                ));
+                let new_cmd = DimConstraintMenuCommand::new(self.dim_constraint_last);
                 self.command_line.push_info(&new_cmd.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
+            "DCFORM" => {
+                use crate::modules::parametric::ConstraintFormCommand;
+                let new_cmd = ConstraintFormCommand::new(self.constraint_form_annotational);
+                self.command_line.push_info(&new_cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
+            // DCFORM's answer, then on into DIMCONSTRAINT's options as the
+            // reference does.
+            cmd if cmd.starts_with("DCFORM_SET ") => {
+                use crate::modules::parametric::DimConstraintMenuCommand;
+                self.constraint_form_annotational = cmd
+                    .trim_start_matches("DCFORM_SET ")
+                    .trim()
+                    .eq_ignore_ascii_case("Annotational");
+                self.command_line.push_output(&format!(
+                    "Current settings:  Constraint form = {}",
+                    self.constraint_form_name()
+                ));
+                let new_cmd = DimConstraintMenuCommand::new(self.dim_constraint_last);
+                self.command_line.push_info(&new_cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
+            // A dynamic dimension's value prompt (double-click).
+            cmd if cmd.starts_with("DCVALUE ") => {
+                let rest = cmd.trim_start_matches("DCVALUE ").trim();
+                if let Some((name, input)) = rest.split_once(' ') {
+                    self.apply_parameter_input(i, name.trim(), input);
+                }
+            }
+
+            "-PARAMETERS" => {
+                use crate::modules::parametric::ParametersCliCommand;
+                let new_cmd = ParametersCliCommand::new();
+                self.command_line.push_info(&new_cmd.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+            }
+
+            cmd if cmd.starts_with("-PARAMETERS ") => {
+                let rest = cmd.trim_start_matches("-PARAMETERS ").trim();
+                let (op, args) = rest.split_once(' ').unwrap_or((rest, ""));
+                match op {
+                    "LIST" => {
+                        let rule = "-".repeat(74);
+                        let rows: Vec<String> = {
+                            let table = self.tabs[i].scene.named_parameters();
+                            table
+                                .iter()
+                                .map(|parameter| {
+                                    let value = table
+                                        .resolve(&parameter.name)
+                                        .map(|value| format!("{value:.4}"))
+                                        .unwrap_or_else(|_| "**".to_string());
+                                    format!(
+                                        "Parameter: {:<12} Expression: {:<21} Value: {value}",
+                                        parameter.name, parameter.source
+                                    )
+                                })
+                                .collect()
+                        };
+                        self.command_line.push_output(&rule);
+                        for row in rows {
+                            self.command_line.push_output(&row);
+                        }
+                        self.command_line.push_output(&rule);
+                    }
+                    "NEW" => {
+                        if let Some((name, expression)) = args.split_once(' ') {
+                            self.create_parameter(i, name.trim(), expression.trim());
+                        }
+                    }
+                    "EDIT" => {
+                        use crate::modules::parametric::ParametersCliCommand;
+                        let name = args.trim().to_string();
+                        let old = {
+                            let table = self.tabs[i].scene.named_parameters();
+                            table.get(&name).map(|parameter| {
+                                let value = table
+                                    .resolve(&name)
+                                    .map(|value| format!("{value:.4}"))
+                                    .unwrap_or_else(|_| "**".to_string());
+                                format!("Old Expression = {}, Value = {value}", parameter.source)
+                            })
+                        };
+                        match old {
+                            Some(line) => {
+                                self.command_line.push_output(&line);
+                                let new_cmd = ParametersCliCommand::edit_expression(name);
+                                self.command_line.push_info(&new_cmd.prompt());
+                                self.tabs[i].active_cmd = Some(Box::new(new_cmd));
+                            }
+                            None => self
+                                .command_line
+                                .push_error(&format!("Parameter {name} not found.")),
+                        }
+                    }
+                    "SET" => {
+                        if let Some((name, expression)) = args.split_once(' ') {
+                            self.apply_parameter_input(i, name.trim(), expression.trim());
+                        }
+                    }
+                    "RENAME" => {
+                        if let Some((old, new)) = args.split_once(' ') {
+                            if let Err(error) = self.rename_parameter(i, old.trim(), new.trim()) {
+                                self.command_line.push_error(&error);
+                            }
+                        }
+                    }
+                    "DELETE" => self.delete_parameter(i, args.trim()),
+                    _ => {}
+                }
             }
 
             "EDCONSTRAINT" => {
@@ -1765,6 +1881,12 @@ impl OpenCADStudio {
                     "DCALIGNED" => DimConstraintAxis::Aligned,
                     _ => DimConstraintAxis::Linear,
                 };
+                self.dim_constraint_last = match cmd {
+                    "DCHORIZONTAL" => "Horizontal",
+                    "DCVERTICAL" => "Vertical",
+                    "DCALIGNED" => "Aligned",
+                    _ => "Linear",
+                };
                 let name = next_dimensional_parameter_name(self.tabs[i].scene.named_parameters());
                 // Both constraint points are picked inside the command.
                 self.tabs[i].scene.deselect_all();
@@ -1774,6 +1896,11 @@ impl OpenCADStudio {
             }
 
             "DCONSTRAINT" | "DCRADIUS" | "DCDIAMETER" => {
+                if cmd == "DCRADIUS" {
+                    self.dim_constraint_last = "Radius";
+                } else if cmd == "DCDIAMETER" {
+                    self.dim_constraint_last = "Diameter";
+                }
                 let handles = self.tabs[i].scene.selected_handles_in_order();
                 if handles.is_empty() {
                     use crate::modules::draw::select::SelectObjectsCommand;
@@ -1813,6 +1940,9 @@ impl OpenCADStudio {
             }
 
             "ACONSTRAINT" | "DCANGULAR" => {
+                if cmd == "DCANGULAR" {
+                    self.dim_constraint_last = "ANgular";
+                }
                 let handles = self.tabs[i].scene.selected_handles_in_order();
                 if handles.is_empty() {
                     use crate::modules::draw::select::SelectObjectsCommand;

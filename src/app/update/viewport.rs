@@ -5060,6 +5060,15 @@ properties={:.1}ms picked={}",
                     {
                         return Task::none();
                     }
+                    // A constraint dimension edits its parameter from the
+                    // command line, standing in for the reference's in-place
+                    // value editor.
+                    if let Some(prompt) = self.dynamic_dimension_value_command(i, handle) {
+                        use crate::command::CadCommand;
+                        self.command_line.push_info(&prompt.prompt());
+                        self.tabs[i].active_cmd = Some(Box::new(prompt));
+                        return Task::none();
+                    }
                     // Any text-bearing entity opens its in-place editor
                     // (plain box or rich MText editor, per type). A
                     // Leader resolves to the entity it annotates.

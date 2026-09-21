@@ -3,6 +3,28 @@ use crate::command::{CmdResult, SelectionEntity, StepInput};
 use acadrust::Handle;
 use iced::Task;
 
+/// `old` as a whole identifier in `source` becomes `new`.
+fn replace_identifier(source: &str, old: &str, new: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if !token.is_empty() {
+            out.push_str(if token == old { new } else { token.as_str() });
+            token.clear();
+        }
+    };
+    for c in source.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            token.push(c);
+        } else {
+            flush(&mut token, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
+
 impl OpenCADStudio {
     pub(super) fn reject_locked_edit(&mut self, i: usize, handle: Handle) -> bool {
         let Some(layer) = self.tabs[i].scene.locked_layer_name(handle) else {
@@ -1147,6 +1169,213 @@ impl OpenCADStudio {
         }
     }
 
+    /// `Dynamic` or `Annotational`, the DCFORM setting.
+    pub(crate) fn constraint_form_name(&self) -> &'static str {
+        if self.constraint_form_annotational {
+            "Annotational"
+        } else {
+            "Dynamic"
+        }
+    }
+
+    /// The value prompt a double-clicked constraint dimension opens.
+    pub(crate) fn dynamic_dimension_value_command(
+        &self,
+        i: usize,
+        handle: Handle,
+    ) -> Option<crate::modules::parametric::DimensionValueCommand> {
+        use crate::scene::named_parameters::DrivingValue;
+        let scene = &self.tabs[i].scene;
+        for set in &scene.parametric_constraints {
+            let Some((id, _)) = set
+                .dimensions
+                .iter()
+                .find(|(_, dimension)| **dimension == handle)
+            else {
+                continue;
+            };
+            let constraint = set.get(*id)?;
+            let Some(DrivingValue::Named(name)) = &constraint.driving_param else {
+                return None;
+            };
+            let table = if set.local_parameters.is_empty() {
+                scene.named_parameters()
+            } else {
+                &set.local_parameters
+            };
+            let current = table
+                .get(name)
+                .map(|parameter| parameter.source.trim().to_string())
+                .unwrap_or_default();
+            return Some(crate::modules::parametric::DimensionValueCommand::new(
+                name.clone(),
+                current,
+            ));
+        }
+        None
+    }
+
+    /// Applies `expression` or `newname=expression` to parameter `name`:
+    /// the dimension value prompt and -PARAMETERS Edit.
+    pub(crate) fn apply_parameter_input(&mut self, i: usize, name: &str, input: &str) {
+        let input = input.trim();
+        let (target, expression) = match input.split_once('=') {
+            Some((new_name, expression)) => {
+                (new_name.trim().to_string(), expression.trim().to_string())
+            }
+            None => (name.to_string(), input.to_string()),
+        };
+        if expression.is_empty() {
+            return;
+        }
+        if target != name {
+            if let Err(error) = self.rename_parameter(i, name, &target) {
+                self.command_line.push_error(&error);
+                return;
+            }
+        }
+        let mut table = self.tabs[i].scene.named_parameters().clone();
+        if let Err(error) = table.set(&target, &expression) {
+            self.command_line.push_error(&error.to_string());
+            return;
+        }
+        if !table
+            .resolve(&target)
+            .is_ok_and(|value| value.is_finite())
+        {
+            self.command_line.push_error("Invalid expression.");
+            return;
+        }
+        let pending = self.begin_undo(i, "Edit parameter", 0, true);
+        self.tabs[i].scene.record_undo_named_parameters_before();
+        self.tabs[i].scene.named_parameters = table;
+        self.resolve_named_parameter_edit(i, &target);
+        self.tabs[i].scene.refresh_dynamic_dimension_texts();
+        self.tabs[i].dirty = true;
+        if let Some(pd) = pending {
+            self.commit_undo_delta(i, pd);
+        }
+    }
+
+    /// -PARAMETERS New.
+    pub(crate) fn create_parameter(&mut self, i: usize, name: &str, expression: &str) {
+        if self.tabs[i].scene.named_parameters().contains(name) {
+            self.command_line
+                .push_error(&format!("Parameter {name} already exists."));
+            return;
+        }
+        let mut table = self.tabs[i].scene.named_parameters().clone();
+        if let Err(error) = table.set(name, expression) {
+            self.command_line.push_error(&error.to_string());
+            return;
+        }
+        let pending = self.begin_undo(i, "New parameter", 0, true);
+        self.tabs[i].scene.record_undo_named_parameters_before();
+        self.tabs[i].scene.named_parameters = table;
+        self.tabs[i].scene.sync_native_parametric_graph();
+        self.tabs[i].dirty = true;
+        if let Some(pd) = pending {
+            self.commit_undo_delta(i, pd);
+        }
+    }
+
+    /// Renames a parameter everywhere: the table, the expressions that use
+    /// it and the constraints it drives.
+    pub(crate) fn rename_parameter(&mut self, i: usize, old: &str, new: &str) -> Result<(), String> {
+        use crate::scene::named_parameters::{is_reserved_name, is_valid_name, DrivingValue};
+        let table = self.tabs[i].scene.named_parameters().clone();
+        let Some(source) = table.get(old).map(|parameter| parameter.source.clone()) else {
+            return Err(format!("Parameter {old} not found."));
+        };
+        if !is_valid_name(new) || is_reserved_name(new) || table.contains(new) {
+            return Err(format!("Invalid parameter name {new}."));
+        }
+        let mut renamed = table.clone();
+        renamed.set(new, &source).map_err(|error| error.to_string())?;
+        for parameter in table.iter() {
+            if parameter.name == old {
+                continue;
+            }
+            let rewritten = replace_identifier(&parameter.source, old, new);
+            if rewritten != parameter.source {
+                renamed
+                    .set(&parameter.name, &rewritten)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        renamed.remove(old);
+        let pending = self.begin_undo(i, "Rename parameter", 0, true);
+        self.tabs[i].scene.record_undo_named_parameters_before();
+        self.tabs[i].scene.named_parameters = renamed;
+        let scopes: Vec<_> = self.tabs[i]
+            .scene
+            .parametric_constraints
+            .iter()
+            .map(|set| set.scope)
+            .collect();
+        for scope in scopes {
+            let before = self.tabs[i]
+                .scene
+                .parametric_constraint_set(scope)
+                .filter(|set| {
+                    set.constraints.iter().any(|constraint| {
+                        matches!(&constraint.driving_param, Some(DrivingValue::Named(name)) if name == old)
+                    })
+                })
+                .cloned();
+            let Some(before) = before else {
+                continue;
+            };
+            self.tabs[i]
+                .scene
+                .record_undo_parametric_constraints_before(scope, before);
+            let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
+            for constraint in &mut set.constraints {
+                if matches!(&constraint.driving_param, Some(DrivingValue::Named(name)) if name == old) {
+                    constraint.driving_param = Some(DrivingValue::Named(new.to_string()));
+                }
+            }
+        }
+        self.tabs[i].scene.refresh_dynamic_dimension_texts();
+        self.tabs[i].scene.sync_native_parametric_graph();
+        self.tabs[i].dirty = true;
+        if let Some(pd) = pending {
+            self.commit_undo_delta(i, pd);
+        }
+        Ok(())
+    }
+
+    /// -PARAMETERS Delete: a parameter no constraint drives with.
+    pub(crate) fn delete_parameter(&mut self, i: usize, name: &str) {
+        use crate::scene::named_parameters::DrivingValue;
+        if !self.tabs[i].scene.named_parameters().contains(name) {
+            self.command_line
+                .push_error(&format!("Parameter {name} not found."));
+            return;
+        }
+        let in_use = self.tabs[i]
+            .scene
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| set.constraints.iter())
+            .any(|constraint| {
+                matches!(&constraint.driving_param, Some(DrivingValue::Named(used)) if used == name)
+            });
+        if in_use {
+            self.command_line
+                .push_error(&format!("Parameter {name} is used by a constraint."));
+            return;
+        }
+        let pending = self.begin_undo(i, "Delete parameter", 0, true);
+        self.tabs[i].scene.record_undo_named_parameters_before();
+        self.tabs[i].scene.named_parameters_mut().remove(name);
+        self.tabs[i].scene.sync_native_parametric_graph();
+        self.tabs[i].dirty = true;
+        if let Some(pd) = pending {
+            self.commit_undo_delta(i, pd);
+        }
+    }
+
     fn remove_parametric_constraint(
         &mut self,
         id: crate::scene::parametric_constraints::ConstraintId,
@@ -1344,7 +1573,25 @@ impl OpenCADStudio {
             .into_iter()
             .map(|h| (h, crate::scene::ChangeKind::Modified))
             .collect();
-        self.tabs[i].scene.bump_entities(&changes);
+        // A changed value moves a dimensional constraint's second point; its
+        // first point stays, as in the reference.
+        let anchors: Vec<crate::scene::parametric_constraints::ParametricRef> = self.tabs[i]
+            .scene
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| set.constraints.iter())
+            .filter(|c| {
+                c.enabled
+                    && matches!(&c.driving_param, Some(crate::scene::named_parameters::DrivingValue::Named(n)) if n == name)
+            })
+            .filter_map(|c| c.refs.first().copied())
+            .filter(|reference| reference.marker.is_some())
+            .collect();
+        self.tabs[i].scene.bump_entities_with_parametric_policy(
+            &changes,
+            &anchors,
+            self.constraint_solve_mode,
+        );
     }
 
     /// Commits one field of one Parameters-section row (Properties panel) —
@@ -3609,9 +3856,17 @@ impl OpenCADStudio {
                         return Task::none();
                     }
                 };
+                // DCFORM Annotational: an ordinary plotted dimension that shows
+                // the value at dimension precision.
+                let annotational = self.constraint_form_annotational;
+                let source = if annotational {
+                    format!("{value:.4}")
+                } else {
+                    expression.clone()
+                };
                 let text = dynamic_dimension_text(
                     &name,
-                    &expression,
+                    &source,
                     value,
                     self.tabs[i].scene.constraint_name_format,
                 );
@@ -3641,11 +3896,13 @@ impl OpenCADStudio {
                 }
                 // A dynamic dimension draws in the constraint gray, not the
                 // current color.
-                entity.common_mut().color = acadrust::types::Color::Rgb {
-                    r: 103,
-                    g: 109,
-                    b: 118,
-                };
+                if !annotational {
+                    entity.common_mut().color = acadrust::types::Color::Rgb {
+                        r: 103,
+                        g: 109,
+                        b: 118,
+                    };
+                }
                 let constraints_before = self.tabs[i]
                     .scene
                     .parametric_constraint_set(scope)
@@ -3664,6 +3921,9 @@ impl OpenCADStudio {
                 self.tabs[i].scene.record_undo_named_parameters_before();
                 self.tabs[i].scene.named_parameters = table;
                 let dimension = self.tabs[i].scene.add_entity(entity);
+                if annotational {
+                    self.tabs[i].scene.mark_dimension_annotational(dimension);
+                }
                 let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
                 let id = set.add(kind, refs, Some(DrivingValue::Named(name)));
                 set.dimensions.insert(id, dimension);
