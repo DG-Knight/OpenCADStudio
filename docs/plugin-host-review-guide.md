@@ -94,7 +94,7 @@ several kinds and features are interleaved, so read by area rather than commit b
    | `src/scene/selection.rs`, `src/scene/entity.rs`, `src/app/layers.rs` | `replace_selection_exact`, preserving storage data on entity replacement, `set_current_layer_name`. |
    | `src/app/style_ops.rs`, `src/app/control/mod.rs` | Four methods and one function widened to `pub(super)` so the host reuses OCS's own style rename, delete and in-use logic. |
    | `src/app/settings.rs`, `src/app/mod.rs`, `src/app/update/file.rs`, `src/app/commands/styleprops.rs` | The `SCRIPTCOMMANDS` preference and command (see the decisions below). |
-   | `packaging/build_macos_signed.sh` | Stages and signs the plugin in the macOS bundle. |
+   | `packaging/build_macos_signed.sh`, `.github/workflows/release.yml` | Stage (and, in the signed script, sign) the plugin in the macOS bundle; one added step in `release.yml`. |
 
 ## What each area proves
 
@@ -135,4 +135,6 @@ several kinds and features are interleaved, so read by area rather than commit b
   fit and spline options, and interactive-only commands such as HATCH.
 - Two DXF gaps are not filed upstream because they need the exact XDATA layout AutoCAD expects (the TrueType
   family name and the block description); they are listed in [cadcodec-reader-gaps.md](cadcodec-reader-gaps.md).
-- `release.yml` is unchanged: the AppImage, snap and MSI still ship without the plugin.
+- The AppImage, snap and MSI still ship without the plugin: `release.yml` stages it only in the macOS bundle
+  (one added step, part of this change). Bundling it for Linux and Windows means adding the same staging step
+  (`stage-bundled.sh`) to those jobs, which is small but I could not test the installers here.
