@@ -208,4 +208,6 @@ Found by `audit_python_text_and_dim_styles_over_real_ipc`; each is pinned by a c
 - **`DIMSTYLE` text style name:** the DXF reader keeps only the text-style handle (group 340) and never
   resolves `dimtxsty` from it, so the name reopens as `Standard` (the handle is right; DWG resolves both).
 - **`TextStyle::true_type_font`** is never written or read by either codec, so it lives only in memory.
+- **`BLOCK_RECORD` description:** the DXF codec does not carry `BlockRecord::description`
+  (found by `audit_python_blocks_over_real_ipc`, pinned by a canary); DWG keeps it.
 

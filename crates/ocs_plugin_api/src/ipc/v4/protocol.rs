@@ -131,6 +131,16 @@ mod tests {
             TableOperation::StyleRename { kind: crate::host::TableStyleKind::Text, from: "A".into(), to: "B".into() },
             TableOperation::StyleDelete { kind: crate::host::TableStyleKind::Dim, name: "A".into() },
             TableOperation::StyleSetCurrent { kind: crate::host::TableStyleKind::Dim, name: "A".into() },
+            TableOperation::BlockCreate {
+                name: "B".into(),
+                entities: vec![acadrust::Handle::new(4), acadrust::Handle::new(5)],
+                base_point: [1.0, 2.0, 3.0],
+                erase_originals: true,
+                description: Some("d".into()),
+            },
+            TableOperation::BlockModify { name: "B".into(), description: None, explodable: Some(false), scale_uniformly: Some(true) },
+            TableOperation::BlockRename { from: "B".into(), to: "C".into() },
+            TableOperation::BlockDelete { name: "C".into() },
         ] {
             let bytes = bincode::serialize(&PluginRequest::TableOperation { operation: operation.clone() }).unwrap();
             assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),

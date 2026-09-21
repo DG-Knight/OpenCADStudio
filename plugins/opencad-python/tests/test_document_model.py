@@ -39,6 +39,8 @@ class DocumentModelTests(unittest.TestCase):
             text_style_records=lambda: [{"name": n, "current": n == "Standard"} for n in ("Standard", "Title", "Notes")],
             dim_style_records=lambda: [{"name": n, "current": n == "Standard"} for n in ("Standard", "Metric")],
             style_operation=lambda kind, op, name, options: self.calls.append((kind, op, name, options)) or 9,
+            block_records=lambda: [{"name": n, "entities": []} for n in ("Widget", "Gadget")],
+            block_operation=lambda op, name, options: self.calls.append(("block", op, name, options)) or 9,
         )
         namespace = {"ocs": self.ocs}
         exec(MODEL.read_text(), namespace)
@@ -93,6 +95,22 @@ class DocumentModelTests(unittest.TestCase):
         self.assertEqual(self.calls[-1], ("dim", "delete", "Metric", None))
         dim.set_current("Standard")
         self.assertEqual(self.calls[-1], ("dim", "set_current", "Standard", None))
+
+    def test_blocks(self):
+        blocks = self.doc.blocks
+        self.assertIn("WIDGET", blocks)
+        self.assertEqual(blocks.names(), ["Widget", "Gadget"])
+        blocks.create("Gadget", [self.doc.entities[1], 2], base_point=(1, 2, 3), erase_originals=True)
+        self.assertEqual(self.calls[-1], ("block", "create", "Gadget",
+            {"entities": [1, 2], "base_point": [1.0, 2.0, 3.0], "erase_originals": True}))
+        blocks.modify("Widget", explodable=False)
+        self.assertEqual(self.calls[-1], ("block", "modify", "Widget", {"explodable": False}))
+        blocks.rename("Widget", "Gadget")
+        self.assertEqual(self.calls[-1], ("block", "rename", "Widget", {"to": "Gadget"}))
+        blocks.delete("Widget")
+        self.assertEqual(self.calls[-1], ("block", "delete", "Widget", None))
+        with self.assertRaises(KeyError):
+            blocks["Nope"]
 
     def test_create_and_delete_use_document_model(self):
         line = self.doc.create_entity("Line", start={"x": 0, "y": 0, "z": 0},

@@ -213,3 +213,17 @@ semantics, rename following references, current/delete guards, five-step undo), 
 tests. Four cadcodec findings (STYLE flags and oblique units, DIMSTYLE name, `true_type_font`) are pinned by
 canaries and listed in `cadcodec-reader-gaps.md`. Next: linetypes, blocks, layouts; then headless commands.
 
+### 2026-09-21: blocks (`doc.blocks`)
+
+`TableOperation` gained `BlockCreate` (copy existing model/paper entities into a definition shifted by
+`-base_point`, optionally erasing the originals), `BlockModify` (description, explodable, uniform scale),
+`BlockRename` (inserts follow, via `Scene::rename_block`) and `BlockDelete` (refused while an insert, a
+dimension-style arrow or a multileader uses it; removes the members, markers, record and orphaned draw-order
+tables). Creation reuses `Scene::define_block_from_owned_entities`. Python: `blocks.create/modify/rename/delete`,
+lookup and iteration, records with member handles and kinds. Evidence: `audit_python_blocks_over_real_ipc`
+(18 refusals; shifted geometry and base point; inserts following a rename; original kept vs erased;
+live/DWG/DXF persistence; guarded delete; three-step undo restoring the definitions), IPC round-trip and Python
+unit tests. One more cadcodec finding (DXF drops the block description) is pinned by a canary. Not covered:
+editing a definition's contents in place, and attribute definitions inside a scripted block. Next: linetypes and
+layouts, then headless commands.
+

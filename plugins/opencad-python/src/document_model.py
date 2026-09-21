@@ -396,12 +396,77 @@ class _DimStyles(_Styles):
         return self[name]
 
 
+class _Blocks:
+    """`ocs.active_document.blocks`: user block definitions (layout and
+    anonymous blocks are not listed). Every change is validated by the host, is
+    one undo step, and a refusal raises `RuntimeError` without changing the
+    drawing. Place a block with `create_entity("Insert", block_name=...)`."""
+
+    def _records(self):
+        return ocs.block_records()
+
+    def __iter__(self):
+        return iter(self._records())
+
+    def __len__(self):
+        return len(self._records())
+
+    def __contains__(self, name):
+        wanted = str(name).strip().upper()
+        return any(r["name"].upper() == wanted for r in self._records())
+
+    def __getitem__(self, name):
+        wanted = str(name).strip().upper()
+        for record in self._records():
+            if record["name"].upper() == wanted:
+                return record
+        raise KeyError(name)
+
+    def get(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+    def names(self):
+        return [r["name"] for r in self._records()]
+
+    def create(self, name, entities, base_point=(0, 0, 0), erase_originals=False, description=None):
+        """Define a block from existing model/paper-space entities (descriptors
+        or handles). They are copied into the definition shifted by
+        `-base_point`; `erase_originals=True` removes them from the drawing, as
+        the BLOCK command does. No insert is placed."""
+        handles = [e.handle if isinstance(e, _Entity) else int(e) for e in entities]
+        options = {"entities": handles, "base_point": [float(v) for v in base_point],
+                   "erase_originals": bool(erase_originals)}
+        if description is not None:
+            options["description"] = str(description)
+        ocs.block_operation("create", str(name), options)
+        return self[name]
+
+    def modify(self, name, description=None, explodable=None, scale_uniformly=None):
+        options = {k: v for k, v in (("description", description), ("explodable", explodable),
+                                     ("scale_uniformly", scale_uniformly)) if v is not None}
+        ocs.block_operation("modify", str(name), options)
+        return self[name]
+
+    def rename(self, name, new_name):
+        """Rename a block; every insert of it follows."""
+        ocs.block_operation("rename", str(name), {"to": str(new_name)})
+        return self[new_name]
+
+    def delete(self, name):
+        """Delete a block that no insert, style or leader still uses."""
+        ocs.block_operation("delete", str(name), None)
+
+
 class _Document:
     def __init__(self):
         self._pending = None
         self.layers = _Layers()
         self.text_styles = _TextStyles()
         self.dim_styles = _DimStyles()
+        self.blocks = _Blocks()
         self.entities = _Entities(self)
         self.solids = _Solids(self)
 

@@ -185,6 +185,34 @@ Known persistence limits (cadcodec, see `docs/cadcodec-reader-gaps.md`): a DXF
 save drops the backward/upside-down flags of a text style and does not restore a
 dimension style's `dimtxsty` name (the handle link survives); DWG keeps both.
 
+### Blocks: `ocs.active_document.blocks`
+
+```python
+doc = ocs.active_document
+line = doc.create_entity("Line", start=..., end=...)
+circle = doc.create_entity("Circle", center=..., radius=1)
+B = doc.blocks
+B.create("Widget", [line, circle], base_point=(1, 1, 0), description="a widget")
+doc.create_entity("Insert", block_name="Widget", insert_point={"x": 10, "y": 0, "z": 0})
+B.modify("Widget", explodable=False)
+B.rename("Widget", "Gadget")             # every insert follows
+B["Gadget"]["entities"], B["Gadget"]["insert_count"], B.names()
+B.delete("Gadget")                       # refused while an insert, style or leader uses it
+```
+
+`create` copies model or paper space entities (descriptors or handles) into a new
+definition shifted by `-base_point`, so an insert at `p` puts the base point at
+`p`. `erase_originals=True` removes the sources, as the BLOCK command does; the
+default keeps them. No insert is placed. Refused: an empty, duplicate, invalid or
+`*`-prefixed name, no entities, a missing or repeated entity, an entity inside a
+block, a viewport, a non-finite base point, renaming or deleting layout,
+anonymous or externally referenced blocks, and a case-only rename. Deleting also
+removes the definition's contents. Records list user blocks only (`handle`,
+`name`, `description`, `explodable`, `scale_uniformly`, `base_point`,
+`insert_count`, `entities` as `{handle, kind}`). Editing a definition's contents
+in place and creating attribute definitions inside a block from a script are not
+available yet. A DXF save drops the block description (cadcodec); DWG keeps it.
+
 ### Historical command-replay experiment (not in the default build)
 
 The following records an earlier experiment. The bundled build does **not**

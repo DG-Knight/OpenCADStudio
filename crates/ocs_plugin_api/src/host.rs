@@ -120,6 +120,28 @@ pub enum TableOperation {
     StyleDelete { kind: TableStyleKind, name: String },
     /// Make a text or dimension style current.
     StyleSetCurrent { kind: TableStyleKind, name: String },
+    /// Define a block from existing drawing entities. The entities are copied
+    /// into the definition shifted by `-base_point` (the block's origin);
+    /// `erase_originals` then removes them from the drawing. No insert is
+    /// placed. Returns the block record's handle.
+    BlockCreate {
+        name: String,
+        entities: Vec<Handle>,
+        base_point: [f64; 3],
+        erase_originals: bool,
+        description: Option<String>,
+    },
+    /// Change a block's description, explodable or uniform-scale settings.
+    BlockModify {
+        name: String,
+        description: Option<String>,
+        explodable: Option<bool>,
+        scale_uniformly: Option<bool>,
+    },
+    /// Rename a block; every insert of it follows.
+    BlockRename { from: String, to: String },
+    /// Delete an unreferenced block definition and its contents.
+    BlockDelete { name: String },
 }
 
 /// The style tables `TableOperation` can rename, delete or make current.

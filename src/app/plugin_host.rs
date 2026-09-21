@@ -1245,8 +1245,195 @@ impl<'a> HostSession<'a> {
                 self.app.set_current_layer_name(self.tab, &stored)?;
                 Ok(handle)
             }
+            other @ (TableOperation::BlockCreate { .. }
+            | TableOperation::BlockModify { .. }
+            | TableOperation::BlockRename { .. }
+            | TableOperation::BlockDelete { .. }) => self.block_operation(other),
             other => self.style_operation(other),
         }
+    }
+
+    /// Block definition operations: create from entities, modify settings,
+    /// rename (inserts follow) and delete an unreferenced definition.
+    fn block_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+        use acadrust::entities::EntityType as E;
+        use ocs_plugin_api::host::TableOperation;
+        let editable_block = |doc: &CadDocument, name: &str| -> Result<(String, Handle), String> {
+            let record = doc
+                .block_records
+                .get(name)
+                .ok_or_else(|| format!("block {name:?} does not exist"))?;
+            if record.is_layout() || record.is_anonymous() || record.flags.is_xref || record.flags.is_xref_overlay || record.name.contains('|') {
+                return Err(format!("block {:?} is a layout, anonymous or externally referenced block", record.name));
+            }
+            Ok((record.name.clone(), record.handle))
+        };
+        match operation {
+            TableOperation::BlockCreate { name, entities, base_point, erase_originals, description } => {
+                let name = validated_symbol_name(&name, "a block name")?;
+                if name.starts_with('*') {
+                    return Err("a block name cannot start with '*'".to_owned());
+                }
+                if self.document().block_records.get(&name).is_some() {
+                    return Err(format!("block {name:?} already exists"));
+                }
+                if base_point.iter().any(|v| !v.is_finite()) {
+                    return Err("the block base point must be finite".to_owned());
+                }
+                if entities.is_empty() {
+                    return Err("a block needs at least one entity".to_owned());
+                }
+                let mut seen = std::collections::HashSet::new();
+                let mut sources = Vec::with_capacity(entities.len());
+                for handle in &entities {
+                    if !seen.insert(handle.value()) {
+                        return Err(format!("entity {} is listed twice", handle.value()));
+                    }
+                    let entity = self
+                        .document()
+                        .get_entity(*handle)
+                        .ok_or_else(|| format!("entity {} does not exist", handle.value()))?;
+                    let owner = entity.common().owner_handle;
+                    let in_canvas = self
+                        .document()
+                        .block_records
+                        .iter()
+                        .any(|record| record.handle == owner && record.is_layout());
+                    if !in_canvas {
+                        return Err(format!("entity {} is not in model or paper space", handle.value()));
+                    }
+                    if matches!(entity, E::Viewport(_) | E::Block(_) | E::BlockEnd(_) | E::AttributeEntity(_) | E::Unknown(_)) {
+                        return Err(format!("entity {} of this kind cannot be placed in a block", handle.value()));
+                    }
+                    sources.push(entity.clone());
+                }
+                if let Some(text) = &description {
+                    if text.chars().any(|c| c.is_control() && c != '\n') {
+                        return Err("a block description cannot contain control characters".to_owned());
+                    }
+                }
+                self.push_undo("Create block");
+                let base = glam::DVec3::new(base_point[0], base_point[1], base_point[2]);
+                self.app.tabs[self.tab]
+                    .scene
+                    .define_block_from_owned_entities(sources, &name, base)?;
+                let (stored, handle) = editable_block(self.document(), &name)?;
+                if let Some(record) = self.document_mut().block_records.get_mut(&stored) {
+                    record.base_point = acadrust::types::Vector3::new(base_point[0], base_point[1], base_point[2]);
+                    if let Some(text) = description {
+                        record.description = text;
+                    }
+                }
+                let marker = self.document().block_records.get(&stored).map(|r| r.block_entity_handle);
+                if let Some(marker) = marker {
+                    if let Some(E::Block(block)) = self.document_mut().get_entity_mut(marker) {
+                        block.base_point = acadrust::types::Vector3::new(base_point[0], base_point[1], base_point[2]);
+                    }
+                }
+                if erase_originals {
+                    self.app.tabs[self.tab].scene.erase_entities(&entities);
+                }
+                self.finish_block_change();
+                Ok(handle)
+            }
+            TableOperation::BlockModify { name, description, explodable, scale_uniformly } => {
+                let (name, handle) = editable_block(self.document(), name.trim())?;
+                if description.is_none() && explodable.is_none() && scale_uniformly.is_none() {
+                    return Err("no block properties to change".to_owned());
+                }
+                if let Some(text) = &description {
+                    if text.chars().any(|c| c.is_control() && c != '\n') {
+                        return Err("a block description cannot contain control characters".to_owned());
+                    }
+                }
+                self.push_undo("Modify block");
+                if let Some(record) = self.document_mut().block_records.get_mut(&name) {
+                    if let Some(text) = description {
+                        record.description = text;
+                    }
+                    if let Some(value) = explodable {
+                        record.explodable = value;
+                    }
+                    if let Some(value) = scale_uniformly {
+                        record.scale_uniformly = value;
+                    }
+                }
+                self.finish_block_change();
+                Ok(handle)
+            }
+            TableOperation::BlockRename { from, to } => {
+                let (from, handle) = editable_block(self.document(), from.trim())?;
+                let to = validated_symbol_name(&to, "a block name")?;
+                if to.starts_with('*') {
+                    return Err("a block name cannot start with '*'".to_owned());
+                }
+                if from.eq_ignore_ascii_case(&to) {
+                    return Err("the new block name matches the current one (a case-only change is not supported)".to_owned());
+                }
+                if self.document().block_records.get(&to).is_some() {
+                    return Err(format!("block {to:?} already exists"));
+                }
+                self.push_undo("Rename block");
+                if !self.app.tabs[self.tab].scene.rename_block(&from, &to) {
+                    return Err("the block could not be renamed".to_owned());
+                }
+                self.finish_block_change();
+                Ok(handle)
+            }
+            TableOperation::BlockDelete { name } => {
+                let (name, handle) = editable_block(self.document(), name.trim())?;
+                let doc = self.document();
+                let referenced = doc.entities().any(|entity| match entity {
+                    E::Insert(insert) => insert.block_name.eq_ignore_ascii_case(&name),
+                    E::MultiLeader(leader) => {
+                        leader.block_content_handle == Some(handle)
+                            || leader.context.block_content_handle == Some(handle)
+                    }
+                    _ => false,
+                }) || doc.dim_styles.iter().any(|style| {
+                    [style.dimblk, style.dimblk1, style.dimblk2, style.dimldrblk].contains(&handle)
+                });
+                if referenced {
+                    return Err(format!("block {name:?} is still inserted or used by a style or leader"));
+                }
+                let members: Vec<Handle> = {
+                    let record = doc.block_records.get(&name).expect("checked above");
+                    let mut members = record.entity_handles.clone();
+                    members.push(record.block_entity_handle);
+                    members.push(record.block_end_handle);
+                    members
+                };
+                self.push_undo("Delete block");
+                let doc = self.document_mut();
+                for member in members {
+                    doc.remove_entity(member);
+                }
+                doc.block_records.remove(&name);
+                let orphans: Vec<Handle> = {
+                    let live: std::collections::HashSet<Handle> = doc.block_records.iter().map(|r| r.handle).collect();
+                    doc.objects
+                        .iter()
+                        .filter_map(|(h, object)| match object {
+                            acadrust::objects::ObjectType::SortEntitiesTable(table) if !live.contains(&table.block_owner_handle) => Some(*h),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                for orphan in orphans {
+                    doc.objects.remove(&orphan);
+                }
+                self.finish_block_change();
+                Ok(handle)
+            }
+            _ => Err("unsupported table operation".to_owned()),
+        }
+    }
+
+    fn finish_block_change(&mut self) {
+        self.app.tabs[self.tab].dirty = true;
+        self.app.tabs[self.tab].scene.invalidate_dependency_index();
+        self.app.tabs[self.tab].scene.bump_geometry();
+        self.publish_document_view();
     }
 
     /// Text and dimension style operations. They act on the active document
@@ -6812,6 +6999,144 @@ S.delete('Heading')
         let document = &app.tabs[0].scene.document;
         assert!(document.text_styles.get("Heading").is_some() && document.text_styles.get("Remarks").is_some(), "undo restored the text styles");
         assert!(document.dim_styles.get("Metric").is_some() && document.dim_styles.get("Metric2").is_some(), "undo restored the dimension styles");
+    }
+
+    /// Block definitions through Python over the real runner: create from
+    /// entities (with and without erasing them), modify, rename with inserts
+    /// following, guarded delete, DWG/DXF persistence and undo.
+    #[test]
+    fn audit_python_blocks_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dir = std::env::temp_dir();
+        let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+            let script = dir.join(format!("ocs_blocks_{tag}_{}.py", std::process::id()));
+            std::fs::write(&script, format!(concat!(
+                "def P(x, y, z): return {{'x': x, 'y': y, 'z': z}}\n",
+                "doc = ocs.active_document\nB = doc.blocks\nL = doc.layers\n",
+                "refused, accepted = [], []\n",
+                "def check(tag, fn):\n",
+                "    try:\n        fn()\n    except (RuntimeError, TypeError, ValueError):\n        refused.append(tag)\n",
+                "    else:\n        accepted.append(tag)\n",
+                "try:\n{body}\n",
+                "except Exception as error:\n",
+                "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
+                "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
+            ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
+            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            let _ = std::fs::remove_file(&script);
+        };
+        let report = |document: &CadDocument| -> (usize, Vec<String>) {
+            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+                .expect("script report layer");
+            let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
+            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+        };
+
+        run(&mut host, "build", r#"
+line = doc.create_entity('Line', start=P(0, 0, 0), end=P(4, 0, 0))
+circle = doc.create_entity('Circle', center=P(2, 2, 0), radius=1)
+B.create('Widget', [line, circle], base_point=(1, 1, 0), description='a widget')
+B.create('Widget2', [line.handle], erase_originals=True)
+doc.create_entity('Insert', block_name='Widget', insert_point=P(10, 0, 0))
+doc.create_entity('Insert', block_name='widget', insert_point=P(20, 0, 0))
+B.modify('Widget', explodable=False, description='a gadget')
+B.rename('Widget', 'Gadget')
+member = B['Gadget']['entities'][0]['handle']
+check('dup', lambda: B.create('gadget', [circle]))
+check('empty', lambda: B.create('E1', []))
+check('badname', lambda: B.create('a<b', [circle]))
+check('star', lambda: B.create('*U9', [circle]))
+check('missing_entity', lambda: B.create('E2', [999999]))
+check('twice', lambda: B.create('E3', [circle, circle]))
+check('nonfinite_base', lambda: B.create('E4', [circle], base_point=(1e999, 0, 0)))
+check('in_block', lambda: B.create('E5', [member]))
+check('unknown_key', lambda: ocs.block_operation('create', 'E6', {'entities': [circle.handle], 'origin': [0, 0, 0]}))
+check('rename_missing', lambda: B.rename('Nope', 'X'))
+check('rename_clash', lambda: B.rename('Gadget', 'WIDGET2'))
+check('rename_case', lambda: B.rename('Gadget', 'GADGET'))
+check('rename_star', lambda: B.rename('Gadget', '*Y'))
+check('delete_missing', lambda: B.delete('Nope'))
+check('delete_inserted', lambda: B.delete('Gadget'))
+check('delete_layout', lambda: B.delete('*Model_Space'))
+check('modify_none', lambda: B.modify('Gadget'))
+check('modify_missing', lambda: B.modify('Nope', description='x'))
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert_eq!(refused, 18);
+
+        let check_state = |label: &str, document: &CadDocument| {
+            assert!(document.block_records.get("Widget").is_none(), "{label}: old block name gone");
+            let members = |name: &str| -> Vec<EntityType> {
+                let record = document.block_records.get(name).unwrap_or_else(|| panic!("{label}: block {name} missing"));
+                document.entities().filter(|e| e.common().owner_handle == record.handle
+                    && !matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))).cloned().collect()
+            };
+            let gadget = members("Gadget");
+            assert_eq!(gadget.len(), 2, "{label}: Gadget members");
+            let line = gadget.iter().find_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: line"));
+            assert_eq!((line.start.x, line.start.y, line.end.x, line.end.y), (-1.0, -1.0, 3.0, -1.0), "{label}: shifted by -base");
+            let circle = gadget.iter().find_map(|e| match e { EntityType::Circle(c) => Some(c.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: circle"));
+            assert_eq!((circle.center.x, circle.center.y, circle.radius), (1.0, 1.0, 1.0), "{label}");
+            let record = document.block_records.get("Gadget").unwrap();
+            assert_eq!((record.base_point.x, record.base_point.y), (1.0, 1.0), "{label}: base point");
+            assert!(!record.explodable, "{label}: explodable");
+            if label == "DXF" {
+                // BLOCKER (cadcodec): the DXF BLOCK_RECORD reader/writer does not carry the
+                // description, so it is lost on a DXF save (DWG keeps it).
+                assert_eq!(record.description, "", "{label}: cadcodec now keeps the description; flip this canary");
+            } else {
+                assert_eq!(record.description, "a gadget", "{label}: description");
+            }
+            assert_eq!(members("Widget2").len(), 1, "{label}: Widget2 members");
+            let inserts: Vec<_> = document.entities().filter_map(|e| match e { EntityType::Insert(i) => Some(i.block_name.clone()), _ => None }).collect();
+            assert_eq!(inserts.iter().filter(|n| n.as_str() == "Gadget").count(), 2, "{label}: inserts follow the rename: {inserts:?}");
+            // originals: Widget kept the circle and line in model space, Widget2 erased its line copy's source
+            let canvas_kinds: Vec<_> = document.entities().filter(|e| {
+                document.block_records.iter().any(|r| r.handle == e.common().owner_handle && r.is_layout())
+            }).map(|e| format!("{:?}", e).chars().take(6).collect::<String>()).collect();
+            assert_eq!(canvas_kinds.iter().filter(|k| k.starts_with("Circle")).count(), 1, "{label}: circle original kept: {canvas_kinds:?}");
+            assert_eq!(canvas_kinds.iter().filter(|k| k.starts_with("Line(")).count(), 0, "{label}: line original erased: {canvas_kinds:?}");
+        };
+        check_state("live", host.document());
+        assert_eq!(host.document().block_records.get("Gadget").unwrap().description, "a gadget");
+        let dwg = crate::io::load_bytes("blocks.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("blocks.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        check_state("DWG", &dwg);
+        check_state("DXF", &dxf);
+
+        run(&mut host, "destroy", r#"
+for entity in list(doc.entities):
+    if entity.kind == 'Insert':
+        doc.delete_entity(entity)
+B.delete('Gadget')
+B.delete('Widget2')
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "{accepted:?}");
+        assert_eq!(refused, 0);
+        let document = host.document();
+        assert!(document.block_records.get("Gadget").is_none() && document.block_records.get("Widget2").is_none());
+        assert!(!document.entities().any(|e| matches!(e, EntityType::Line(_))), "block members were removed with their definitions");
+        assert_eq!(document.entities().filter(|e| matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_))).count(), 0);
+
+        // U: the report layer and both block deletes; undoing them restores the definitions.
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(3);
+        let document = &app.tabs[0].scene.document;
+        let members = |name: &str| document.block_records.get(name).map(|r| r.entity_handles.len());
+        assert_eq!(members("Gadget"), Some(2), "undo restored Gadget with its members");
+        assert_eq!(members("Widget2"), Some(1), "undo restored Widget2");
     }
 
     #[test]

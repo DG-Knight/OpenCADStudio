@@ -1270,6 +1270,134 @@ mod ocs {
         Ok(vm.ctx.new_list(output).into())
     }
 
+    /// Block-definition change through the host. `op` is `create`
+    /// (`entities`, `base_point`, `erase_originals`, `description`), `modify`
+    /// (`description`, `explodable`, `scale_uniformly`), `rename` (`to`) or
+    /// `delete`. Returns the block record's handle.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn block_operation(op: String, name: String, options: PyObjectRef, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::TableOperation;
+        let options = if vm.is_none(&options) {
+            vm.ctx.new_dict()
+        } else {
+            options.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?
+        };
+        let present = |key: &str| -> PyResult<Option<PyObjectRef>> {
+            Ok(options.get_item_opt(key, vm)?.filter(|v| !vm.is_none(v)))
+        };
+        let operation = match op.as_str() {
+            "create" => {
+                ensure_known_entity_keys(&options, "block", &["entities", "base_point", "erase_originals", "description"], vm)?;
+                let handles = present("entities")?
+                    .ok_or_else(|| vm.new_value_error("ocs: a block needs entities".to_owned()))?
+                    .try_into_value::<Vec<u64>>(vm)?;
+                let base_point = match present("base_point")? {
+                    Some(value) => py_to_f64_array::<3>(value, vm)?,
+                    None => [0.0; 3],
+                };
+                TableOperation::BlockCreate {
+                    name,
+                    entities: handles.into_iter().map(Handle::new).collect(),
+                    base_point,
+                    erase_originals: get_opt_bool(&options, "erase_originals", vm)?,
+                    description: present("description")?.map(|v| v.try_into_value::<String>(vm)).transpose()?,
+                }
+            }
+            "modify" => {
+                ensure_known_entity_keys(&options, "block", &["description", "explodable", "scale_uniformly"], vm)?;
+                TableOperation::BlockModify {
+                    name,
+                    description: present("description")?.map(|v| v.try_into_value::<String>(vm)).transpose()?,
+                    explodable: present("explodable")?.map(|v| v.try_into_value::<bool>(vm)).transpose()?,
+                    scale_uniformly: present("scale_uniformly")?.map(|v| v.try_into_value::<bool>(vm)).transpose()?,
+                }
+            }
+            "rename" => {
+                ensure_known_entity_keys(&options, "block rename", &["to"], vm)?;
+                let to = options
+                    .get_item_opt("to", vm)?
+                    .ok_or_else(|| vm.new_value_error("ocs: rename needs the new name".to_owned()))?
+                    .try_into_value::<String>(vm)?;
+                TableOperation::BlockRename { from: name, to }
+            }
+            "delete" => {
+                ensure_known_entity_keys(&options, "block delete", &[], vm)?;
+                TableOperation::BlockDelete { name }
+            }
+            other => return Err(vm.new_value_error(format!("ocs.block_operation: unknown operation {other:?}"))),
+        };
+        let result = host_ctx::with_host(|host| host.table_operation(operation))
+            .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.block_operation: {error}")))
+    }
+
+    /// Every user block definition (layouts and anonymous blocks are omitted).
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn block_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        let rows = host_ctx::with_host(|host| {
+            let document = host.document();
+            let mut inserts = std::collections::HashMap::<String, usize>::new();
+            for entity in document.entities() {
+                if let acadrust::entities::EntityType::Insert(insert) = entity {
+                    *inserts.entry(insert.block_name.to_uppercase()).or_default() += 1;
+                }
+            }
+            document
+                .block_records
+                .iter()
+                .filter(|record| !record.is_layout() && !record.is_anonymous() && !record.flags.is_xref)
+                .map(|record| {
+                    let members: Vec<(u64, String)> = record
+                        .entity_handles
+                        .iter()
+                        .filter_map(|handle| document.get_entity(*handle))
+                        .map(|entity| {
+                            let kind = ocs_plugin_api::entity_coverage::entity_snapshot(entity)
+                                .ok()
+                                .and_then(|value| value.as_object().and_then(|o| o.keys().next().cloned()))
+                                .unwrap_or_else(|| "Unknown".to_owned());
+                            (entity.common().handle.value(), kind)
+                        })
+                        .collect();
+                    (
+                        record.clone(),
+                        members,
+                        inserts.get(&record.name.to_uppercase()).copied().unwrap_or(0),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        let mut output = Vec::with_capacity(rows.len());
+        for (record, members, insert_count) in rows {
+            let dict = vm.ctx.new_dict();
+            dict.set_item("handle", vm.new_pyobj(record.handle.value()), vm)?;
+            dict.set_item("name", vm.new_pyobj(record.name.clone()), vm)?;
+            dict.set_item("description", vm.new_pyobj(record.description.clone()), vm)?;
+            dict.set_item("explodable", vm.new_pyobj(record.explodable), vm)?;
+            dict.set_item("scale_uniformly", vm.new_pyobj(record.scale_uniformly), vm)?;
+            let base = [record.base_point.x, record.base_point.y, record.base_point.z];
+            dict.set_item("base_point", PyObjectRef::from(vm.ctx.new_list(base.iter().map(|v| vm.new_pyobj(*v)).collect())), vm)?;
+            dict.set_item("insert_count", vm.new_pyobj(insert_count), vm)?;
+            let entities = members
+                .into_iter()
+                .map(|(handle, kind)| {
+                    let member = vm.ctx.new_dict();
+                    member.set_item("handle", vm.new_pyobj(handle), vm)?;
+                    member.set_item("kind", vm.new_pyobj(kind), vm)?;
+                    Ok(PyObjectRef::from(member))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            dict.set_item("entities", PyObjectRef::from(vm.ctx.new_list(entities)), vm)?;
+            output.push(dict.into());
+        }
+        Ok(vm.ctx.new_list(output).into())
+    }
+
     /// Every layer with its full properties, in table order.
     #[cfg(feature = "experimental-host-model")]
     #[pyfunction]
