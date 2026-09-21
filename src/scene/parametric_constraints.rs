@@ -368,12 +368,23 @@ pub const DYNAMIC_DIMENSION_GLYPH: &str = "\u{1F512}";
 pub const DYNAMIC_DIMENSION_TEXT_PX: f32 = 12.0;
 
 /// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
-/// 1 = value, 2 = name=value.
-pub(crate) fn dynamic_dimension_text(name: &str, value: f64, format: u8) -> String {
+/// 1 = value, 2 = name=value. A plain number shows as typed (`d1=100`); an
+/// expression shows the expression under the reference's `fx:` prefix
+/// (`fx: d2=d1*2`).
+pub(crate) fn dynamic_dimension_text(name: &str, source: &str, value: f64, format: u8) -> String {
+    let source = source.trim();
+    let literal = source.parse::<f64>().is_ok();
+    let shown = if literal {
+        source.to_string()
+    } else {
+        measured_expression(value)
+    };
     match format {
         0 => name.to_string(),
-        1 => format!("{value:.4}"),
-        _ => format!("{name}={value:.4}"),
+        1 if literal => shown,
+        1 => format!("fx: {shown}"),
+        _ if literal => format!("{name}={shown}"),
+        _ => format!("fx: {name}={source}"),
     }
 }
 
@@ -1477,14 +1488,24 @@ impl super::Scene {
                 let Some(constraint) = set.get(*id) else {
                     continue;
                 };
-                let (name, value) = match &constraint.driving_param {
-                    Some(DrivingValue::Named(name)) => {
-                        (name.clone(), table.resolve(name).unwrap_or(f64::NAN))
+                let (name, source, value) = match &constraint.driving_param {
+                    Some(DrivingValue::Named(name)) => (
+                        name.clone(),
+                        table
+                            .get(name)
+                            .map(|parameter| parameter.source.clone())
+                            .unwrap_or_default(),
+                        table.resolve(name).unwrap_or(f64::NAN),
+                    ),
+                    Some(DrivingValue::Literal(value)) => {
+                        (String::new(), measured_expression(*value), *value)
                     }
-                    Some(DrivingValue::Literal(value)) => (String::new(), *value),
                     None => continue,
                 };
-                updates.push((*dimension, dynamic_dimension_text(&name, value, format)));
+                updates.push((
+                    *dimension,
+                    dynamic_dimension_text(&name, &source, value, format),
+                ));
             }
         }
         for (handle, text) in updates {
@@ -1615,19 +1636,30 @@ impl super::Scene {
                 .filter(|height| *height > 1e-9)
                 .unwrap_or(0.18);
             let scale = f64::from(band) * f64::from(DYNAMIC_DIMENSION_TEXT_PX) / text_height;
-            let current = crate::entities::dim_override::real(
-                &dimension.base().common.extended_data,
-                crate::entities::dim_override::DIMSCALE,
-            );
-            if current.is_some_and(|value| (value - scale).abs() < 1e-9) {
+            use crate::entities::dim_override as ov;
+            let xdata = &dimension.base().common.extended_data;
+            let current = ov::real(xdata, ov::DIMSCALE);
+            // The reference draws dynamic dimension text horizontally.
+            let horizontal = ov::int(xdata, ov::DIMTIH) == Some(1) && ov::int(xdata, ov::DIMTOH) == Some(1);
+            if current.is_some_and(|value| (value - scale).abs() < 1e-9) && horizontal {
                 continue;
             }
-            crate::entities::dim_override::set(
+            ov::set(
                 &mut self.document,
                 handle,
-                crate::entities::dim_override::DIMSCALE,
+                ov::DIMSCALE,
                 Some(acadrust::xdata::XDataValue::Real(scale)),
             );
+            if !horizontal {
+                for code in [ov::DIMTIH, ov::DIMTOH] {
+                    ov::set(
+                        &mut self.document,
+                        handle,
+                        code,
+                        Some(acadrust::xdata::XDataValue::Integer16(1)),
+                    );
+                }
+            }
             changes.push((handle, super::ChangeKind::Modified));
         }
         if !changes.is_empty() {

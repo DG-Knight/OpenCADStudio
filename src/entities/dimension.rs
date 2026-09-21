@@ -6295,8 +6295,8 @@ fn dimension_text_is_outside(dim: &Dimension, style: Option<&DimStyle>) -> bool 
         }
 }
 
-/// Where a dynamic dimension's lock mark sits: just before the text on its
-/// baseline, with the direction that points away from the text.
+/// Where a dynamic dimension's lock mark sits: just after the (horizontal)
+/// text, with the direction that points away from the text.
 pub(crate) fn dynamic_dimension_lock_anchor(
     document: &CadDocument,
     dim: &Dimension,
@@ -6317,13 +6317,7 @@ pub(crate) fn dynamic_dimension_lock_anchor(
     let stack_scale = style.map(dimtfac_or_one).unwrap_or(1.0);
     let half_width = text_cells(&value, stack_scale) * text_height * CELL_WIDTH * 0.5;
     let pos = dimension_text_pos_f64(dim, style, text_height, dim_scale);
-    let rot = if dim.base().text_rotation.abs() > 1e-9 {
-        dim.base().text_rotation
-    } else {
-        dimension_text_natural_rotation(dim)
-    };
-    let (sr, cr) = rot.sin_cos();
-    let outward = Vector3::new(-cr, -sr, 0.0);
+    let outward = Vector3::new(1.0, 0.0, 0.0);
     Some((
         Vector3::new(
             pos.x + outward.x * half_width,

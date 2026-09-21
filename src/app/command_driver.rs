@@ -3611,6 +3611,7 @@ impl OpenCADStudio {
                 };
                 let text = dynamic_dimension_text(
                     &name,
+                    &expression,
                     value,
                     self.tabs[i].scene.constraint_name_format,
                 );
