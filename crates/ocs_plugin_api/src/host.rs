@@ -102,6 +102,49 @@ pub enum TableOperation {
     LayerDelete { name: String, erase_objects: bool },
     /// Make an existing layer current.
     LayerSetCurrent { name: String },
+    /// Create a text style; unset properties take the AutoCAD defaults.
+    TextStyleCreate { config: TextStyleConfig },
+    /// Change only the properties `config` sets on an existing text style.
+    TextStyleModify { config: TextStyleConfig },
+    /// Create a dimension style, optionally copying an existing one first.
+    /// `properties` is a JSON object of DimStyle fields (see the Python docs);
+    /// handles and xref fields are managed by the host and refused.
+    DimStyleCreate { name: String, copy_from: Option<String>, properties: String },
+    /// Change only the DimStyle fields the JSON object `properties` names.
+    DimStyleModify { name: String, properties: String },
+    /// Rename a text or dimension style; references to it follow. `Standard`
+    /// is never renamed and a case-only change is refused.
+    StyleRename { kind: TableStyleKind, from: String, to: String },
+    /// Delete a text or dimension style that is neither current nor in use.
+    /// `Standard` is never deleted.
+    StyleDelete { kind: TableStyleKind, name: String },
+    /// Make a text or dimension style current.
+    StyleSetCurrent { kind: TableStyleKind, name: String },
+}
+
+/// The style tables `TableOperation` can rename, delete or make current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TableStyleKind {
+    Text,
+    Dim,
+}
+
+/// Properties for creating or changing a text style; `None` leaves a property
+/// as it was (or the default for a new style). Angles are in radians.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TextStyleConfig {
+    pub name: String,
+    /// Fixed height; `0` lets each text choose its own.
+    pub height: Option<f64>,
+    pub width_factor: Option<f64>,
+    pub oblique_angle: Option<f64>,
+    pub font_file: Option<String>,
+    pub big_font_file: Option<String>,
+    pub true_type_font: Option<String>,
+    pub backward: Option<bool>,
+    pub upside_down: Option<bool>,
+    pub vertical: Option<bool>,
+    pub annotative: Option<bool>,
 }
 
 /// A kernel operation on ACIS-backed solids (API v7, additive). The host owns

@@ -155,6 +155,36 @@ renaming or deleting layer `0` or `Defpoints`, deleting or freezing the current
 layer, deleting an externally referenced layer, and modifying with no properties.
 Making a layer current is a setting, not an undo step.
 
+### Text and dimension styles: `doc.text_styles`, `doc.dim_styles`
+
+```python
+S, D = ocs.active_document.text_styles, ocs.active_document.dim_styles
+S.create("Title", height=5, width_factor=0.8, oblique=15, font="romans", annotative=True)
+S.modify("Title", height=6)
+D.create("Metric", dimscale=2, dimtxt=3.5, dimtxsty="Title")     # DimStyle field names
+D.create("Metric2", copy_from="Metric", dimtxt=4)
+S.rename("Title", "Heading")      # entities, dimension styles and tables follow
+S.set_current("Heading"); D.set_current("Metric")
+D.delete("Metric2"); S["Heading"]["height"]; D.current["name"]; S.names()
+```
+
+Same guarantees as layers: host-validated, one undo step, a refusal raises
+`RuntimeError` and changes nothing (making a style current is a setting).
+Text properties: `height` (0 = each text chooses), `width_factor` (0-100),
+`oblique` (degrees, within 85), `font`, `big_font`, `backward`, `upside_down`,
+`vertical`, `annotative`; use `font="arial.ttf"` for a TrueType face, because
+the codec does not persist a separate family name. Dimension styles use the
+`DimStyle` field names (`dimscale`, `dimtxt`, `dimasz`, ...); records list all
+of them. Handles, `xref_*` fields and `name` are host-managed and refused, unknown
+fields and wrongly typed values are refused, `dimscale` and `dimtxt` must be
+positive, and `dimtxsty` must name an existing text style. `Standard` is never
+renamed or deleted; a style that is current or still referenced is never deleted;
+a case-only rename is refused. Style operations act on the active document.
+
+Known persistence limits (cadcodec, see `docs/cadcodec-reader-gaps.md`): a DXF
+save drops the backward/upside-down flags of a text style and does not restore a
+dimension style's `dimtxsty` name (the handle link survives); DWG keeps both.
+
 ### Historical command-replay experiment (not in the default build)
 
 The following records an earlier experiment. The bundled build does **not**

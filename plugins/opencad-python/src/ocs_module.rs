@@ -952,6 +952,7 @@ mod ocs {
         Ok(vm.ctx.new_list(output).into())
     }
 
+    #[cfg(feature = "experimental-host-model")]
     fn layer_options(
         name: String,
         options: &rustpython_vm::builtins::PyDictRef,
@@ -1022,6 +1023,7 @@ mod ocs {
     /// Layer-table change through the host: `op` is `create`, `modify`,
     /// `rename` (`options={"to": ...}`), `delete` (`options={"erase_objects": bool}`)
     /// or `set_current`. Returns the layer's handle.
+    #[cfg(feature = "experimental-host-model")]
     #[pyfunction]
     fn layer_operation(op: String, name: String, options: PyObjectRef, vm: &VirtualMachine) -> PyResult<u64> {
         use ocs_plugin_api::host::TableOperation;
@@ -1056,7 +1058,220 @@ mod ocs {
             .map_err(|error| vm.new_runtime_error(format!("ocs.layer_operation: {error}")))
     }
 
+    /// Convert a Python value (None, bool, int, float, str, list/tuple, dict
+    /// with string keys) to JSON.
+    #[cfg(feature = "experimental-host-model")]
+    fn py_to_json(value: &PyObjectRef, vm: &VirtualMachine) -> PyResult<serde_json::Value> {
+        use rustpython_vm::builtins::{PyDict, PyFloat, PyInt, PyList, PyStr, PyTuple};
+        use rustpython_vm::AsObject;
+        if vm.is_none(value) {
+            return Ok(serde_json::Value::Null);
+        }
+        if let Ok(flag) = value.clone().try_into_value::<bool>(vm) {
+            if value.class().is(vm.ctx.types.bool_type) {
+                return Ok(serde_json::Value::Bool(flag));
+            }
+        }
+        if value.downcast_ref::<PyInt>().is_some() {
+            return Ok(serde_json::Value::from(value.clone().try_into_value::<i64>(vm)?));
+        }
+        if value.downcast_ref::<PyFloat>().is_some() {
+            let number = value.clone().try_into_value::<f64>(vm)?;
+            return serde_json::Number::from_f64(number)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| vm.new_value_error("ocs: numbers must be finite".to_owned()));
+        }
+        if value.downcast_ref::<PyStr>().is_some() {
+            return Ok(serde_json::Value::String(value.clone().try_into_value::<String>(vm)?));
+        }
+        if let Some(list) = value.downcast_ref::<PyList>() {
+            let items: Vec<PyObjectRef> = list.borrow_vec().to_vec();
+            return items.iter().map(|item| py_to_json(item, vm)).collect::<PyResult<Vec<_>>>().map(serde_json::Value::Array);
+        }
+        if let Some(tuple) = value.downcast_ref::<PyTuple>() {
+            return tuple.iter().map(|item| py_to_json(item, vm)).collect::<PyResult<Vec<_>>>().map(serde_json::Value::Array);
+        }
+        if let Some(dict) = value.downcast_ref::<PyDict>() {
+            let mut map = serde_json::Map::new();
+            for key in dict.keys_vec() {
+                let name = key.clone().try_into_value::<String>(vm)?;
+                let item = dict.get_item(&*key, vm)?;
+                map.insert(name, py_to_json(&item, vm)?);
+            }
+            return Ok(serde_json::Value::Object(map));
+        }
+        Err(vm.new_type_error("ocs: unsupported value in a style property".to_owned()))
+    }
+
+    #[cfg(feature = "experimental-host-model")]
+    fn style_kind(kind: &str, vm: &VirtualMachine) -> PyResult<ocs_plugin_api::host::TableStyleKind> {
+        match kind {
+            "text" => Ok(ocs_plugin_api::host::TableStyleKind::Text),
+            "dim" => Ok(ocs_plugin_api::host::TableStyleKind::Dim),
+            other => Err(vm.new_value_error(format!("ocs.style_operation: unknown style kind {other:?}"))),
+        }
+    }
+
+    /// Text/dimension style change through the host. `kind` is `text` or `dim`;
+    /// `op` is `create`, `modify`, `rename` (`{"to": ...}`), `delete` or
+    /// `set_current`. Text options: `height`, `width_factor`, `oblique`
+    /// (degrees), `font`, `big_font`, `backward`,
+    /// `upside_down`, `vertical`, `annotative`. Dimension options are DimStyle
+    /// field names (plus `copy_from` on create). Returns the style's handle.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn style_operation(kind: String, op: String, name: String, options: PyObjectRef, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::{TableOperation, TextStyleConfig};
+        let style_kind = style_kind(&kind, vm)?;
+        let options = if vm.is_none(&options) {
+            vm.ctx.new_dict()
+        } else {
+            options.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?
+        };
+        let operation = match (op.as_str(), kind.as_str()) {
+            ("rename", _) => {
+                ensure_known_entity_keys(&options, "style rename", &["to"], vm)?;
+                let to = options
+                    .get_item_opt("to", vm)?
+                    .ok_or_else(|| vm.new_value_error("ocs: rename needs the new name".to_owned()))?
+                    .try_into_value::<String>(vm)?;
+                TableOperation::StyleRename { kind: style_kind, from: name, to }
+            }
+            ("delete", _) => {
+                ensure_known_entity_keys(&options, "style delete", &[], vm)?;
+                TableOperation::StyleDelete { kind: style_kind, name }
+            }
+            ("set_current", _) => TableOperation::StyleSetCurrent { kind: style_kind, name },
+            ("create" | "modify", "text") => {
+                ensure_known_entity_keys(
+                    &options,
+                    "text style",
+                    &["height", "width_factor", "oblique", "font", "big_font", "backward", "upside_down", "vertical", "annotative"],
+                    vm,
+                )?;
+                let present = |key: &str| -> PyResult<Option<PyObjectRef>> {
+                    Ok(options.get_item_opt(key, vm)?.filter(|v| !vm.is_none(v)))
+                };
+                let number = |key: &str| -> PyResult<Option<f64>> {
+                    present(key)?.map(|v| py_number_to_f64(v, vm)).transpose()
+                };
+                let text = |key: &str| -> PyResult<Option<String>> {
+                    present(key)?.map(|v| v.try_into_value::<String>(vm)).transpose()
+                };
+                let flag = |key: &str| -> PyResult<Option<bool>> {
+                    present(key)?.map(|v| v.try_into_value::<bool>(vm)).transpose()
+                };
+                let config = TextStyleConfig {
+                    name,
+                    height: number("height")?,
+                    width_factor: number("width_factor")?,
+                    oblique_angle: number("oblique")?.map(f64::to_radians),
+                    font_file: text("font")?,
+                    big_font_file: text("big_font")?,
+                    backward: flag("backward")?,
+                    upside_down: flag("upside_down")?,
+                    vertical: flag("vertical")?,
+                    annotative: flag("annotative")?,
+                    ..Default::default()
+                };
+                if op == "create" {
+                    TableOperation::TextStyleCreate { config }
+                } else {
+                    TableOperation::TextStyleModify { config }
+                }
+            }
+            ("create" | "modify", "dim") => {
+                let copy_from = if op == "create" {
+                    options.get_item_opt("copy_from", vm)?.filter(|v| !vm.is_none(v))
+                        .map(|v| v.try_into_value::<String>(vm)).transpose()?
+                } else {
+                    None
+                };
+                let properties = vm.ctx.new_dict();
+                for key in options.keys_vec() {
+                    if key.clone().try_into_value::<String>(vm)? != "copy_from" {
+                        properties.set_item(&*key, options.get_item(&*key, vm)?, vm)?;
+                    }
+                }
+                let properties = py_to_json(&PyObjectRef::from(properties), vm)?.to_string();
+                if op == "create" {
+                    TableOperation::DimStyleCreate { name, copy_from, properties }
+                } else {
+                    TableOperation::DimStyleModify { name, properties }
+                }
+            }
+            (other, _) => return Err(vm.new_value_error(format!("ocs.style_operation: unknown operation {other:?}"))),
+        };
+        let result = host_ctx::with_host(|host| host.table_operation(operation))
+            .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.style_operation: {error}")))
+    }
+
+    /// Every text style with its properties (`oblique` in degrees).
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn text_style_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        let rows = host_ctx::with_host(|host| {
+            let document = host.document();
+            let current = document.header.current_text_style_name.to_uppercase();
+            document
+                .text_styles
+                .iter()
+                .map(|style| (style.clone(), style.name.to_uppercase() == current))
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        let mut output = Vec::with_capacity(rows.len());
+        for (style, is_current) in rows {
+            let dict = vm.ctx.new_dict();
+            dict.set_item("handle", vm.new_pyobj(style.handle.value()), vm)?;
+            dict.set_item("name", vm.new_pyobj(style.name.clone()), vm)?;
+            dict.set_item("height", vm.new_pyobj(style.height), vm)?;
+            dict.set_item("width_factor", vm.new_pyobj(style.width_factor), vm)?;
+            dict.set_item("oblique", vm.new_pyobj(style.oblique_angle.to_degrees()), vm)?;
+            dict.set_item("font", vm.new_pyobj(style.font_file.clone()), vm)?;
+            dict.set_item("big_font", vm.new_pyobj(style.big_font_file.clone()), vm)?;
+            dict.set_item("backward", vm.new_pyobj(style.flags.backward), vm)?;
+            dict.set_item("upside_down", vm.new_pyobj(style.flags.upside_down), vm)?;
+            dict.set_item("vertical", vm.new_pyobj(style.is_vertical), vm)?;
+            dict.set_item("annotative", vm.new_pyobj(style.annotative), vm)?;
+            dict.set_item("current", vm.new_pyobj(is_current), vm)?;
+            output.push(dict.into());
+        }
+        Ok(vm.ctx.new_list(output).into())
+    }
+
+    /// Every dimension style with all of its DimStyle fields plus `current`.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn dim_style_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        let rows = host_ctx::with_host(|host| {
+            let document = host.document();
+            let current = document.header.current_dimstyle_name.to_uppercase();
+            document
+                .dim_styles
+                .iter()
+                .map(|style| {
+                    let mut value = serde_json::to_value(style).unwrap_or(serde_json::Value::Null);
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("current".to_owned(), (style.name.to_uppercase() == current).into());
+                    }
+                    value
+                })
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        let output = rows
+            .into_iter()
+            .map(|value| snapshot_value_to_py(value, vm))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(vm.ctx.new_list(output).into())
+    }
+
     /// Every layer with its full properties, in table order.
+    #[cfg(feature = "experimental-host-model")]
     #[pyfunction]
     fn layer_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         use acadrust::types::{LineWeight, Transparency};

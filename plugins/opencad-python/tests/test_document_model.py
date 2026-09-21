@@ -36,6 +36,9 @@ class DocumentModelTests(unittest.TestCase):
             poll_input=lambda token: {"status": "point", "point": [1, 2, 3]},
             layer_records=lambda: [{"name": "0", "current": True}, {"name": "Walls", "current": False}],
             layer_operation=lambda op, name, options: self.calls.append((op, name, options)) or 9,
+            text_style_records=lambda: [{"name": n, "current": n == "Standard"} for n in ("Standard", "Title", "Notes")],
+            dim_style_records=lambda: [{"name": n, "current": n == "Standard"} for n in ("Standard", "Metric")],
+            style_operation=lambda kind, op, name, options: self.calls.append((kind, op, name, options)) or 9,
         )
         namespace = {"ocs": self.ocs}
         exec(MODEL.read_text(), namespace)
@@ -71,6 +74,25 @@ class DocumentModelTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             layers.create("New", colour=1)
         self.assertEqual(len(self.calls), 2)
+
+    def test_text_and_dim_styles(self):
+        text, dim = self.doc.text_styles, self.doc.dim_styles
+        self.assertEqual(text.current["name"], "Standard")
+        self.assertEqual(text["TITLE"]["name"], "Title")
+        text.create("Notes", height=2.5, font=None, oblique=10)
+        self.assertEqual(self.calls[-1], ("text", "create", "Notes", {"height": 2.5, "oblique": 10}))
+        with self.assertRaises(TypeError):
+            text.create("Bad", true_type_font="Arial")
+        with self.assertRaises(TypeError):
+            text.modify("Title", fnt="x")
+        dim.create("Metric", copy_from="Standard", dimscale=2)
+        self.assertEqual(self.calls[-1], ("dim", "create", "Metric", {"dimscale": 2, "copy_from": "Standard"}))
+        dim.modify("Standard", dimtxt=3)
+        self.assertEqual(self.calls[-1], ("dim", "modify", "Standard", {"dimtxt": 3}))
+        dim.delete("Metric")
+        self.assertEqual(self.calls[-1], ("dim", "delete", "Metric", None))
+        dim.set_current("Standard")
+        self.assertEqual(self.calls[-1], ("dim", "set_current", "Standard", None))
 
     def test_create_and_delete_use_document_model(self):
         line = self.doc.create_entity("Line", start={"x": 0, "y": 0, "z": 0},

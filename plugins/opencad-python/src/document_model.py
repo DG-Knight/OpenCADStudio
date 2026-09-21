@@ -280,10 +280,128 @@ class _Layers:
         return self[name]
 
 
+class _Styles:
+    """Common lookup, rename, delete and current-style handling for the text
+    and dimension style tables. Every change is validated by the host, is one
+    undo step (making a style current is a setting), and a refusal raises
+    `RuntimeError` without changing the drawing. `Standard` is never renamed
+    or deleted, and a style that is current or in use is never deleted."""
+
+    _KIND = None
+    _RECORDS = None
+
+    def _records(self):
+        return getattr(ocs, self._RECORDS)()
+
+    def __iter__(self):
+        return iter(self._records())
+
+    def __len__(self):
+        return len(self._records())
+
+    def __contains__(self, name):
+        wanted = str(name).strip().upper()
+        return any(r["name"].upper() == wanted for r in self._records())
+
+    def __getitem__(self, name):
+        wanted = str(name).strip().upper()
+        for record in self._records():
+            if record["name"].upper() == wanted:
+                return record
+        raise KeyError(name)
+
+    def get(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+    def names(self):
+        return [r["name"] for r in self._records()]
+
+    @property
+    def current(self):
+        for record in self._records():
+            if record["current"]:
+                return record
+        return None
+
+    @current.setter
+    def current(self, name):
+        self.set_current(name)
+
+    def _run(self, op, name, options=None):
+        ocs.style_operation(self._KIND, op, str(name), options)
+
+    def rename(self, name, new_name):
+        self._run("rename", name, {"to": str(new_name)})
+        return self[new_name]
+
+    def delete(self, name):
+        self._run("delete", name)
+
+    def set_current(self, name):
+        self._run("set_current", name)
+        return self[name]
+
+
+class _TextStyles(_Styles):
+    """`ocs.active_document.text_styles`. Properties: `height` (0 = each text
+    chooses), `width_factor`, `oblique` (degrees, within 85), `font` (SHX file),
+    `big_font`, `backward`, `upside_down`, `vertical`, `annotative`. Give a
+    TrueType face as a font file name such as `font="arial.ttf"`: the codec does
+    not persist a separate TrueType family name, so it is not exposed."""
+
+    _KIND = "text"
+    _RECORDS = "text_style_records"
+    _KEYS = ("height", "width_factor", "oblique", "font", "big_font",
+             "backward", "upside_down", "vertical", "annotative")
+
+    def _options(self, properties):
+        unknown = [k for k in properties if k not in self._KEYS]
+        if unknown:
+            raise TypeError("unknown text style propert%s: %s" % ("y" if len(unknown) == 1 else "ies", ", ".join(sorted(unknown))))
+        return {k: v for k, v in properties.items() if v is not None}
+
+    def create(self, name, **properties):
+        self._run("create", name, self._options(properties))
+        return self[name]
+
+    def modify(self, name, **properties):
+        self._run("modify", name, self._options(properties))
+        return self[name]
+
+
+class _DimStyles(_Styles):
+    """`ocs.active_document.dim_styles`. Records and properties use the DimStyle
+    field names (`dimscale`, `dimtxt`, `dimasz`, `dimtxsty` ...); handles and
+    xref fields are host-managed and refused. `create(..., copy_from="Other")`
+    starts from an existing style."""
+
+    _KIND = "dim"
+    _RECORDS = "dim_style_records"
+
+    def _options(self, properties):
+        return {k: v for k, v in properties.items() if v is not None or k == "dimclrd_true_color"}
+
+    def create(self, name, copy_from=None, **properties):
+        options = self._options(properties)
+        if copy_from is not None:
+            options["copy_from"] = str(copy_from)
+        self._run("create", name, options)
+        return self[name]
+
+    def modify(self, name, **properties):
+        self._run("modify", name, self._options(properties))
+        return self[name]
+
+
 class _Document:
     def __init__(self):
         self._pending = None
         self.layers = _Layers()
+        self.text_styles = _TextStyles()
+        self.dim_styles = _DimStyles()
         self.entities = _Entities(self)
         self.solids = _Solids(self)
 

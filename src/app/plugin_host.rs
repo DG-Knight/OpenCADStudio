@@ -1245,7 +1245,168 @@ impl<'a> HostSession<'a> {
                 self.app.set_current_layer_name(self.tab, &stored)?;
                 Ok(handle)
             }
+            other => self.style_operation(other),
         }
+    }
+
+    /// Text and dimension style operations. They act on the active document
+    /// because the shared style machinery (in-use scan, rename, ribbon sync) is
+    /// keyed by the active tab.
+    fn style_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+        use crate::app::style_ops::StyleKind;
+        use ocs_plugin_api::host::{TableOperation, TableStyleKind};
+        if self.tab != self.app.active_tab {
+            return Err("style operations act on the active document; switch to it first".to_owned());
+        }
+        let kind_of = |kind: TableStyleKind| match kind {
+            TableStyleKind::Text => StyleKind::Text,
+            TableStyleKind::Dim => StyleKind::Dim,
+        };
+        let stored = |doc: &CadDocument, kind: TableStyleKind, name: &str| -> Result<(String, Handle), String> {
+            let found = match kind {
+                TableStyleKind::Text => doc.text_styles.get(name).map(|s| (s.name.clone(), s.handle)),
+                TableStyleKind::Dim => doc.dim_styles.get(name).map(|s| (s.name.clone(), s.handle)),
+            };
+            found.ok_or_else(|| format!("{} style {name:?} does not exist", match kind {
+                TableStyleKind::Text => "text",
+                TableStyleKind::Dim => "dimension",
+            }))
+        };
+        match operation {
+            TableOperation::TextStyleCreate { config } => {
+                let name = validated_symbol_name(&config.name, "a text style name")?;
+                if self.app.style_exists(StyleKind::Text, &name) {
+                    return Err(format!("text style {name:?} already exists"));
+                }
+                let mut style = acadrust::tables::TextStyle::new(name.clone());
+                apply_text_style_config(&mut style, &config)?;
+                self.push_undo("Create text style");
+                let handle = self.document_mut().allocate_handle();
+                style.handle = handle;
+                self.document_mut().text_styles.add(style).map_err(|e| format!("the text style could not be created: {e}"))?;
+                self.finish_style_change(StyleKind::Text);
+                Ok(handle)
+            }
+            TableOperation::TextStyleModify { config } => {
+                let (name, handle) = stored(self.document(), TableStyleKind::Text, config.name.trim())?;
+                let mut style = self.document().text_styles.get(&name).cloned().expect("checked above");
+                let before = style.clone();
+                if config == (ocs_plugin_api::host::TextStyleConfig { name: config.name.clone(), ..Default::default() }) {
+                    return Err("no text style properties to change".to_owned());
+                }
+                apply_text_style_config(&mut style, &config)?;
+                if style == before {
+                    return Ok(handle);
+                }
+                self.push_undo("Modify text style");
+                if let Some(slot) = self.document_mut().text_styles.get_mut(&name) {
+                    *slot = style;
+                }
+                self.finish_style_change(StyleKind::Text);
+                Ok(handle)
+            }
+            TableOperation::DimStyleCreate { name, copy_from, properties } => {
+                let name = validated_symbol_name(&name, "a dimension style name")?;
+                if self.app.style_exists(StyleKind::Dim, &name) {
+                    return Err(format!("dimension style {name:?} already exists"));
+                }
+                let base = match &copy_from {
+                    Some(source) => {
+                        let (source, _) = stored(self.document(), TableStyleKind::Dim, source.trim())?;
+                        self.document().dim_styles.get(&source).cloned().expect("checked above")
+                    }
+                    None => acadrust::tables::DimStyle::new(name.clone()),
+                };
+                let mut style = apply_dim_style_json(self.document(), &base, &properties)?;
+                self.push_undo("Create dimension style");
+                let handle = self.document_mut().allocate_handle();
+                style.handle = handle;
+                style.name = name;
+                self.document_mut().dim_styles.add(style).map_err(|e| format!("the dimension style could not be created: {e}"))?;
+                self.finish_style_change(StyleKind::Dim);
+                Ok(handle)
+            }
+            TableOperation::DimStyleModify { name, properties } => {
+                let (name, handle) = stored(self.document(), TableStyleKind::Dim, name.trim())?;
+                let base = self.document().dim_styles.get(&name).cloned().expect("checked above");
+                let style = apply_dim_style_json(self.document(), &base, &properties)?;
+                if style == base {
+                    return Ok(handle);
+                }
+                self.push_undo("Modify dimension style");
+                if let Some(slot) = self.document_mut().dim_styles.get_mut(&name) {
+                    *slot = style;
+                }
+                self.finish_style_change(StyleKind::Dim);
+                Ok(handle)
+            }
+            TableOperation::StyleRename { kind, from, to } => {
+                let (from, handle) = stored(self.document(), kind, from.trim())?;
+                if from.eq_ignore_ascii_case("Standard") {
+                    return Err("the Standard style cannot be renamed".to_owned());
+                }
+                let to = validated_symbol_name(&to, "a style name")?;
+                if from.eq_ignore_ascii_case(&to) {
+                    return Err("the new style name matches the current one (a case-only change is not supported)".to_owned());
+                }
+                if self.app.style_exists(kind_of(kind), &to) {
+                    return Err(format!("style {to:?} already exists"));
+                }
+                self.push_undo("Rename style");
+                self.app.rename_style_storage(kind_of(kind), &from, &to);
+                if kind == TableStyleKind::Text {
+                    // A dimension style names its text style; follow the rename.
+                    for dim in self.document_mut().dim_styles.iter_mut() {
+                        if dim.dimtxsty.eq_ignore_ascii_case(&from) {
+                            dim.dimtxsty = to.clone();
+                        }
+                    }
+                }
+                self.finish_style_change(kind_of(kind));
+                Ok(handle)
+            }
+            TableOperation::StyleDelete { kind, name } => {
+                let (name, handle) = stored(self.document(), kind, name.trim())?;
+                if name.eq_ignore_ascii_case("Standard") {
+                    return Err("the Standard style cannot be deleted".to_owned());
+                }
+                if self.app.style_in_use(kind_of(kind), &name) {
+                    return Err(format!("style {name:?} is current or still in use"));
+                }
+                self.push_undo("Delete style");
+                if !self.app.remove_style_storage(kind_of(kind), &name) {
+                    return Err("the style could not be deleted".to_owned());
+                }
+                self.finish_style_change(kind_of(kind));
+                Ok(handle)
+            }
+            TableOperation::StyleSetCurrent { kind, name } => {
+                let (name, handle) = stored(self.document(), kind, name.trim())?;
+                let header = &mut self.document_mut().header;
+                match kind {
+                    TableStyleKind::Text => {
+                        header.current_text_style_handle = handle;
+                        header.current_text_style_name = name.clone();
+                        self.app.ribbon.active_text_style = name;
+                    }
+                    TableStyleKind::Dim => {
+                        header.current_dimstyle_handle = handle;
+                        header.current_dimstyle_name = name.clone();
+                        self.app.ribbon.active_dim_style = name;
+                    }
+                }
+                self.app.tabs[self.tab].dirty = true;
+                Ok(handle)
+            }
+            _ => Err("unsupported table operation".to_owned()),
+        }
+    }
+
+    fn finish_style_change(&mut self, kind: crate::app::style_ops::StyleKind) {
+        self.app.tabs[self.tab].dirty = true;
+        self.app.after_style_change(kind);
+        self.app.tabs[self.tab].scene.bump_geometry();
+        self.publish_document_view();
     }
 
     fn finish_layer_change(&mut self, names: &[String]) {
@@ -1320,17 +1481,123 @@ impl<'a> HostSession<'a> {
 
 /// A layer name AutoCAD would accept: 1-255 characters, none of `<>/\":;?*|=\``.
 fn validated_layer_name(raw: &str) -> Result<String, String> {
+    validated_symbol_name(raw, "a layer name")
+}
+
+/// A symbol-table name AutoCAD would accept (layers, styles): 1-255 characters,
+/// none of `<>/\":;?*|=` or a backquote, and no control characters.
+fn validated_symbol_name(raw: &str, what: &str) -> Result<String, String> {
     let name = raw.trim();
     if name.is_empty() {
-        return Err("a layer name cannot be empty".to_owned());
+        return Err(format!("{what} cannot be empty"));
     }
     if name.chars().count() > 255 {
-        return Err("a layer name is limited to 255 characters".to_owned());
+        return Err(format!("{what} is limited to 255 characters"));
     }
     if let Some(bad) = name.chars().find(|c| "<>/\\\":;?*|=`".contains(*c) || c.is_control()) {
-        return Err(format!("a layer name cannot contain {bad:?}"));
+        return Err(format!("{what} cannot contain {bad:?}"));
     }
     Ok(name.to_owned())
+}
+
+fn apply_text_style_config(
+    style: &mut acadrust::tables::TextStyle,
+    config: &ocs_plugin_api::host::TextStyleConfig,
+) -> Result<(), String> {
+    let text = |what: &str, value: &str| {
+        if value.chars().any(|c| c.is_control()) || value.chars().count() > 255 {
+            Err(format!("{what} must be text of at most 255 characters"))
+        } else {
+            Ok(value.trim().to_owned())
+        }
+    };
+    if let Some(height) = config.height {
+        if !height.is_finite() || height < 0.0 {
+            return Err("text style height must be finite and not negative (0 = variable)".to_owned());
+        }
+        style.height = height;
+    }
+    if let Some(width) = config.width_factor {
+        if !width.is_finite() || width <= 0.0 || width > 100.0 {
+            return Err("text style width factor must be greater than 0 and at most 100".to_owned());
+        }
+        style.width_factor = width;
+    }
+    if let Some(angle) = config.oblique_angle {
+        if !angle.is_finite() || angle.abs() > 85f64.to_radians() + 1e-9 {
+            return Err("text style oblique angle must be within 85 degrees either way".to_owned());
+        }
+        style.oblique_angle = angle;
+    }
+    if let Some(font) = &config.font_file {
+        style.font_file = text("font file", font)?;
+    }
+    if let Some(font) = &config.big_font_file {
+        style.big_font_file = text("big font file", font)?;
+    }
+    if let Some(font) = &config.true_type_font {
+        style.true_type_font = text("TrueType font", font)?;
+    }
+    if let Some(value) = config.backward {
+        style.flags.backward = value;
+    }
+    if let Some(value) = config.upside_down {
+        style.flags.upside_down = value;
+    }
+    if let Some(value) = config.vertical {
+        style.is_vertical = value;
+    }
+    if let Some(value) = config.annotative {
+        style.annotative = value;
+    }
+    if style.font_file.is_empty() && style.true_type_font.is_empty() {
+        return Err("a text style needs a font file or a TrueType font".to_owned());
+    }
+    Ok(())
+}
+
+/// Apply a JSON object of DimStyle fields on top of `base`. Handles and xref
+/// fields belong to the host and the name is set separately, so those keys are
+/// refused; unknown keys and wrongly typed values are refused too. `dimtxsty`
+/// must name an existing text style, whose handle is linked here.
+fn apply_dim_style_json(
+    doc: &CadDocument,
+    base: &acadrust::tables::DimStyle,
+    properties: &str,
+) -> Result<acadrust::tables::DimStyle, String> {
+    let patch: serde_json::Value = serde_json::from_str(properties)
+        .map_err(|e| format!("dimension style properties are not valid JSON: {e}"))?;
+    let serde_json::Value::Object(patch) = patch else {
+        return Err("dimension style properties must be an object".to_owned());
+    };
+    let mut value = serde_json::to_value(base).map_err(|e| e.to_string())?;
+    let object = value.as_object_mut().ok_or("dimension style did not serialize to an object")?;
+    for (key, new) in patch {
+        if key == "handle" || key == "name" || key.starts_with("xref_") || key.ends_with("_handle") {
+            return Err(format!("dimension style property {key:?} is managed by the host"));
+        }
+        if !object.contains_key(&key) {
+            return Err(format!("unknown dimension style property {key:?}"));
+        }
+        object.insert(key, new);
+    }
+    let mut style: acadrust::tables::DimStyle = serde_json::from_value(value)
+        .map_err(|e| format!("invalid dimension style value: {e}"))?;
+    if !(style.dimscale.is_finite() && style.dimscale > 0.0) {
+        return Err("dimscale must be greater than zero".to_owned());
+    }
+    if !(style.dimtxt.is_finite() && style.dimtxt > 0.0) {
+        return Err("dimtxt (text height) must be greater than zero".to_owned());
+    }
+    if !(style.dimasz.is_finite() && style.dimasz >= 0.0) {
+        return Err("dimasz (arrow size) cannot be negative".to_owned());
+    }
+    let Some(text_style) = doc.text_styles.get(&style.dimtxsty) else {
+        return Err(format!("dimtxsty {:?} is not a text style in this drawing", style.dimtxsty));
+    };
+    style.dimtxsty = text_style.name.clone();
+    style.dimtxsty_handle = text_style.handle;
+    Ok(style)
 }
 
 /// The stored spelling of `name` in the drawing's linetype table, loading the
@@ -6390,6 +6657,161 @@ L.delete('Structure', erase_objects=True)
         let document = &app.tabs[0].scene.document;
         assert!(document.layers.get("Structure").is_some(), "undo restored the layer");
         assert!(document.entities().any(|e| matches!(e, EntityType::Line(_))), "undo restored the line");
+    }
+
+    /// Text and dimension styles through Python over the real runner: create,
+    /// modify, copy, rename (references follow), delete and make current, with
+    /// refusals that change nothing, DWG/DXF persistence and one-step undo.
+    #[test]
+    fn audit_python_text_and_dim_styles_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dir = std::env::temp_dir();
+        let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+            let script = dir.join(format!("ocs_styles_{tag}_{}.py", std::process::id()));
+            std::fs::write(&script, format!(concat!(
+                "doc = ocs.active_document\nS = doc.text_styles\nD = doc.dim_styles\nL = doc.layers\n",
+                "refused, accepted = [], []\n",
+                "def check(tag, fn):\n",
+                "    try:\n        fn()\n    except (RuntimeError, TypeError, ValueError):\n        refused.append(tag)\n",
+                "    else:\n        accepted.append(tag)\n",
+                "try:\n{body}\n",
+                "except Exception as error:\n",
+                "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
+                "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
+            ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
+            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            let _ = std::fs::remove_file(&script);
+        };
+        let report = |document: &CadDocument| -> (usize, Vec<String>) {
+            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+                .expect("script report layer");
+            let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
+            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+        };
+
+        run(&mut host, "build", r#"
+S.create('Title', height=5, width_factor=0.8, oblique=15, font='romans', big_font='bigfont', backward=True, annotative=True)
+S.create('Notes', font='arial.ttf')
+S.modify('Title', height=6, upside_down=True)
+D.create('Metric', dimscale=2, dimtxt=3.5, dimasz=2.5, dimtxsty='Title')
+D.create('Metric2', copy_from='Metric', dimtxt=4)
+D.modify('Metric', dimscale=3)
+S.rename('Notes', 'Remarks')
+S.rename('Title', 'Heading')
+check('t_dup', lambda: S.create('heading'))
+check('t_badname', lambda: S.create('a|b'))
+check('t_height', lambda: S.create('T1', height=-1))
+check('t_width0', lambda: S.create('T2', width_factor=0))
+check('t_oblique', lambda: S.create('T3', oblique=89))
+check('t_nofont', lambda: S.create('T4', font=''))
+check('t_unknown', lambda: S.create('T5', fnt='x'))
+check('t_modmissing', lambda: S.modify('Nope', height=1))
+check('t_modnone', lambda: S.modify('Heading'))
+check('t_renameStandard', lambda: S.rename('Standard', 'Std2'))
+check('t_rename_case', lambda: S.rename('Heading', 'HEADING'))
+check('t_rename_clash', lambda: S.rename('Remarks', 'heading'))
+check('t_delStandard', lambda: S.delete('Standard'))
+check('t_delInUse', lambda: S.delete('Heading'))
+check('t_current_missing', lambda: S.set_current('Nope'))
+check('d_dup', lambda: D.create('metric'))
+check('d_unknown', lambda: D.create('D1', dimbogus=1))
+check('d_handle', lambda: D.create('D2', dimtxsty_handle=5))
+check('d_name', lambda: D.modify('Metric', name='X'))
+check('d_type', lambda: D.create('D3', dimscale='big'))
+check('d_scale0', lambda: D.create('D4', dimscale=0))
+check('d_txt', lambda: D.create('D5', dimtxt=-1))
+check('d_txsty', lambda: D.create('D6', dimtxsty='Nope'))
+check('d_copy_missing', lambda: D.create('D7', copy_from='Nope'))
+check('d_delStandard', lambda: D.delete('Standard'))
+check('d_modmissing', lambda: D.modify('Nope', dimscale=2))
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert_eq!(refused, 26);
+
+        let check_state = |label: &str, document: &CadDocument| {
+            assert!(document.text_styles.get("Title").is_none() && document.text_styles.get("Notes").is_none(), "{label}: old names gone");
+            let title = document.text_styles.get("Heading").unwrap_or_else(|| panic!("{label}: Heading missing"));
+            assert_eq!(title.height, 6.0, "{label}");
+            assert!((title.width_factor - 0.8).abs() < 1e-9, "{label}");
+            assert!((title.oblique_angle - 15f64.to_radians()).abs() < 1e-6, "{label}: oblique {}", title.oblique_angle);
+            assert_eq!(title.font_file.to_lowercase(), "romans", "{label}");
+            assert_eq!(title.big_font_file.to_lowercase(), "bigfont", "{label}");
+            if label == "DXF" {
+                // BLOCKER (cadcodec): the DXF STYLE writer hard-codes group 71 to 0, so the
+                // backward and upside-down generation flags are lost on a DXF save.
+                assert!(!title.flags.backward && !title.flags.upside_down, "{label}: cadcodec now keeps the flags; flip this canary");
+            } else {
+                assert!(title.flags.backward && title.flags.upside_down, "{label}");
+            }
+            let remarks = document.text_styles.get("Remarks").unwrap_or_else(|| panic!("{label}: Remarks missing"));
+            assert_eq!(remarks.font_file.to_lowercase(), "arial.ttf", "{label}: {remarks:?}");
+            let metric = document.dim_styles.get("Metric").unwrap_or_else(|| panic!("{label}: Metric missing"));
+            assert_eq!((metric.dimscale, metric.dimtxt, metric.dimasz), (3.0, 3.5, 2.5), "{label}");
+            if label == "DXF" {
+                // BLOCKER (cadcodec): the DXF DIMSTYLE reader keeps only the text-style handle
+                // (group 340) and never resolves `dimtxsty` from it, so the name reopens as
+                // "Standard". The handle survives and identifies the right style.
+                assert_eq!(metric.dimtxsty, "Standard", "{label}: cadcodec now resolves the name; flip this canary");
+                assert_eq!(metric.dimtxsty_handle, title.handle, "{label}: text style link by handle");
+            } else {
+                assert_eq!(metric.dimtxsty, "Heading", "{label}: dimtxsty followed the rename");
+            }
+            let copy = document.dim_styles.get("Metric2").unwrap_or_else(|| panic!("{label}: Metric2 missing"));
+            assert_eq!((copy.dimscale, copy.dimtxt), (2.0, 4.0), "{label}: copied before Metric changed");
+        };
+        check_state("live", host.document());
+        let live_title = host.document().text_styles.get("Heading").unwrap().clone();
+        assert!(live_title.annotative, "annotative is kept in the live style");
+        assert_eq!(host.document().dim_styles.get("Metric").unwrap().dimtxsty_handle, live_title.handle, "dim style links the text style handle");
+        let dwg = crate::io::load_bytes("styles.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("styles.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        check_state("DWG", &dwg);
+        check_state("DXF", &dxf);
+
+        run(&mut host, "destroy", r#"
+S.set_current('Remarks')
+D.set_current('Metric2')
+check('t_delcurrent', lambda: S.delete('Remarks'))
+check('d_delcurrent', lambda: D.delete('Metric2'))
+check('d_delInUseByCurrentOnly', lambda: D.delete('Metric2'))
+S.set_current('Standard')
+D.set_current('Standard')
+S.delete('Remarks')
+D.delete('Metric2')
+D.delete('Metric')
+S.delete('Heading')
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "{accepted:?}");
+        assert_eq!(refused, 3);
+        let document = host.document();
+        for name in ["Heading", "Remarks"] {
+            assert!(document.text_styles.get(name).is_none(), "{name} deleted");
+        }
+        for name in ["Metric", "Metric2"] {
+            assert!(document.dim_styles.get(name).is_none(), "{name} deleted");
+        }
+        assert_eq!(document.header.current_text_style_name, "Standard");
+        assert_eq!(document.header.current_dimstyle_name, "Standard");
+
+        // U: the final report layer and the four deletes are five steps; undoing
+        // them all brings the styles back.
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(5);
+        let document = &app.tabs[0].scene.document;
+        assert!(document.text_styles.get("Heading").is_some() && document.text_styles.get("Remarks").is_some(), "undo restored the text styles");
+        assert!(document.dim_styles.get("Metric").is_some() && document.dim_styles.get("Metric2").is_some(), "undo restored the dimension styles");
     }
 
     #[test]

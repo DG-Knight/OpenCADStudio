@@ -122,6 +122,15 @@ mod tests {
             TableOperation::LayerRename { from: "A".into(), to: "B".into() },
             TableOperation::LayerDelete { name: "A".into(), erase_objects: true },
             TableOperation::LayerSetCurrent { name: "A".into() },
+            TableOperation::TextStyleCreate {
+                config: crate::host::TextStyleConfig { name: "T".into(), height: Some(2.5), oblique_angle: Some(0.2), backward: Some(true), ..Default::default() },
+            },
+            TableOperation::TextStyleModify { config: crate::host::TextStyleConfig { name: "T".into(), font_file: Some("romans".into()), ..Default::default() } },
+            TableOperation::DimStyleCreate { name: "D".into(), copy_from: Some("Standard".into()), properties: "{\"dimscale\":2}".into() },
+            TableOperation::DimStyleModify { name: "D".into(), properties: "{}".into() },
+            TableOperation::StyleRename { kind: crate::host::TableStyleKind::Text, from: "A".into(), to: "B".into() },
+            TableOperation::StyleDelete { kind: crate::host::TableStyleKind::Dim, name: "A".into() },
+            TableOperation::StyleSetCurrent { kind: crate::host::TableStyleKind::Dim, name: "A".into() },
         ] {
             let bytes = bincode::serialize(&PluginRequest::TableOperation { operation: operation.clone() }).unwrap();
             assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),

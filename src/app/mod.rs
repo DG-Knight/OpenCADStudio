@@ -35,7 +35,7 @@ mod record_api;
 pub(crate) mod settings;
 mod shortcuts;
 mod startup;
-mod style_ops;
+pub(crate) mod style_ops;
 mod text_inline;
 mod tolerance_dialog;
 mod update;

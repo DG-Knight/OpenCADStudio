@@ -200,3 +200,16 @@ nothing changes. Python: `ocs.active_document.layers` (`create`, `modify`, `rena
 (19 refusals, live/DWG/DXF persistence of colour, lineweight, transparency, flags, linetype,
 description, rename following entities, `erase_objects` and one-step undo), an IPC round-trip test and a
 Python unit test. Next: text and dimension styles, linetypes, blocks, layouts; then headless commands.
+
+### 2026-09-21: text and dimension styles (`doc.text_styles`, `doc.dim_styles`)
+
+`TableOperation` grew `TextStyleCreate/Modify`, `DimStyleCreate/Modify` (DimStyle fields travel as a JSON
+object, so all 88 are settable with host validation; handles, xref fields and the name are refused),
+`StyleRename`, `StyleDelete`, `StyleSetCurrent`. The host reuses OCS's own style machinery (in-use scan,
+reference-following rename) by widening four `style_ops` methods to `pub(super)`, and additionally makes a
+renamed text style's name follow into dimension styles. Style operations require the active tab.
+Evidence: `audit_python_text_and_dim_styles_over_real_ipc` (26 refusals, live/DWG/DXF persistence, copy
+semantics, rename following references, current/delete guards, five-step undo), IPC round-trip and Python unit
+tests. Four cadcodec findings (STYLE flags and oblique units, DIMSTYLE name, `true_type_font`) are pinned by
+canaries and listed in `cadcodec-reader-gaps.md`. Next: linetypes, blocks, layouts; then headless commands.
+
