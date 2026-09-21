@@ -2368,16 +2368,13 @@ fn fix_viewport_status_flags(doc: &mut CadDocument) {
     }
 }
 
-/// The acadrust DXF reader still stores Shape rotation directly from group code
-/// 50 in degrees, while DWG and our own creation code store radians. Attribute
-/// entities and definitions are converted by the reader itself and must not be
-/// converted a second time here.
+/// The acadrust DXF reader still stores Shape rotation directly from group
+/// code 50 in degrees, while DWG and our own creation code store radians.
+/// Dimension angles and ATTRIB/ATTDEF rotation are converted inside the
+/// reader, so arms for them here would convert twice.
 fn fix_dxf_dimension_rotations(doc: &mut CadDocument) {
     for entity in doc.entities_mut() {
         match entity {
-            // Dimension angles (rotation / text / oblique) are converted
-            // degrees->radians inside the acadrust DXF reader now, so a
-            // dimension arm here would double-convert.
             EntityType::Shape(s) => {
                 s.rotation = s.rotation.to_radians();
             }

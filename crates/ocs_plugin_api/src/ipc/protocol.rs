@@ -140,6 +140,10 @@ pub enum PluginRequest {
     GetTabId,
     /// V5: ask the host for the filesystem path of the document in `tab_id`.
     DocumentPath { tab_id: u64 },
+    /// Add a layer to the active document with full initial properties.
+    AddLayer(crate::host::LayerConfig),
+    /// Modify specified properties of an existing layer in the active document.
+    ModifyLayer(crate::host::LayerConfig),
     /// Read a host-managed setting without nested command dispatch.
     GetSystemVariable { name: String },
     /// Change a host-managed setting without nested command dispatch.
@@ -177,6 +181,8 @@ pub enum PluginResponse {
     TabId(u64),
     /// V5: filesystem path of the document in the requested tab, if any.
     DocumentPath(Option<std::ffi::OsString>),
+    /// Optional entity handle (e.g. from AddLayer).
+    OptHandle(Option<Handle>),
     SystemVariable(Option<HostSettingValue>),
     SystemVariableResult(Result<HostSettingValue, String>),
     EntityTransactionResult(Result<(), String>),
