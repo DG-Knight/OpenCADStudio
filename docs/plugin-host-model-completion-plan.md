@@ -297,3 +297,15 @@ The generator now (1) refuses an unknown key in every nested record, naming the 
 `audit_python_nested_input_is_validated_over_real_ipc` (eight refusals with the right messages for LwPolyline, Polyline2D and
 PolygonMesh; nothing invalid reaches the drawing; the valid forms still create), and every existing per-kind lifecycle audit still passes.
 
+### 2026-09-21: PEDIT and the remaining arrays
+
+`doc.modify` gained `array_path`, `array_3d`, `polyline_close`, `polyline_open`, `polyline_width`, `polyline_reverse` and `polyline_join`,
+written against the prompts observed in `spike_command_runner_prompts` (PEDIT offers to turn a line or arc into a polyline and the wrapper
+accepts; the join option takes a selection, and its Enter completes the whole command). The default pick point for a polyline is its first
+vertex. `audit_python_modify_wrappers_over_real_ipc` checks: closed and opened flags, the widened polyline, the reversed vertex order, the
+joined polyline's three vertices with its line consumed, a line turned into a widened polyline (and the line gone), all five path-array
+positions (2600 to 2650 in 12.5 steps), and all eight members of the 3-D array (x 2700/2720, y 0/10, z 0/30). Finding: PEDIT's line-to-polyline
+step needs between 2 and 4 MiB of stack in a debug build, more than a test thread's 2 MiB, so that audit runs on a 64 MiB thread; the
+application's main thread has 8 MiB, and a release build uses far less. Not wrapped: PEDIT fit, spline, decurve, linetype generation and
+vertex editing.
+

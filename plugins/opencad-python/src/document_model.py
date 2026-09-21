@@ -678,6 +678,14 @@ class _Modify:
             return _pt(at)
         samples = ocs.curve_samples(_handle(entity), 4)
         if samples is None:
+            # A polyline: its first vertex lies on it.
+            data = ocs.entity_descriptor(_handle(entity)) or {}
+            vertices = data.get("vertices")
+            if vertices:
+                first = vertices[0]
+                where = first.get("location") or first.get("position") if isinstance(first, dict) else None
+                if where:
+                    return [float(where["x"]), float(where["y"]), float(where.get("z", 0.0))]
             raise ValueError("pass at=(x, y, z): the middle of this kind of entity is not known")
         middle = samples["vertices"][len(samples["vertices"]) // 2]
         return [middle[0], middle[1], samples["elevation"]]
@@ -820,6 +828,73 @@ class _Modify:
             lambda c: c.entity(entity, self._at(entity, at)),
             lambda c: c.enter(),
         ])
+
+    def array_path(self, entities, path, count, at=None):
+        """Array the entities along the curve `path`: `count` items counting the
+        original. Returns the copies."""
+        return self._run("ARRAYPATH", [
+            lambda c: c.entity(path, self._at(path, at)),
+            lambda c: c.text(count),
+        ], entities)
+
+    def array_3d(self, entities, rows, columns, levels, row_spacing, column_spacing, level_spacing):
+        """Three-dimensional rectangular array (rows along Y, columns along X, levels
+        along Z); counts include the original. Returns the copies."""
+        return self._run("ARRAY3D", [
+            lambda c: c.text(rows),
+            lambda c: c.text(columns),
+            lambda c: c.text(levels),
+            lambda c: c.text(row_spacing),
+            lambda c: c.text(column_spacing),
+            lambda c: c.text(level_spacing),
+        ], entities)
+
+    def _pedit(self, entity, steps, at=None):
+        """Run PEDIT on one entity: pick it, accept the offer to turn a line or arc
+        into a polyline, apply `steps`, then exit. Returns the polyline entity."""
+        handle = _handle(entity)
+        before = list(ocs.entity_handles())
+        with _Command("PEDIT") as command:
+            command.entity(handle, self._at(entity, at))
+            if "Turn it into one" in command.outcome["prompt"]:
+                command.token("Y")
+            for step in steps:
+                step(command)
+            if command.waiting:
+                command.token("X")
+            _finished(command, "PEDIT")
+        if handle in set(ocs.entity_handles()):
+            return self._document.entities[handle]
+        added = self._added(before)
+        if not added:
+            raise RuntimeError("PEDIT left no polyline")
+        return added[0]
+
+    def polyline_close(self, entity, at=None):
+        """Close an open polyline (a line or arc is first turned into one)."""
+        return self._pedit(entity, [lambda c: c.token("C")], at)
+
+    def polyline_open(self, entity, at=None):
+        """Open a closed polyline."""
+        return self._pedit(entity, [lambda c: c.token("O")], at)
+
+    def polyline_width(self, entity, width, at=None):
+        """Give every segment of a polyline the same width."""
+        return self._pedit(entity, [lambda c: c.token("W"), lambda c: c.text(width)], at)
+
+    def polyline_reverse(self, entity, at=None):
+        """Reverse a polyline's direction."""
+        return self._pedit(entity, [lambda c: c.token("R")], at)
+
+    def polyline_join(self, entity, others, at=None):
+        """Join lines, arcs and polylines that meet the polyline's ends into it."""
+        def join(c):
+            c.token("J")
+            self._select(others)
+            c.selection()
+            if c.waiting and "Join" in c.outcome["prompt"]:
+                c.enter()
+        return self._pedit(entity, [join], at)
 
     def erase(self, entities):
         before = len(list(ocs.entity_handles()))

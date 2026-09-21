@@ -8009,6 +8009,17 @@ LT.delete('Temp')
     /// the real OCS command and the resulting geometry is checked exactly.
     #[test]
     fn audit_python_modify_wrappers_over_real_ipc() {
+        // PEDIT's line-to-polyline conversion runs deep inside a nested command step; a debug
+        // build needs more than the 2 MiB a test thread gets (the application's main thread has 8 MiB).
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(modify_wrappers_audit_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn modify_wrappers_audit_body() {
         let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
             return;
         };
@@ -8030,9 +8041,9 @@ LT.delete('Temp')
                 "    else:\n        failed.append('ACCEPTED_' + tag)\n",
                 "def step(tag, fn):\n",
                 "    try:\n        return fn()\n    except Exception as error:\n",
-                "        failed.append(tag + '_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:70])\n",
+                "        failed.append(tag + '_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:45])\n",
                 "{body}\n",
-                "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(failed))\n",
+                "L.create(('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(failed))[:250])\n",
             ), body = body)).unwrap();
             assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
             let _ = std::fs::remove_file(&script);
@@ -8083,6 +8094,23 @@ st = line((1900, 0), (1910, 0))
 step('stretch', lambda: M.stretch((1908, -2, 0), (1912, 2, 0), (1910, 0, 0), (1915, 0, 0)))
 ln = line((2000, 0), (2010, 0))
 step('lengthen', lambda: M.lengthen(ln, 5, (2009, 0, 0)))
+def lwp(pts, closed=False): return doc.create_entity('LwPolyline', is_closed=closed, vertices=[{'location': P(*p)} for p in pts])
+pc = lwp([(2100, 0), (2110, 0), (2110, 10)])
+step('polyline_close', lambda: M.polyline_close(pc))
+po = lwp([(2150, 0), (2160, 0), (2160, 10)], True)
+step('polyline_open', lambda: M.polyline_open(po))
+pw = lwp([(2200, 0), (2210, 0), (2210, 10)])
+step('polyline_width', lambda: M.polyline_width(pw, 0.5))
+pr = lwp([(2300, 0), (2310, 0), (2310, 10)])
+step('polyline_reverse', lambda: M.polyline_reverse(pr))
+pj = lwp([(2400, 0), (2410, 0)]); pjl = line((2410, 0), (2420, 0))
+step('polyline_join', lambda: M.polyline_join(pj, [pjl]))
+pline = line((2500, 0), (2510, 0))
+step('polyline_from_line', lambda: M.polyline_width(pline, 1))
+pb = line((2600, 0), (2601, 0)); pp = line((2600, 50), (2650, 50))
+step('array_path', lambda: M.array_path([pb], pp, 5))
+a3 = line((2700, 0), (2701, 0))
+step('array_3d', lambda: M.array_3d([a3], 2, 2, 2, 10, 20, 30))
 step('run_line', lambda: doc.command('LINE 1100,0 1110,10'))
 def interactive():
     with doc.start_command('CIRCLE') as c:
@@ -8140,6 +8168,29 @@ check('bad_point', lambda: ocs.command_step('point', {'point': [0, 0, 0]}))
         assert!(has_line(1800.0, 0.0, 1802.0, 0.0) && has_line(1805.0, 0.0, 1810.0, 0.0) && !has_line(1800.0, 0.0, 1810.0, 0.0), "break: {:?}", describe());
         assert!(has_line(1900.0, 0.0, 1915.0, 0.0), "stretch: {:?}", describe());
         assert!(has_line(2000.0, 0.0, 2015.0, 0.0), "lengthen: {:?}", describe());
+        let polylines: Vec<acadrust::entities::LwPolyline> = host.document().entities().filter_map(|e| match e { EntityType::LwPolyline(p) => Some(p.clone()), _ => None }).collect();
+        let at = |x: f64| polylines.iter().find(|p| p.vertices.iter().any(|v| near(v.location.x, x)));
+        let pc = at(2100.0).expect("closed polyline");
+        assert!(pc.is_closed, "polyline_close");
+        assert!(!at(2150.0).expect("opened polyline").is_closed, "polyline_open");
+        let pw = at(2200.0).expect("widened polyline");
+        assert!(pw.constant_width == 0.5 || pw.vertices.iter().all(|v| v.start_width == 0.5 && v.end_width == 0.5), "polyline_width: {pw:?}");
+        let pr = at(2300.0).expect("reversed polyline");
+        assert_eq!((pr.vertices[0].location.x, pr.vertices[0].location.y), (2310.0, 10.0), "polyline_reverse: {pr:?}");
+        let pj = polylines.iter().find(|p| p.vertices.iter().any(|v| near(v.location.x, 2420.0))).expect("joined polyline");
+        assert_eq!(pj.vertices.len(), 3, "polyline_join: {pj:?}");
+        assert!(!has_line(2410.0, 0.0, 2420.0, 0.0), "polyline_join consumed the line: {:?}", describe());
+        let from_line = at(2500.0).expect("a line turned into a polyline");
+        assert!(from_line.constant_width == 1.0 || from_line.vertices.iter().all(|v| v.start_width == 1.0), "polyline_from_line: {from_line:?}");
+        assert!(!has_line(2500.0, 0.0, 2510.0, 0.0), "the line became the polyline: {:?}", describe());
+        let path_copies: Vec<(f64, f64)> = lines.iter().filter(|l| l.start.x > 2599.0 && l.start.x < 2660.0).map(|l| (l.start.x, l.start.y)).collect();
+        for x in [2600.0, 2612.5, 2625.0, 2637.5, 2650.0] {
+            assert!(path_copies.iter().any(|p| near(p.0, x) && near(p.1, 0.0)), "array_path item at x={x} (five evenly spaced along the 50-long path): {path_copies:?}");
+        }
+        let three_d: Vec<(f64, f64, f64)> = lines.iter().filter(|l| l.start.x > 2699.0 && l.start.x < 2725.0).map(|l| (l.start.x, l.start.y, l.start.z)).collect();
+        for x in [2700.0, 2720.0] { for y in [0.0, 10.0] { for z in [0.0, 30.0] {
+            assert!(three_d.iter().any(|p| near(p.0, x) && near(p.1, y) && near(p.2, z)), "array_3d member ({x},{y},{z}): {three_d:?}");
+        } } }
         assert!(circles.iter().any(|c| near(c.center.x, 1200.0) && near(c.radius, 3.0)), "start_command session: {circles:?}");
         assert!(host.app.tabs[0].active_cmd.is_none(), "no command is left running");
 
@@ -8234,62 +8285,19 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
             for l in lines { host.run_command(R::Run { line: (*l).into() }).unwrap(); }
             host.document().entities().map(|e| e.common().handle).collect()
         };
-        let cancel = |host: &mut HostSession<'_>| { let _ = host.run_command(R::Cancel); };
-        let hs = mk(&mut host, &["LINE 0,0 10,0", "LINE 0,0 0,10", "PLINE 50,0 60,0 60,10", "LINE 100,0 105,0", "LINE 105,0 110,5", "CIRCLE 200,0 5", "LINE 300,0 310,0"]);
-        // CHAMFER
-        run(&mut host, "CHAMFER start", R::Start { name: "CHAMFER".into() });
-        run(&mut host, "CHAMFER D", R::Token { text: "D".into() });
-        run(&mut host, "CHAMFER d1", R::Text { text: "2".into() });
-        run(&mut host, "CHAMFER d2", R::Text { text: "3".into() });
-        run(&mut host, "CHAMFER first", R::Entity { handle: hs[0], point: [8.0, 0.0, 0.0] });
-        run(&mut host, "CHAMFER second", R::Entity { handle: hs[1], point: [0.0, 8.0, 0.0] });
-        cancel(&mut host);
-        // ARRAYRECT
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[6]]);
-        run(&mut host, "ARRAYRECT start", R::Start { name: "ARRAYRECT".into() });
-        run(&mut host, "ARRAYRECT rows", R::Text { text: "2".into() });
-        run(&mut host, "ARRAYRECT cols", R::Text { text: "3".into() });
-        run(&mut host, "ARRAYRECT rowdist", R::Text { text: "10".into() });
-        run(&mut host, "ARRAYRECT coldist", R::Text { text: "20".into() });
-        run(&mut host, "ARRAYRECT enter", R::Enter);
-        cancel(&mut host);
-        // ARRAYPOLAR
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[6]]);
-        run(&mut host, "ARRAYPOLAR start", R::Start { name: "ARRAYPOLAR".into() });
-        run(&mut host, "ARRAYPOLAR center", R::Point { point: [300.0, 20.0, 0.0] });
-        run(&mut host, "ARRAYPOLAR count", R::Text { text: "4".into() });
-        run(&mut host, "ARRAYPOLAR angle", R::Text { text: "360".into() });
-        run(&mut host, "ARRAYPOLAR enter", R::Enter);
-        cancel(&mut host);
-        // EXPLODE
-        run(&mut host, "EXPLODE start", R::Start { name: "EXPLODE".into() });
-        run(&mut host, "EXPLODE entity", R::Entity { handle: hs[2], point: [55.0, 0.0, 0.0] });
-        cancel(&mut host);
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[2]]);
-        run(&mut host, "EXPLODE presel", R::Start { name: "EXPLODE".into() });
-        cancel(&mut host);
-        // JOIN
-        host.app.tabs[0].scene.replace_selection_exact(&[hs[3], hs[4]]);
-        run(&mut host, "JOIN presel", R::Start { name: "JOIN".into() });
-        run(&mut host, "JOIN enter", R::Enter);
-        cancel(&mut host);
-        // BREAK
-        run(&mut host, "BREAK start", R::Start { name: "BREAK".into() });
-        run(&mut host, "BREAK entity", R::Entity { handle: hs[6], point: [302.0, 0.0, 0.0] });
-        run(&mut host, "BREAK p2", R::Point { point: [305.0, 0.0, 0.0] });
-        cancel(&mut host);
-        // HATCH
-        run(&mut host, "HATCH start", R::Start { name: "HATCH".into() });
-        cancel(&mut host);
-        // STRETCH, LENGTHEN, JOIN, PEDIT
-        run(&mut host, "LENGTHEN start", R::Start { name: "LENGTHEN".into() });
-        cancel(&mut host);
+        let hs = mk(&mut host, &["PLINE 2400,0 2410,0", "LINE 2410,0 2420,0"]);
         run(&mut host, "PEDIT start", R::Start { name: "PEDIT".into() });
-        cancel(&mut host);
-        run(&mut host, "STRETCH start", R::Start { name: "STRETCH".into() });
-        cancel(&mut host);
+        run(&mut host, "pick", R::Entity { handle: hs[0], point: [2400.0, 0.0, 0.0] });
+        run(&mut host, "J", R::Token { text: "J".into() });
+        host.app.tabs[0].scene.replace_selection_exact(&[hs[1]]);
+        run(&mut host, "selection", R::Selection);
+        run(&mut host, "enter", R::Enter);
+        run(&mut host, "X", R::Token { text: "X".into() });
         eprintln!("SPIKE final entity count {}", host.document().entities().count());
     }
+
+
+
 
 
     #[test]

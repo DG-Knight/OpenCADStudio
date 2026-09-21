@@ -58,6 +58,8 @@ class DocumentModelTests(unittest.TestCase):
         outcome = {"status": "completed", "blocked_by": None, "command": "", "prompt": "", "accepts": [],
                    "options": [], "entities": 0, "added": 0, "unconsumed": [], "error": None}
         outcome.update(self.step_outcome.get(kind, {}))
+        if kind == "token" and options.get("text") == "X":
+            outcome["status"] = "completed"
         if kind in ("enter", "entity"):
             new = max(self.records) + 1
             self.records[new] = {"handle": new, "kind": "Line", "layer": "0", "_editable": True}
@@ -113,6 +115,20 @@ class DocumentModelTests(unittest.TestCase):
         self.calls.clear()
         self.doc.modify.stretch((0, 0), (1, 1), (0, 0), (5, 0))
         self.assertEqual([c[1] for c in self.calls if c[0] == "step"], ["start", "point", "point", "enter", "point", "point"])
+
+    def test_pedit_and_array_wrappers(self):
+        self.step_outcome = {"start": {"status": "waiting_input"}, "entity": {"status": "waiting_input", "prompt": "Turn it into one? [Yes/No]"},
+                             "token": {"status": "waiting_input"}}
+        self.doc.modify.polyline_close(1)
+        tokens = [c[2]["text"] for c in self.calls if c[0] == "step" and c[1] == "token"]
+        self.assertEqual(tokens, ["Y", "C", "X"])
+        self.calls.clear()
+        self.step_outcome = {}
+        self.doc.modify.array_3d([1], 2, 2, 2, 10, 20, 30)
+        self.assertEqual([c[2]["text"] for c in self.calls if c[0] == "step" and c[1] == "text"], ["2", "2", "2", "10", "20", "30"])
+        self.calls.clear()
+        self.doc.modify.array_path([1], 2, 5, at=(0, 0, 0))
+        self.assertEqual([c[1] for c in self.calls if c[0] == "step"], ["start", "entity", "text"])
 
     def test_batch_edit_and_rollback(self):
         line = self.doc.entities[1]

@@ -288,6 +288,11 @@ M.explode([polyline]); M.join([line1, line2])
 M.break_entity(line, first_point, second_point)
 M.stretch(corner1, corner2, base, target)   # crossing window, then the displacement
 M.lengthen(line, 5, at=near_the_end)        # delta; negative shortens
+M.array_path([a], path_curve, count=5)      # evenly along a curve
+M.array_3d([a], rows=2, columns=2, levels=2, row_spacing=10, column_spacing=20, level_spacing=30)
+M.polyline_close(pl); M.polyline_open(pl); M.polyline_reverse(pl)
+M.polyline_width(line_or_pl, 0.5)           # a line or arc is turned into a polyline first
+M.polyline_join(pl, [line1, arc1])          # returns the merged polyline
 ```
 
 Each step returns an outcome dict: `status` (`completed` or `waiting_input`),
@@ -302,7 +307,7 @@ the line leaves a prompt open.
 Selection-based tools (`move`, `copy`, `rotate`, `scale`, `mirror`, `erase`, the arrays,
 `explode` and `join`) select
 the entities you pass first, so the command skips its own selection prompt. Pick
-points default to the middle of a line, arc or circle; give `at=` for anything else.
+points default to the middle of a line, arc or circle and the first vertex of a polyline; give `at=` for anything else.
 `trim` and `extend` cut or extend against every entity in the drawing. Each command is
 undone as the editor would undo it.
 
@@ -312,7 +317,9 @@ line names a command that could end the session or re-enter Python: `QUIT`,
 `RECOVER`, `SCRIPT`, `RUNSCRIPT` and any `PY_*`. Commands run on the active
 document only. Commands that need an interactive surface a script cannot fill
 (the rich-text editor, a file dialog) report it in `blocked_by` and are cancelled.
-Hatching has no wrapper: create it with `create_entity("Hatch", ...)`, because the
+PEDIT's fit, spline, decurve and vertex-edit options are not wrapped (reach them with
+`start_command("PEDIT")`); `polyline_*` return the polyline entity, which is a new
+entity when the command replaced the original. Hatching has no wrapper: create it with `create_entity("Hatch", ...)`, because the
 HATCH command needs an interactive boundary pick. `ocs.command_step(kind, options)`
 is the raw single step behind all of this.
 
