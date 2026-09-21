@@ -50,8 +50,8 @@ The host and each plugin run in separate OS processes. The host re-executes itse
 - A plugin built against major `N` runs on a host whose major is `>= N` because new vtable entries and enum variants are appended at the end.
 - V4 introduces the **acadrust gate**: plugins targeting API v4 or later must resolve the same `acadrust` source as the host (see [`src/version_info.rs`](src/version_info.rs)).
 - V5 introduces `BuiltinPlugin::on_load` and tab-keyed document paths.
-- V6 appends typed system-variable access to `HostApi`; the fork currently
-  supports `CLAYER` and `SNAPANG`.
+- V6 appends typed system-variable access to `HostApi`; the host currently
+  supports `CLAYER` and `SNAPANG` (plus a read-only `CTAB`).
 
 The runtime enforces three gates:
 

@@ -90,7 +90,7 @@ pub struct FieldOverride {
     #[serde(default)]
     pub exclude: bool,
     /// `ocs.add()` errors if this field is missing rather than silently
-    /// defaulting it to zero/empty (Felix's Phase 1 review: "add should
+    /// defaulting it to zero/empty (Phase 1 review feedback: "add should
     /// reject missing required geometry rather than defaulting to zero").
     /// Only meaningful on the generic (non-`rust_getter`/`rust_setter`)
     /// path — `ocs.update()` never requires a field (a merge onto an

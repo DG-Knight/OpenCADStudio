@@ -4,7 +4,7 @@
 
 Build a general Python document model over the OCS host API so a script can control OCS: read and change every canvas entity, manage the drawing's tables, and run OCS's own commands. Keep a property-level record of read/write, read-only, snapshot-only, and unsupported fields in the [43-kind coverage ledger](plugin-host-model-coverage-ledger.md). The architecture and guarantees are in [plugin-host-model.md](plugin-host-model.md); the progress log at the end of this file records each increment with its evidence. Do not resume the separate Lisp-to-Python conversion work.
 
-**State as of 21 September 2026.** The working branch is `plugin/host-model-api` (host API v7), backed up on the `felixriestra/OpenCADStudio` fork. The first draft PR, [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391), was closed on 21 September with a note that a more complete version will follow; no new PR will be opened until the work is finished and tested as far as it can be.
+**State as of 21 September 2026.** The feature is host API v7. An earlier draft pull request, [#1391](https://github.com/HakanSeven12/OpenCADStudio/pull/1391), covered the first slice of it and was closed in favour of this more complete change.
 
 - **Entities:** explicit writes for all 43 canvas kinds (41 creatable; the legacy `Polyline` and `Body` are update-only). **31 kinds are `Complete`** (every C/R/E/D/U/I/W/V/P gate passes). The remaining kinds are integration-tested and held short of `Complete` by a named blocker in the ledger: seven by cadcodec DXF bugs (fixes submitted as [cadcodec#48](https://github.com/HakanSeven12/cadcodec/pull/48), not yet merged, so OCS still pins the unfixed revision), Polyline3D by the DWG format, Polyline2D by a kind change on DXF save, RasterImage by an image-reactor structure that cannot be verified, and Body by having no creation path.
 - **Drawing tables:** layers, text and dimension styles, blocks and their contents, linetypes and layouts, through the additive `TableOperation` request (see the log entries dated 2026-09-21).
@@ -13,8 +13,7 @@ Build a general Python document model over the OCS host API so a script can cont
 
 Repositories:
 
-- OCS host: `/Users/felix/Documents/MacApps/OpenCADStudio`
-- Bundled Python adapter: `/Users/felix/Documents/MacApps/OpenCADStudio/plugins/opencad-python`
+- Bundled Python adapter: `plugins/opencad-python`
 - Host coverage policy: `crates/ocs_plugin_api/entity_coverage_policy.json`
 - Host coverage/validation: `crates/ocs_plugin_api/src/entity_coverage.rs` and `build.rs`
 - Adapter mapping: `plugins/opencad-python/entity_manifest.json`,
@@ -23,10 +22,7 @@ Repositories:
   `plugins/opencad-python/src/document_model.py`
 - Host design notes: `docs/plugin-host-model.md`
 
-Preserve unrelated untracked files. Host and adapter changes now live in the
-same OCS repository and commit. Push the feature branch only to the
-`felixriestra/OpenCADStudio` fork, and only when asked. Never push to H7's
-repository. Verify both upstream `main` and the fork branch before each push.
+Host and adapter changes live in the same repository and are committed together.
 
 ## First: complete the originally agreed Phase 8
 
@@ -102,28 +98,15 @@ The last five may require new engine capabilities rather than only Python conver
 ## Work pattern for each coding increment
 
 1. Inspect the acadrust entity struct, constructors, private fields, serializer, drawing path, and linked tables/objects. Record the intended editable/read-only/unmapped properties first.
-2. Put generic validation and transaction behavior in the OCS fork. Keep the Python adapter thin; add a manifest override only when the generator cannot safely express a field.
+2. Put generic validation and transaction behavior in the host. Keep the Python adapter thin; add a manifest override only when the generator cannot safely express a field.
 3. Add focused host validation, adapter conversion, document-model, real transaction/undo/redo, IPC, GUI, and DWG/DXF fixture checks. Record test evidence in the ledger, including which checks were manual.
 4. Run `cargo test -p ocs_plugin_api --features host --lib` and the relevant
    app host tests. Run
    `cargo test --locked --features experimental-host-model --manifest-path plugins/opencad-python/Cargo.toml`
    plus
    `python3 -m unittest discover -s plugins/opencad-python/tests -v`.
-5. Check `git diff --check` and repository status. Stage only task files,
-   preserve unrelated untracked files, commit host and adapter changes
-   together, push `plugin/host-model-api` to the Felix fork, and record the
-   resulting commit and next unfinished gate in the ledger.
-
-## Handoff start point
-
-The 21-kind queue is finished: items 1-14 and 16 are mapped and gated, and items 15 (SectionSymbol) and 17-21 (Region, Body, Solid3D, Surface, Ole2Frame) are recorded as **blocked** with concrete engine or fixture dependencies in the ledger. Leader is done except for its W
-gate; when the engine writes DXF group 340, reads group 213 and the DWG
-R2010+ text-size question is decided, flip the canary assertions in
-`staged_python_leader_lifecycle_over_real_ipc` and mark it `Complete`.
-AttributeDefinition remains mapped and integration-tested but open at W; its
-real IPC lifecycle now passes against acadrust `7ea4247`, so audit the full
-optional-property DXF round trip and close or retain the blocker. Keep the
-exact queue above and update statuses with evidence after each increment.
+5. Check `git diff --check` and repository status, commit host and adapter changes
+   together, and record the resulting commit and the next unfinished gate in the ledger.
 
 ## Phase 8 progress log
 
@@ -329,17 +312,15 @@ and the DIMSTYLE text-style name (resolved from the group 340 handle). Three com
 an XDATA layout that cannot be verified here. OCS still pins the unfixed revision, so the canaries in
 `audit_python_text_and_dim_styles_over_real_ipc` still assert the wrong result until #51 is merged and OCS repins.
 
-### 2026-09-21: Linux and Windows verification (`fork-build.yml`)
+### 2026-09-21: Linux and Windows verification
 
-`.github/workflows/fork-build.yml` builds this branch in release on `ubuntu-22.04` and `windows-latest`, stages the Python plugin
-beside the executable (`plugins/opencad.python`, where the host looks on both platforms) and runs the real-IPC plugin tests
-against that build. It publishes nothing; a run is started by pushing a `fork-build-*` tag to the fork and leaves a downloadable
-package per platform for 14 days. Result: the second run (`fork-build-2`, commit `20f75c34`) passed **60 of 60** plugin tests on
-Linux and on Windows. The first run passed 60 of 60 on Linux and 58 of 60 on Windows: the RasterImage and OLE lifecycle tests
-substituted the Windows temp directory (`C:\Users\...`) into a Python string literal, where `\U` is a unicode escape. That was a
-test-harness path problem, not a product one, and is fixed by handing the scripts a forward-slash path. Not covered: the whole lib
-suite on those platforms (only the Python-related tests run), the macOS-only bundle path, and an installer (AppImage or MSI) that
-includes the plugin.
+The change was built in release on Ubuntu and Windows runners with the Python plugin staged beside the executable
+(`plugins/opencad.python`, where the host looks for it on both platforms), and the real-IPC plugin tests ran against
+that build: **60 of 60 on each** (unsigned portable packages, built by a fork-only workflow that is not part of this change).
+The first Windows run failed two tests because the harness substituted the Windows temp directory (`C:\Users\...`) into a
+Python string literal, where `\U` is a unicode escape; that was a test-harness path problem, not a product one, and is fixed by
+handing the scripts a forward-slash path. Not covered: the whole workspace suite on Windows, the macOS-only bundle path, and an
+installer (AppImage or MSI) that includes the plugin.
 
 ### 2026-09-21: pull-request check (`python-host-check.yml`)
 

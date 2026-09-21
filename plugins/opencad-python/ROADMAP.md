@@ -24,7 +24,7 @@ needs.
 
 | | Host-embedded | Plugin (this plan) |
 |---|---|---|
-| Requires OCS core changes / Hakan's buy-in | Yes | No — ships from an independent repo, installed via the existing Plugin Manager |
+| Requires OCS core changes and maintainer sign-off | Yes | No — ships from an independent repo, installed via the existing Plugin Manager |
 | Crash isolation | Relies on RustPython's memory safety alone | Gets OS-process isolation for free (plugins already run out-of-process) |
 | Distribution | Bundled into every OCS release, forever | Opt-in install, versioned independently, can iterate fast |
 | Cost | New maintenance burden on the host | Same ABI-pinning cost every plugin already has (see Phase 1, Risk) |

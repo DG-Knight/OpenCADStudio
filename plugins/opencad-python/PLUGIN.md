@@ -119,7 +119,7 @@ expression, not statements). Phases 1.2 (read), 1.3 (2D write) and part of
 | `ocs.remove_record(handle, app_name)` | Removes the XDATA record for `app_name` from `handle`, if any. Returns `True` if a record was actually removed. |
 | `ocs.command(cmd)` | Superseded. Only the `experimental-command-replay` build has it (the old fire-and-forget replay). Use `doc.command`, `doc.start_command` and `doc.modify` from the document model (see "Running OCS commands" below). |
 | `ocs.select(handles)` | Replaces the selection with exactly these handles, in order (document-model build); `doc.selection = [...]` is the same. |
-| `ocs.system_variable(name)` / `ocs.set_system_variable(name, value)` | Development-only `experimental-host-settings` feature. Reads or sets host-managed CLAYER (text) and SNAPANG (degrees) without nested command dispatch. Requires the Felix OCS fork's `plugin/host-model-api` branch; absent from the portable default build. |
+| `ocs.system_variable(name)` / `ocs.set_system_variable(name, value)` | Development-only `experimental-host-settings` feature. Reads or sets host-managed CLAYER (text) and SNAPANG (degrees) without nested command dispatch. Needs the host API v7 build that provides `system_variable`; absent from the portable default build. |
 
 `add_line`/`add_circle`/`add_arc` take plain Python numbers —
 `ocs.add_line(0, 0, 10, 10)` works with ints, not just floats. (Needed an

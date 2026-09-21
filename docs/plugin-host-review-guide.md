@@ -43,7 +43,7 @@ cargo test --lib -- --test-threads=1 python
 ```
 
 (`opencad_python.dll` and `OpenCADStudio.exe` on Windows.) Expect 60 passed. **Without the two
-environment variables these tests are skipped and still report success**; the workflow below fails
+environment variables these tests are skipped and still report success**; `python-host-check.yml` fails
 instead of skipping.
 
 Already run for you:
@@ -51,7 +51,7 @@ Already run for you:
 | Check | Where | Result |
 |---|---|---|
 | `python-host-check.yml` on the pull request | Linux and Windows | 115 plugin API tests, 20 plugin tests, 16 Python model tests, 60 host tests over real IPC, on each |
-| `fork-build.yml` (release build with the plugin staged) | Linux and Windows | 60 of 60 host tests on each; unsigned portable packages you can download and run |
+| Release build with the plugin staged (a fork-only workflow, not in this PR) | Linux and Windows | 60 of 60 host tests on each; unsigned portable packages were produced and can be shared on request |
 | Local | macOS | the same, plus the wasm check |
 
 `main` now has its own `Tests` workflow (`cargo test --workspace --locked` on Linux), which will also run on

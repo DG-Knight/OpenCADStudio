@@ -4257,7 +4257,7 @@ mod ocs {
     //
     // `get_entity` is deliberately a *new*, separate function rather than a
     // change to `get()` above: existing scripts already depend on `get()`'s
-    // small `{handle, kind, layer, point}` shape (Felix's Phase 1 review —
+    // small `{handle, kind, layer, point}` shape (Phase 1 review feedback —
     // don't break that compatibility to hand out the fuller schema).
 
     /// Full entity schema for `handle` (every field the type registry knows
@@ -4552,7 +4552,7 @@ mod ocs {
 
     /// Update `handle` by merging `entity`'s keys onto its *current* value —
     /// a key `entity` doesn't mention is left exactly as it was, not reset to
-    /// a type default (Felix's Phase 1 review: reconstructing from a partial
+    /// a type default (Phase 1 review feedback: reconstructing from a partial
     /// dict could silently drop properties this generic API can't represent
     /// at all, e.g. color/line-weight/XDATA). Errors if `handle` doesn't
     /// exist or isn't a supported kind.
@@ -5396,7 +5396,7 @@ mod ocs {
         #[test]
         fn add_rejects_missing_required_geometry_instead_of_defaulting_to_zero() {
             with_vm(|vm| {
-                // Felix's Phase 1 review: a Circle with no center/radius must
+                // Phase 1 review feedback: a Circle with no center/radius must
                 // error, not silently become a zero-radius circle at the origin.
                 let dict = vm.ctx.new_dict();
                 dict.set_item("kind", vm.new_pyobj("Circle"), vm).unwrap();
@@ -5571,7 +5571,7 @@ mod ocs {
             });
         }
 
-        /// The concrete Phase 1 acceptance test Felix asked for: create, read,
+        /// The concrete Phase 1 acceptance test: create, read,
         /// edit, delete, save, and reopen a Line and an Ellipse, with common
         /// properties preserved — exercised against a real
         /// `acadrust::CadDocument` and a real DWG round trip (not a fake
