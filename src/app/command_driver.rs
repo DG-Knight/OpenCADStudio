@@ -3429,10 +3429,12 @@ impl OpenCADStudio {
                         .scene
                         .parametric_constraint_set_mut(scope)
                         .add(ConstraintKind::Equal, vec![first, *follower], None);
+                    // A Multiple pick leaves its new bar unshown, as the
+                    // reference does; the single flow shows it at once.
                     self.tabs[i].scene.note_parametric_constraint_applied(
                         scope,
                         id,
-                        self.constraint_bar_display,
+                        if multiple { 0 } else { self.constraint_bar_display },
                     );
                 }
                 let changes = touched

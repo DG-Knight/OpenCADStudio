@@ -269,6 +269,10 @@ impl CadCommand for HorizontalConstraintCommand {
         true
     }
 
+    fn typed_point_picks_entity(&self) -> bool {
+        matches!(self.step, Step::ObjectOrTwoPoints)
+    }
+
     fn entity_pick_highlights_hover(&self) -> bool {
         true
     }

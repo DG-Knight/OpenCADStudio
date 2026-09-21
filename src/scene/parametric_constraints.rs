@@ -1859,7 +1859,8 @@ impl super::Scene {
             let cam = self.camera.borrow();
             (cam.view_proj_rte(bounds), cam.eye())
         };
-        set.constraints
+        let mut placements = set
+            .constraints
             .iter()
             .filter(|c| c.enabled)
             .filter(|c| {
@@ -1952,7 +1953,25 @@ impl super::Scene {
                     })
                     .collect::<Vec<_>>()
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // The reference marks an object once for Equal however many
+        // relations of that kind it carries; the stacked duplicates only
+        // repeated the same badge.
+        let mut equal_anchors: Vec<iced::Point> = Vec::new();
+        placements.retain(|(_, point, _, label, _, _)| {
+            if label != "=" {
+                return true;
+            }
+            if equal_anchors
+                .iter()
+                .any(|seen| (seen.x - point.x).abs() < 0.5 && (seen.y - point.y).abs() < 0.5)
+            {
+                return false;
+            }
+            equal_anchors.push(*point);
+            true
+        });
+        placements
     }
 
     /// Hit-tests screen point `p` (same coordinate space as `p_full` in the
