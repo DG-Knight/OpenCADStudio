@@ -79,6 +79,8 @@ impl OpenCADStudio {
             .layers
             .iter()
             .map(|l| l.name.clone())
+            // The reference's hidden system layers (`*ADSK_CONSTRAINTS`) stay out.
+            .filter(|name| !name.starts_with('*'))
             .collect();
         let linetype_items: Vec<ui::properties::LinetypeItem> = self.tabs[i]
             .scene
@@ -2292,6 +2294,29 @@ impl OpenCADStudio {
                         }
                         _ => entity_type_label(entity),
                     };
+                    // A dynamic dimension shows only its constraint and text
+                    // rotation, as the reference does.
+                    let title = match crate::scene::parametric_constraints::dynamic_dimension_constraint(
+                        &self.tabs[i].scene.parametric_constraints,
+                        handle,
+                    ) {
+                        Some((set, constraint)) => {
+                            sections = dynamic_dimension_sections(
+                                &self.tabs[i].scene,
+                                handle,
+                                set,
+                                constraint,
+                                sections,
+                            );
+                            match entity {
+                                acadrust::EntityType::Dimension(
+                                    acadrust::entities::Dimension::Aligned(_),
+                                ) => t!("Aligned Dimensional Constraint").into_owned(),
+                                _ => t!("Linear Dimensional Constraint").into_owned(),
+                            }
+                        }
+                        None => title,
+                    };
                     ui::PropertiesPanel {
                         choice_combos: sections
                             .iter()
@@ -2736,6 +2761,26 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                                     glam::DVec3::new(position.x, position.y, position.z);
                                 text_grip.is_midpoint = false;
                             }
+                        }
+                    }
+                }
+                if self.tabs[i].scene.is_dynamic_dimension(handle) {
+                    // A dynamic dimension shows the reference's grips: a
+                    // triangle at each constraint point aimed at the other
+                    // one, and the text square — no dimension line grip.
+                    let points: Vec<glam::DVec3> = entity_grips
+                        .iter()
+                        .filter(|grip| grip.id <= 1)
+                        .map(|grip| grip.world)
+                        .collect();
+                    entity_grips.retain(|grip| grip.id != 2);
+                    for grip in &mut entity_grips {
+                        if grip.id <= 1 {
+                            let other = points.get(1 - grip.id).copied().unwrap_or(grip.world);
+                            let dir = (other - grip.world).normalize_or(glam::DVec3::X);
+                            *grip = crate::entities::common::oriented_triangle_grip(
+                                grip.id, grip.world, dir,
+                            );
                         }
                     }
                 }
@@ -3572,6 +3617,105 @@ fn set_row(sections: &mut [crate::scene::model::object::PropSection], field: &st
 
 /// Replace a row's value with an arbitrary control (editable field, dropdown,
 /// colour picker …) rather than plain read-only text.
+/// A dimensional constraint's Properties as the reference shows them: the
+/// Constraint rows, then only the text rotation for a dynamic dimension
+/// and the full dimension sections for an annotational one.
+fn dynamic_dimension_sections(
+    scene: &crate::scene::Scene,
+    handle: Handle,
+    set: &crate::scene::parametric_constraints::ParametricConstraintSet,
+    constraint: &crate::scene::parametric_constraints::ParametricConstraint,
+    sections: Vec<crate::scene::model::object::PropSection>,
+) -> Vec<crate::scene::model::object::PropSection> {
+    use crate::scene::model::object::{PropSection, PropValue, Property};
+    use crate::scene::named_parameters::DrivingValue;
+    let table = if set.local_parameters.is_empty() {
+        scene.named_parameters()
+    } else {
+        &set.local_parameters
+    };
+    let reference = !constraint.enabled;
+    let annotational = scene.dimension_is_annotational(handle);
+    let (name, expression, value, description) = match &constraint.driving_param {
+        Some(DrivingValue::Named(name)) => (
+            name.clone(),
+            table
+                .iter()
+                .find(|parameter| &parameter.name == name)
+                .map(|parameter| parameter.source.clone())
+                .unwrap_or_default(),
+            table.resolve(name).ok(),
+            table.description(name).to_string(),
+        ),
+        Some(DrivingValue::Literal(value)) => {
+            (String::new(), format!("{value}"), Some(*value), String::new())
+        }
+        None => (String::new(), String::new(), None, String::new()),
+    };
+    let row = |label: &str, field: &'static str, value: PropValue| Property {
+        label: label.to_string(),
+        field,
+        value,
+    };
+    let yes_no = |flag: bool| PropValue::Choice {
+        selected: if flag { t!("Yes") } else { t!("No") }.into_owned(),
+        options: vec![t!("Yes").into_owned(), t!("No").into_owned()],
+    };
+    let text_rotation = sections
+        .iter()
+        .flat_map(|section| section.props.iter())
+        .find(|property| property.field == "text_rotation")
+        .cloned();
+    let mut result = vec![PropSection {
+        title: t!("Constraint").into_owned(),
+        props: vec![
+            row(
+                t!("Constraint Form").as_ref(),
+                "dyn_constraint_form",
+                PropValue::Choice {
+                    selected: if annotational { "Annotational" } else { "Dynamic" }.to_string(),
+                    options: vec!["Dynamic".to_string(), "Annotational".to_string()],
+                },
+            ),
+            row(
+                t!("Reference").as_ref(),
+                "dyn_constraint_reference",
+                yes_no(reference),
+            ),
+            row(t!("Name").as_ref(), "dyn_constraint_name", PropValue::EditText(name)),
+            row(
+                t!("Expression").as_ref(),
+                "dyn_constraint_expression",
+                // A reference constraint's expression is the measurement.
+                if reference {
+                    PropValue::ReadOnly(expression)
+                } else {
+                    PropValue::EditText(expression)
+                },
+            ),
+            row(
+                t!("Value").as_ref(),
+                "dyn_constraint_value",
+                PropValue::ReadOnly(value.map(|v| format!("{v:.4}")).unwrap_or_default()),
+            ),
+            row(
+                t!("Description").as_ref(),
+                "dyn_constraint_description",
+                PropValue::EditText(description),
+            ),
+        ],
+    }];
+    if annotational {
+        result.extend(sections);
+    } else if let Some(text_rotation) = text_rotation {
+        result.push(PropSection {
+            title: t!("Text").into_owned(),
+            props: vec![text_rotation],
+        });
+    }
+    result
+}
+
 fn set_row_value(
     sections: &mut [crate::scene::model::object::PropSection],
     field: &str,

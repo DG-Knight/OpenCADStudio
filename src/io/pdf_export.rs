@@ -424,7 +424,16 @@ fn build_pdf_pages(pages: &[PdfPageInput], plot_style: Option<&PlotStyleTable>) 
             .map_err(|error| format!("Page {}: {error}", index + 1))?;
     }
     let mut warnings = Vec::new();
-    Ok(doc.save(&PdfSaveOptions::default(), &mut warnings))
+    // printpdf 0.9's `optimize` is a no-op (its `doc.compress()` is commented
+    // out), so every page's content stream — megabytes of vector operators
+    // for a CAD sheet — went out uncompressed: a 16-sheet set weighed 280 MB.
+    // Serialise through lopdf ourselves and Flate-compress the streams.
+    let mut lo = printpdf::to_lopdf_doc(&doc, &PdfSaveOptions::default(), &mut warnings);
+    lo.compress();
+    let mut bytes = Vec::new();
+    lo.save_to(&mut bytes)
+        .map_err(|error| format!("PDF serialisation failed: {error}"))?;
+    Ok(bytes)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

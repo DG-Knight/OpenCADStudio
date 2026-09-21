@@ -1466,7 +1466,7 @@ impl OpenCADStudio {
 
         self.prepare_native_save(i);
         let version = self.tabs[i].scene.document.version;
-        let snapshot = self.tabs[i].scene.document.clone();
+        let snapshot = self.tabs[i].scene.document_for_save();
         crate::io::save_owned_as_version_atomic(
             snapshot,
             &path,
@@ -1895,7 +1895,7 @@ impl OpenCADStudio {
         path: std::path::PathBuf,
     ) -> Task<Message> {
         let i = self.active_tab;
-        let document = self.tabs[i].scene.document.clone();
+        let document = self.tabs[i].scene.document_for_save();
         let handles: Vec<_> = self.tabs[i].scene.selected.iter().copied().collect();
         let worker_name = block_name.clone();
         let worker_path = path.clone();
@@ -2300,7 +2300,7 @@ impl OpenCADStudio {
             crate::ui::wrap_bar::dropdown_bounds(crate::app::view::VIEWPORT_CAPTURE_BOUNDS_ID)
         });
         let clone_started = iced::time::Instant::now();
-        let mut snapshot = self.tabs[i].scene.document.clone();
+        let mut snapshot = self.tabs[i].scene.document_for_save();
         // Save-As across folders: rebase relative reference paths onto the
         // new base dir inside the snapshot only (live strings are untouched).
         if purpose == crate::app::SavePurpose::SaveAs {

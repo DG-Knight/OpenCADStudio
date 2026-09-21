@@ -1052,6 +1052,8 @@ impl OpenCADStudio {
                     | "CONSTRAINTINFER"
                     | "CONSTRAINTBARDISPLAY"
                     | "CONSTRAINTBARMODE"
+                    | "CONSTRAINTNAMEFORMAT"
+                    | "DYNCONSTRAINTDISPLAY"
             ) =>
             {
                 return self.dispatch_styleprops(&format!("SETVAR {cmd}"), i);
@@ -1075,7 +1077,7 @@ impl OpenCADStudio {
                 if name.is_empty() || name == "?" {
                     self.command_line.push_info(&super::plotvars::setvar_listing());
                     self.command_line.push_info(
-                        crate::t!("SETVAR: CETRANSPARENCY LTSCALE CELTSCALE PDMODE PDSIZE TEXTSIZE ORTHOMODE FILLMODE MIRRTEXT FRAME IMAGEFRAME PDFFRAME WIPEOUTFRAME XCLIPFRAME POINTCLOUDCLIPFRAME ZOOMWHEEL ZOOMFACTOR SHORTCUTMENU SHORTCUTMENUDURATION CURSORSIZE PICKBOX CURSORTYPE SNAPANG TEXTFILL CLIPROMPTLINES COMMANDLINEFADETIME ATTREQ ATTDIA DIMASSOC DIMCONTINUEMODE CONSTRAINTSOLVEMODE CONSTRAINTINFER CONSTRAINTBARDISPLAY CONSTRAINTBARMODE ANGBASE ANGDIR SKETCHINC SKPOLY SKTOLERANCE DONUTID DONUTOD CENTEREXE CENTERLAYER CENTERLTYPE CENTERLTSCALE CENTERLTYPEFILE CENTERCROSSSIZE CENTERCROSSGAP CENTERMARKEXE COLORTHEME SELECTIONAREA SELECTIONAREAOPACITY SELECTIONEFFECT SELECTIONEFFECTCOLOR WINDOWSAREACOLOR CROSSINGAREACOLOR SELECTIONPREVIEW GRIPSIZE GRIPCOLOR GRIPHOT GRIPHOVER GRIPOBJLIMIT | CLAYER CELTYPE TEXTSTYLE (read-only)").as_ref(),
+                        crate::t!("SETVAR: CETRANSPARENCY LTSCALE CELTSCALE PDMODE PDSIZE TEXTSIZE ORTHOMODE FILLMODE MIRRTEXT FRAME IMAGEFRAME PDFFRAME WIPEOUTFRAME XCLIPFRAME POINTCLOUDCLIPFRAME ZOOMWHEEL ZOOMFACTOR SHORTCUTMENU SHORTCUTMENUDURATION CURSORSIZE PICKBOX CURSORTYPE SNAPANG TEXTFILL CLIPROMPTLINES COMMANDLINEFADETIME ATTREQ ATTDIA DIMASSOC DIMCONTINUEMODE CONSTRAINTSOLVEMODE CONSTRAINTINFER CONSTRAINTBARDISPLAY CONSTRAINTBARMODE CONSTRAINTNAMEFORMAT DYNCONSTRAINTDISPLAY ANGBASE ANGDIR SKETCHINC SKPOLY SKTOLERANCE DONUTID DONUTOD CENTEREXE CENTERLAYER CENTERLTYPE CENTERLTSCALE CENTERLTYPEFILE CENTERCROSSSIZE CENTERCROSSGAP CENTERMARKEXE COLORTHEME SELECTIONAREA SELECTIONAREAOPACITY SELECTIONEFFECT SELECTIONEFFECTCOLOR WINDOWSAREACOLOR CROSSINGAREACOLOR SELECTIONPREVIEW GRIPSIZE GRIPCOLOR GRIPHOT GRIPHOVER GRIPOBJLIMIT | CLAYER CELTYPE TEXTSTYLE (read-only)").as_ref(),
                     );
                 } else {
                     if name == "CETRANSPARENCY" {
@@ -1275,17 +1277,26 @@ impl OpenCADStudio {
                             | "CONSTRAINTINFER"
                             | "CONSTRAINTBARDISPLAY"
                             | "CONSTRAINTBARMODE"
+                            | "CONSTRAINTNAMEFORMAT"
+                            | "DYNCONSTRAINTDISPLAY"
                     ) {
                         let current = match name.as_str() {
                             "CONSTRAINTSOLVEMODE" => i16::from(self.constraint_solve_mode),
                             "CONSTRAINTINFER" => i16::from(self.constraint_infer),
                             "CONSTRAINTBARDISPLAY" => self.constraint_bar_display,
                             "CONSTRAINTBARMODE" => self.constraint_bar_mode,
+                            "CONSTRAINTNAMEFORMAT" => {
+                                i16::from(self.tabs[i].scene.constraint_name_format)
+                            }
+                            "DYNCONSTRAINTDISPLAY" => {
+                                i16::from(self.tabs[i].scene.dynamic_constraint_display)
+                            }
                             _ => unreachable!(),
                         };
                         let maximum = match name.as_str() {
                             "CONSTRAINTBARDISPLAY" => 3,
                             "CONSTRAINTBARMODE" => 4095,
+                            "CONSTRAINTNAMEFORMAT" => 2,
                             _ => 1,
                         };
                         if let Some(value) = &value {
@@ -1304,6 +1315,16 @@ impl OpenCADStudio {
                                             self.constraint_bar_display = mode
                                         }
                                         "CONSTRAINTBARMODE" => self.constraint_bar_mode = mode,
+                                        "CONSTRAINTNAMEFORMAT" => {
+                                            self.tabs[i].scene.constraint_name_format = mode as u8;
+                                            self.tabs[i].scene.refresh_dynamic_dimension_texts();
+                                            self.tabs[i].dirty = true;
+                                        }
+                                        "DYNCONSTRAINTDISPLAY" => {
+                                            self.tabs[i].scene.dynamic_constraint_display =
+                                                mode != 0;
+                                            self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
+                                        }
                                         _ => unreachable!(),
                                     }
                                     self.persist_settings_if_changed();

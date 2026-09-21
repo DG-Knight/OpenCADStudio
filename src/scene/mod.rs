@@ -2295,6 +2295,15 @@ pub struct Scene {
     has_associative_centers: std::cell::Cell<Option<bool>>,
     /// Runtime parametric constraint sets decoded from standard graph scopes.
     pub(crate) parametric_constraints: Vec<parametric_constraints::ParametricConstraintSet>,
+    /// CONSTRAINTNAMEFORMAT: what a dynamic dimension's text shows —
+    /// 0 the parameter name, 1 the value, 2 `name=value`.
+    pub constraint_name_format: u8,
+    /// DYNCONSTRAINTDISPLAY: whether dynamic dimensions draw at all.
+    pub dynamic_constraint_display: bool,
+    /// Dynamic dimensions DCHIDE or DYNCONSTRAINTDISPLAY 0 keep off screen.
+    hidden_dynamic_dimensions: HashSet<Handle>,
+    /// The camera generation the dynamic dimensions were last scaled for.
+    dynamic_dimension_camera_gen: Option<u64>,
     /// Session-only visibility overrides for constraint glyphs.
     hidden_parametric_constraints: HashSet<(
         parametric_constraints::ParametricScope,
@@ -2348,6 +2357,11 @@ pub struct Scene {
     /// (re)built, otherwise the held value. `build_primitive` reads it right
     /// after the call to gate GPU wire re-upload. 0 = none yet.
     pub(crate) last_model_wire_gen: std::cell::Cell<u64>,
+    /// SDF glyph-atlas generation this scene's caches were built against.
+    /// When the atlas grows or re-bakes, every cached glyph quad (resident
+    /// sets, block caches, projected viewport copies) addresses the wrong
+    /// tile; `update` compares against the live generation and rebuilds.
+    pub(crate) last_atlas_generation: std::cell::Cell<u64>,
     /// Interaction-LOD state: `camera_generation` seen on the previous frame and
     /// the wall time it last changed. Used to detect "the view is actively being
     /// panned / zoomed / orbited" so the expensive per-pixel hatch pass can be
@@ -2625,6 +2639,10 @@ impl Scene {
             dependency_index_cache: RefCell::new(None),
             associative_hatch_source_cache: RefCell::new(None),
             parametric_constraints: Vec::new(),
+            constraint_name_format: 2,
+            dynamic_constraint_display: true,
+            hidden_dynamic_dimensions: HashSet::default(),
+            dynamic_dimension_camera_gen: None,
             hidden_parametric_constraints: HashSet::default(),
             shown_parametric_constraints: HashSet::default(),
             named_parameters: named_parameters::ParameterTable::new(),
@@ -2638,6 +2656,7 @@ impl Scene {
             last_tess_ms: std::cell::Cell::new(0.0),
             last_tess_wires: std::cell::Cell::new(0),
             last_model_wire_gen: std::cell::Cell::new(0),
+            last_atlas_generation: std::cell::Cell::new(crate::scene::text::sdf_atlas::generation()),
             nav_last_gen: std::cell::Cell::new(0),
             nav_changed_at: std::cell::Cell::new(None),
             nav_perf_pending: std::cell::Cell::new(None),
@@ -3319,6 +3338,7 @@ impl Scene {
             }
         }
         if !self.parametric_constraints.is_empty() || !self.named_parameters.is_empty() {
+            self.refresh_dynamic_dimension_texts();
             self.sync_native_parametric_graph();
         }
         if !changes.is_empty() {
@@ -5533,6 +5553,7 @@ impl Scene {
         self.object_isolation.hides(handle)
             || self.preview_hidden.contains(&handle)
             || self.command_preview_hidden.contains(&handle)
+            || self.hidden_dynamic_dimensions.contains(&handle)
     }
 
     /// Replace the command-owned source hide set and refresh only handles whose
@@ -6105,6 +6126,7 @@ impl Scene {
         // Build once: full tessellation, no cull, no zoom LOD — the resident
         // set is zoom-independent (GPU analytical circles/arcs/ellipses).
         let t_tess = iced::time::Instant::now();
+        let mut atlas_gen = crate::scene::text::sdf_atlas::generation();
         let mut wires = self.wires_for_block_culled(
             block,
             None,
@@ -6115,6 +6137,34 @@ impl Scene {
             all_visible,
             style_viewport,
         );
+        // Baking a drawing's glyphs for the first time can grow the SDF atlas
+        // part-way through this pass (a CJK sheet set bakes thousands of
+        // tiles). Text tessellated before the growth carries UVs that now
+        // address the wrong tiles — visible as scrambled glyphs — and this
+        // set is cached by geometry epoch, so nothing would ever re-lay it
+        // out. The memo guard already folds the generation in, so rebuilding
+        // once the atlas has settled re-tessellates only the stale text.
+        for _ in 0..3 {
+            let now = crate::scene::text::sdf_atlas::generation();
+            if now == atlas_gen {
+                break;
+            }
+            atlas_gen = now;
+            // Block definitions tessellated earlier in this pass hold the
+            // stale quads too, and their cache is keyed by block epoch (which
+            // has not moved), so drop them or the rebuild would reuse them.
+            self.block_defn_cache.borrow_mut().clear();
+            wires = self.wires_for_block_culled(
+                block,
+                None,
+                None,
+                frozen_layers,
+                anno_scale_override,
+                annotation_scale_handle,
+                all_visible,
+                style_viewport,
+            );
+        }
         let perf = crate::perf::enabled();
         let t_post = perf.then(iced::time::Instant::now);
         // Synthesized nonprint markers (geo-location daisy) live in model space
