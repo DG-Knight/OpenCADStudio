@@ -1553,7 +1553,8 @@ impl OpenCADStudio {
     /// table, so unlike that whole-table Apply this can cheaply scope the
     /// re-solve to just the entities that actually reference it.
     fn resolve_named_parameter_edit(&mut self, i: usize, name: &str) {
-        let touched: Vec<Handle> = self.tabs[i]
+        let readers: Vec<&crate::scene::parametric_constraints::ParametricConstraint> = self
+            .tabs[i]
             .scene
             .parametric_constraints
             .iter()
@@ -1562,7 +1563,23 @@ impl OpenCADStudio {
                 c.enabled
                     && matches!(&c.driving_param, Some(crate::scene::named_parameters::DrivingValue::Named(n)) if n == name)
             })
+            .collect();
+        let touched: Vec<Handle> = readers
+            .iter()
             .flat_map(|c| c.refs.iter().map(|r| r.entity))
+            .collect();
+        // A changed value moves a dimensional constraint's second point; its
+        // first point (and the line it measures perpendicular to) stays, as
+        // in the reference.
+        let anchors: Vec<crate::scene::parametric_constraints::ParametricRef> = readers
+            .iter()
+            .flat_map(|c| {
+                crate::scene::parametric_constraints::dimensional_anchor_refs(
+                    &self.tabs[i].scene.document,
+                    &c.refs,
+                )
+            })
+            .filter(|reference| reference.marker.is_some())
             .collect();
         self.tabs[i].dirty = true;
         if touched.is_empty() {
@@ -1573,25 +1590,9 @@ impl OpenCADStudio {
             .into_iter()
             .map(|h| (h, crate::scene::ChangeKind::Modified))
             .collect();
-        // A changed value moves a dimensional constraint's second point; its
-        // first point stays, as in the reference.
-        let anchors: Vec<crate::scene::parametric_constraints::ParametricRef> = self.tabs[i]
+        self.tabs[i]
             .scene
-            .parametric_constraints
-            .iter()
-            .flat_map(|set| set.constraints.iter())
-            .filter(|c| {
-                c.enabled
-                    && matches!(&c.driving_param, Some(crate::scene::named_parameters::DrivingValue::Named(n)) if n == name)
-            })
-            .filter_map(|c| c.refs.first().copied())
-            .filter(|reference| reference.marker.is_some())
-            .collect();
-        self.tabs[i].scene.bump_entities_with_parametric_policy(
-            &changes,
-            &anchors,
-            self.constraint_solve_mode,
-        );
+            .bump_entities_with_parametric_policy(&changes, &anchors, false);
     }
 
     /// Commits one field of one Parameters-section row (Properties panel) —
@@ -1660,6 +1661,11 @@ impl OpenCADStudio {
                 current.name.clone(),
             ),
             ParamField::Name => {
+                let description = self.tabs[i]
+                    .scene
+                    .named_parameters()
+                    .description(&current.name)
+                    .to_string();
                 self.tabs[i]
                     .scene
                     .named_parameters_mut()
@@ -1668,12 +1674,19 @@ impl OpenCADStudio {
                     .scene
                     .named_parameters_mut()
                     .set(&typed, &current.source);
-                if outcome.is_err() {
+                let kept = if outcome.is_err() {
                     let _ = self.tabs[i]
                         .scene
                         .named_parameters_mut()
                         .set(&current.name, &current.source);
-                }
+                    current.name.as_str()
+                } else {
+                    typed.as_str()
+                };
+                self.tabs[i]
+                    .scene
+                    .named_parameters_mut()
+                    .set_description(kept, &description);
                 (outcome, typed.clone())
             }
         };
@@ -1726,6 +1739,190 @@ impl OpenCADStudio {
         }
         self.refresh_properties();
         Task::none()
+    }
+
+    /// The dynamic dimension the Properties panel targets: its handle, scope,
+    /// constraint id and parameter name.
+    fn dynamic_dimension_target(
+        &self,
+        i: usize,
+    ) -> Option<(
+        Handle,
+        crate::scene::parametric_constraints::ParametricScope,
+        crate::scene::parametric_constraints::ConstraintId,
+        String,
+    )> {
+        use crate::scene::named_parameters::DrivingValue;
+        use crate::scene::parametric_constraints::dynamic_dimension_constraint;
+        let handle = *self.property_target_handles(i).first()?;
+        let (set, constraint) =
+            dynamic_dimension_constraint(&self.tabs[i].scene.parametric_constraints, handle)?;
+        let Some(DrivingValue::Named(name)) = &constraint.driving_param else {
+            return None;
+        };
+        Some((handle, set.scope, constraint.id, name.clone()))
+    }
+
+    /// Commits a dynamic dimension's Description row into its parameter.
+    pub(super) fn on_dynamic_dimension_description_commit(
+        &mut self,
+        field: &'static str,
+    ) -> Task<Message> {
+        use crate::ui::properties::FieldKey;
+        let i = self.active_tab;
+        self.tabs[i].properties.active_field = None;
+        let Some(typed) = self.tabs[i]
+            .properties
+            .edit_buf
+            .remove(&FieldKey::Geom(field))
+        else {
+            return Task::none();
+        };
+        let Some((_, _, _, name)) = self.dynamic_dimension_target(i) else {
+            self.refresh_properties();
+            return Task::none();
+        };
+        let pending = self.begin_undo(i, "Constraint description", 0, true);
+        self.tabs[i].scene.record_undo_named_parameters_before();
+        self.tabs[i]
+            .scene
+            .named_parameters_mut()
+            .set_description(&name, &typed);
+        self.tabs[i].dirty = true;
+        if let Some(pd) = pending {
+            self.commit_undo_delta(i, pd);
+        }
+        self.refresh_properties();
+        Task::none()
+    }
+
+    /// Applies a dynamic dimension's Constraint Form or Reference choice.
+    pub(super) fn on_dynamic_dimension_choice(
+        &mut self,
+        field: &'static str,
+        value: &str,
+    ) -> Task<Message> {
+        use crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER;
+        let i = self.active_tab;
+        let Some((handle, scope, id, _)) = self.dynamic_dimension_target(i) else {
+            return Task::none();
+        };
+        match field {
+            "dyn_constraint_form" => {
+                // Annotational: an ordinary dimension on the current layer
+                // that plots; Dynamic: the gray one on the constraints layer.
+                let annotational = value.eq_ignore_ascii_case("Annotational");
+                let active_layer = self.tabs[i].active_layer.clone();
+                if !annotational {
+                    self.tabs[i].scene.ensure_dynamic_dimension_layer();
+                }
+                self.apply_property_op(i, "Constraint form", &[handle], |app, handle| {
+                    use crate::entities::dim_override as dov;
+                    let Some(mut entity) = app.tabs[i].scene.document.get_entity(handle).cloned()
+                    else {
+                        return;
+                    };
+                    if annotational {
+                        entity.as_entity_mut().set_layer(active_layer.clone());
+                        entity.common_mut().color = acadrust::types::Color::ByLayer;
+                        // The dynamic form's screen-size and horizontal-text
+                        // overrides go; the style draws it.
+                        for code in [dov::DIMSCALE, dov::DIMTIH, dov::DIMTOH] {
+                            dov::set_on_entity(&mut entity, code, None);
+                        }
+                    } else {
+                        entity
+                            .as_entity_mut()
+                            .set_layer(DYNAMIC_DIMENSION_LAYER.to_string());
+                        entity.common_mut().color = acadrust::types::Color::Rgb {
+                            r: 103,
+                            g: 109,
+                            b: 118,
+                        };
+                    }
+                    app.tabs[i].scene.update_entity(entity);
+                });
+                // The dynamic form is rescaled to the screen and shows the
+                // trimmed value; the annotational one is never hidden.
+                self.tabs[i].scene.refresh_dynamic_dimension_scales(true);
+                self.tabs[i].scene.refresh_dynamic_dimension_texts();
+                self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
+            }
+            "dyn_constraint_reference" => {
+                // A reference constraint reads the geometry instead of
+                // driving it; its text sits in parentheses.
+                let reference =
+                    value.eq_ignore_ascii_case("Yes") || value == crate::t!("Yes").as_ref();
+                let Some(before) = self.tabs[i].scene.parametric_constraint_set(scope).cloned()
+                else {
+                    return Task::none();
+                };
+                let pending = self.begin_undo(i, "Constraint reference", 0, true);
+                self.tabs[i]
+                    .scene
+                    .record_undo_parametric_constraints_before(scope, before);
+                self.tabs[i].scene.record_undo_named_parameters_before();
+                let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
+                if let Some(constraint) = set.constraints.iter_mut().find(|c| c.id == id) {
+                    constraint.enabled = !reference;
+                }
+                self.tabs[i].scene.refresh_dynamic_dimension_texts();
+                self.tabs[i].scene.sync_native_parametric_graph();
+                self.tabs[i].dirty = true;
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
+                self.refresh_properties();
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// Commits a dynamic dimension's Name or Expression row: the typed text
+    /// goes to the Parameters-section row of the constraint's parameter.
+    pub(super) fn on_dynamic_dimension_field_commit(
+        &mut self,
+        field: &'static str,
+        param_field: crate::ui::window::named_parameters::ParamField,
+    ) -> Task<Message> {
+        use crate::scene::named_parameters::DrivingValue;
+        use crate::scene::parametric_constraints::dynamic_dimension_constraint;
+        use crate::ui::properties::FieldKey;
+        let i = self.active_tab;
+        self.tabs[i].properties.active_field = None;
+        let Some(typed) = self.tabs[i]
+            .properties
+            .edit_buf
+            .remove(&FieldKey::Geom(field))
+        else {
+            return Task::none();
+        };
+        let handles = self.property_target_handles(i);
+        let name = handles.first().and_then(|handle| {
+            let (_, constraint) =
+                dynamic_dimension_constraint(&self.tabs[i].scene.parametric_constraints, *handle)?;
+            match &constraint.driving_param {
+                Some(DrivingValue::Named(name)) => Some(name.clone()),
+                _ => None,
+            }
+        });
+        let index = name.and_then(|name| {
+            self.tabs[i]
+                .scene
+                .named_parameters()
+                .iter()
+                .position(|parameter| parameter.name == name)
+        });
+        let Some(index) = index else {
+            self.refresh_properties();
+            return Task::none();
+        };
+        self.tabs[i]
+            .properties
+            .edit_buf
+            .insert(FieldKey::Param(index, param_field), typed);
+        self.on_prop_param_commit(index, param_field)
     }
 
     /// Removes Parameters-section row `index` immediately. Any
@@ -3827,26 +4024,62 @@ impl OpenCADStudio {
                 second_point,
                 location,
                 axis,
+                direction,
                 name,
                 expression,
                 label,
             } => {
                 use crate::modules::annotate::{aligned_dim, linear_dim};
                 use crate::scene::named_parameters::{is_valid_name, DrivingValue};
-                use crate::scene::parametric_constraints::{dynamic_dimension_text, ConstraintKind};
+                use crate::scene::parametric_constraints::{
+                    distance_direction_type, dynamic_dimension_text, ConstraintKind,
+                };
 
                 let scope = self.tabs[i].current_parametric_scope();
-                let refs = vec![first, second];
+                let mut refs = vec![first, second];
+                refs.extend(direction);
+                // The same measurement between the same references is
+                // refused after the value, and the command ends.
+                let duplicate = self.tabs[i]
+                    .scene
+                    .parametric_constraint_set(scope)
+                    .is_some_and(|set| {
+                        set.constraints.iter().any(|c| {
+                            c.enabled
+                                && c.kind == kind
+                                && c.refs.len() == refs.len()
+                                && c.refs[..2].contains(&first)
+                                && c.refs[..2].contains(&second)
+                                && c.refs.get(2) == refs.get(2)
+                        })
+                    });
+                if duplicate {
+                    self.command_line
+                        .push_output("The constraint already exists on the selected objects.");
+                    self.tabs[i].active_cmd = None;
+                    self.tabs[i].snap_result = None;
+                    return Task::none();
+                }
                 // A refused value keeps the prompt open, as the reference's
-                // editor does.
+                // editor does. A directed distance validates as the plain
+                // two-point distance it also is.
+                let (validate_kind, validate_refs) = if kind == ConstraintKind::DistanceDirected {
+                    (ConstraintKind::Distance, &refs[..2])
+                } else {
+                    (kind, &refs[..])
+                };
                 if let Err(message) = self.tabs[i].scene.validate_parametric_constraint(
-                    kind,
-                    &refs,
+                    validate_kind,
+                    validate_refs,
                     Some(&DrivingValue::Literal(1.0)),
                 ) {
                     self.reprompt_active_command(i, message);
                     return Task::none();
                 }
+                let anchors = crate::scene::parametric_constraints::dimensional_anchor_refs(
+                    &self.tabs[i].scene.document,
+                    &refs,
+                );
                 let name = name.trim().to_string();
                 if !is_valid_name(&name) {
                     self.reprompt_active_command(i, "Invalid parameter name.");
@@ -3860,23 +4093,24 @@ impl OpenCADStudio {
                 let value = match table.resolve(&name) {
                     Ok(value) if value.is_finite() => value,
                     _ => {
-                        self.reprompt_active_command(i, "Invalid expression.");
+                        self.command_line.push_error("Invalid expression.");
+                        self.reprompt_active_command(
+                            i,
+                            "The parameter is used in an expression which results in an invalid value for a dimensional constraint.",
+                        );
                         return Task::none();
                     }
                 };
-                // DCFORM Annotational: an ordinary plotted dimension that shows
-                // the value at dimension precision.
+                // DCFORM Annotational: an ordinary plotted dimension on the
+                // current layer that shows the value at dimension precision.
                 let annotational = self.constraint_form_annotational;
-                let source = if annotational {
-                    format!("{value:.4}")
-                } else {
-                    expression.clone()
-                };
                 let text = dynamic_dimension_text(
                     &name,
-                    &source,
                     value,
                     self.tabs[i].scene.constraint_name_format,
+                    false,
+                    Some(&expression),
+                    annotational,
                 );
                 let mut entity = if kind == ConstraintKind::Distance {
                     aligned_dim::aligned_dimension_entity(
@@ -3898,13 +4132,18 @@ impl OpenCADStudio {
                     &self.tabs[i].scene.document,
                     &mut entity,
                 );
-                let layer = self.tabs[i].active_layer.clone();
-                if layer != "0" {
-                    entity.as_entity_mut().set_layer(layer);
-                }
-                // A dynamic dimension draws in the constraint gray, not the
-                // current color.
-                if !annotational {
+                if annotational {
+                    entity
+                        .as_entity_mut()
+                        .set_layer(self.tabs[i].active_layer.clone());
+                } else {
+                    // A dynamic dimension lives on the reference's constraints
+                    // layer, hidden from the layer lists and never plotted, and
+                    // draws in the constraint gray, not the current color.
+                    self.tabs[i].scene.ensure_dynamic_dimension_layer();
+                    entity.as_entity_mut().set_layer(
+                        crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER.to_string(),
+                    );
                     entity.common_mut().color = acadrust::types::Color::Rgb {
                         r: 103,
                         g: 109,
@@ -3919,8 +4158,10 @@ impl OpenCADStudio {
                         crate::scene::parametric_constraints::ParametricConstraintSet::new(scope)
                     });
                 let mut touched = vec![first.entity];
-                if second.entity != first.entity {
-                    touched.push(second.entity);
+                for reference in [Some(second), direction].into_iter().flatten() {
+                    if !touched.contains(&reference.entity) {
+                        touched.push(reference.entity);
+                    }
                 }
                 let pending = self.begin_undo(i, label, touched.len() + 1, false);
                 self.tabs[i]
@@ -3929,11 +4170,14 @@ impl OpenCADStudio {
                 self.tabs[i].scene.record_undo_named_parameters_before();
                 self.tabs[i].scene.named_parameters = table;
                 let dimension = self.tabs[i].scene.add_entity(entity);
-                if annotational {
-                    self.tabs[i].scene.mark_dimension_annotational(dimension);
-                }
                 let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
                 let id = set.add(kind, refs, Some(DrivingValue::Named(name)));
+                if direction.is_some() {
+                    if let Some(constraint) = set.constraints.iter_mut().find(|c| c.id == id) {
+                        constraint.distance_direction_type =
+                            distance_direction_type::PERPENDICULAR_TO_LINE;
+                    }
+                }
                 set.dimensions.insert(id, dimension);
                 self.tabs[i].scene.note_parametric_constraint_applied(
                     scope,
@@ -3948,13 +4192,13 @@ impl OpenCADStudio {
                     .into_iter()
                     .map(|handle| (handle, crate::scene::ChangeKind::Modified))
                     .collect();
-                // The first point stays; a value other than the measured one
-                // moves the second, as in the reference.
-                self.tabs[i].scene.bump_entities_with_parametric_policy(
-                    &changes,
-                    &[first],
-                    self.constraint_solve_mode,
-                );
+                // The first point (and a line it belongs to that the distance
+                // runs perpendicular to) stays; a value other than the
+                // measured one moves the second, as in the reference. Not
+                // `retain_size`: the typed value is the new length.
+                self.tabs[i]
+                    .scene
+                    .bump_entities_with_parametric_policy(&changes, &anchors, false);
                 // DYNCONSTRAINTDISPLAY 0 also keeps a new dynamic dimension off screen.
                 self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
                 self.tabs[i].scene.refresh_dynamic_dimension_scales(true);
@@ -3965,6 +4209,90 @@ impl OpenCADStudio {
                 if let Some(pd) = pending {
                     self.commit_undo_delta(i, pd);
                 }
+            }
+            CmdResult::MakeParallel {
+                first_line,
+                first_ends,
+                second_line,
+                second_ends,
+            } => {
+                use crate::scene::parametric_constraints::{resolve_point, ConstraintKind};
+                let scope = self.tabs[i].current_parametric_scope();
+                let refs = [first_line, second_line];
+                if let Err(message) =
+                    self.tabs[i]
+                        .scene
+                        .validate_parametric_constraint(ConstraintKind::Parallel, &refs, None)
+                {
+                    return self.apply_cmd_result(CmdResult::ReportError(message.to_string()));
+                }
+                let already = self.tabs[i]
+                    .scene
+                    .parametric_constraint_set(scope)
+                    .is_some_and(|set| {
+                        set.constraints.iter().any(|c| {
+                            c.enabled
+                                && c.kind == ConstraintKind::Parallel
+                                && c.refs.contains(&first_line)
+                                && c.refs.contains(&second_line)
+                        })
+                    });
+                if !already {
+                    let constraints_before = self.tabs[i]
+                        .scene
+                        .parametric_constraint_set(scope)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            crate::scene::parametric_constraints::ParametricConstraintSet::new(
+                                scope,
+                            )
+                        });
+                    let pending = self.begin_undo(i, "Parallel constraint", 1, true);
+                    self.tabs[i]
+                        .scene
+                        .record_undo_parametric_constraints_before(scope, constraints_before);
+                    let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
+                    let id = set.add(ConstraintKind::Parallel, refs.to_vec(), None);
+                    self.tabs[i].scene.note_parametric_constraint_applied(
+                        scope,
+                        id,
+                        self.constraint_bar_display,
+                    );
+                    // The first line stays; the second turns parallel the way the
+                    // Parallel constraint itself moves it.
+                    self.tabs[i].scene.bump_entities_with_parametric_policy(
+                        &[(second_line.entity, crate::scene::ChangeKind::Modified)],
+                        &first_ends,
+                        self.constraint_solve_mode,
+                    );
+                    self.tabs[i].dirty = true;
+                    if let Some(pd) = pending {
+                        self.commit_undo_delta(i, pd);
+                    }
+                }
+                let ends = {
+                    let document = &self.tabs[i].scene.document;
+                    document.get_entity(second_line.entity).and_then(|entity| {
+                        let world = |reference: crate::scene::parametric_constraints::ParametricRef| {
+                            let point = resolve_point(entity, reference.marker?)?;
+                            Some((reference, glam::DVec3::new(point.x, point.y, point.z)))
+                        };
+                        Some([world(second_ends[0])?, world(second_ends[1])?])
+                    })
+                };
+                let Some(ends) = ends else {
+                    return self.apply_cmd_result(CmdResult::ReportError(
+                        crate::modules::parametric::DimConstraintCommand::NO_OBJECT.to_string(),
+                    ));
+                };
+                let result = self.tabs[i]
+                    .active_cmd
+                    .as_mut()
+                    .map(|command| command.accept_parallel_line(ends));
+                return match result {
+                    Some(result) => self.apply_cmd_result(result),
+                    None => Task::none(),
+                };
             }
             CmdResult::AddFixedConstraint(pick) => {
                 use crate::modules::parametric::FixConstraintCommand;
@@ -8373,10 +8701,22 @@ fn entity_at_typed_point(
         extent = extent
             .max((bounds.max.x - bounds.min.x).abs())
             .max((bounds.max.y - bounds.min.y).abs());
-        let Some(distance) =
-            crate::scene::viewport_dimension_pick::planar_pick_distance(entity, point)
-        else {
-            continue;
+        let distance = match crate::scene::viewport_dimension_pick::planar_pick_distance(entity, point) {
+            Some(distance) => distance,
+            // A text or an ellipse answers by its extent, the way a click
+            // inside it picks it.
+            None if matches!(
+                entity,
+                acadrust::EntityType::Text(_)
+                    | acadrust::EntityType::MText(_)
+                    | acadrust::EntityType::Ellipse(_)
+            ) =>
+            {
+                let dx = (bounds.min.x - point.x).max(point.x - bounds.max.x).max(0.0);
+                let dy = (bounds.min.y - point.y).max(point.y - bounds.max.y).max(0.0);
+                dx.hypot(dy)
+            }
+            None => continue,
         };
         if nearest.is_none_or(|(best, _)| distance < best) {
             nearest = Some((distance, common.handle));

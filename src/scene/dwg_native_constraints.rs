@@ -1217,6 +1217,7 @@ impl Allocator<'_> {
         name: &str,
         formula: &str,
         resolved: f64,
+        description: &str,
     ) -> Handle {
         if let Some(&handle) = self.variables.get(name) {
             if let Some(ObjectType::Associative(object)) = self.document.objects.get_mut(&handle) {
@@ -1244,7 +1245,7 @@ impl Allocator<'_> {
                 name: name.to_string(),
                 expression: formula.to_string(),
                 evaluator: "AcDbCalc:1.0".to_string(),
-                description: String::new(),
+                description: description.to_string(),
                 value: Self::numeric_eval(resolved),
                 has_cached_value: false,
                 cached_value: String::new(),
@@ -1883,6 +1884,7 @@ fn driving_value(
         variable.expression.clone()
     };
     if parameters.set(&variable.name, &source).is_ok() {
+        parameters.set_description(&variable.name, &variable.description);
         Some(DrivingValue::Named(variable.name.clone()))
     } else {
         literal
@@ -2610,6 +2612,7 @@ fn materialize_scope(
                 variable.action.action_index = index as i32 + 1;
                 if let Some(parameter) = parameters.get(&variable.name) {
                     variable.expression = parameter.source.clone();
+                    variable.description = parameters.description(&parameter.name).to_string();
                     if let Ok(resolved) = parameters.resolve(&parameter.name) {
                         variable.value = Allocator::numeric_eval(resolved);
                     }
@@ -2621,7 +2624,13 @@ fn materialize_scope(
     if materialize_all_parameters {
         for parameter in parameters.iter() {
             let resolved = parameters.resolve(&parameter.name).unwrap_or(0.0);
-            allocator.variable(network_handle, &parameter.name, &parameter.source, resolved);
+            allocator.variable(
+                network_handle,
+                &parameter.name,
+                &parameter.source,
+                resolved,
+                parameters.description(&parameter.name),
+            );
         }
     }
 
@@ -2666,7 +2675,13 @@ fn materialize_scope(
             DrivingValue::Literal(_) => (format!("d{node_id}"), resolved.to_string()),
         };
         node_names.insert(node_id, name.clone());
-        let variable_handle = allocator.variable(network_handle, &name, &formula, resolved);
+        let variable_handle = allocator.variable(
+            network_handle,
+            &name,
+            &formula,
+            resolved,
+            parameters.description(&name),
+        );
         let dependency_id = group_dependencies.len() as i32 + 1;
         let dep_handle =
             allocator.value_dependency(group_handle?, variable_handle, resolved, dependency_id);
