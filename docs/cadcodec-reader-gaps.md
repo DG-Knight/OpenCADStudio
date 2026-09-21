@@ -199,9 +199,12 @@ These are format constraints or OCS-side issues, not reader bugs:
   emits group 41 only when `flags.rational` is set, so the host must set that
   flag when weights are present (fixed in OCS).
 
-### Text and dimension style findings (2026-09-21, not filed)
+### Text and dimension style findings (2026-09-21)
 
-Found by `audit_python_text_and_dim_styles_over_real_ipc`; each is pinned by a canary.
+Found by `audit_python_text_and_dim_styles_over_real_ipc`; each is pinned by a canary. The first
+three are fixed in [HakanSeven12/cadcodec#51](https://github.com/HakanSeven12/cadcodec/pull/51)
+(independent of #48); the last two are not filed, because fixing them needs the XDATA layout
+AutoCAD expects and that cannot be checked here.
 
 - **`STYLE` generation flags:** the DXF writer hard-codes group 71 to 0, so a text
   style's `flags.backward` and `flags.upside_down` are lost on every DXF save (DWG keeps them).
@@ -212,5 +215,6 @@ Found by `audit_python_text_and_dim_styles_over_real_ipc`; each is pinned by a c
   resolves `dimtxsty` from it, so the name reopens as `Standard` (the handle is right; DWG resolves both).
 - **`TextStyle::true_type_font`** is never written or read by either codec, so it lives only in memory.
 - **`BLOCK_RECORD` description:** the DXF codec does not carry `BlockRecord::description`
-  (found by `audit_python_blocks_over_real_ipc`, pinned by a canary); DWG keeps it.
+  (found by `audit_python_blocks_over_real_ipc`, pinned by a canary); DWG keeps it. Not filed, for
+  the same reason as `true_type_font`.
 

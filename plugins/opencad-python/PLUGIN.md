@@ -181,7 +181,8 @@ positive, and `dimtxsty` must name an existing text style. `Standard` is never
 renamed or deleted; a style that is current or still referenced is never deleted;
 a case-only rename is refused. Style operations act on the active document.
 
-Known persistence limits (cadcodec, see `docs/cadcodec-reader-gaps.md`): a DXF
+Known persistence limits (cadcodec, see `docs/cadcodec-reader-gaps.md`; the first two are fixed in
+an open upstream pull request but OCS has not yet adopted it): a DXF
 save drops the backward/upside-down flags of a text style and does not restore a
 dimension style's `dimtxsty` name (the handle link survives); DWG keeps both.
 

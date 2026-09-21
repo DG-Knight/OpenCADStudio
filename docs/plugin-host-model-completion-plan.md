@@ -320,3 +320,12 @@ to a helper thread would be unsound here (the editor state is not `Send` and som
 a stack-growing dependency such as `stacker`, adds a crate to H7's tree to guard a case that cannot occur. The 64 MiB thread in the
 PEDIT audit stays, because a test thread gets only 2 MiB.
 
+### 2026-09-21: cadcodec PR #51 (text and dimension style DXF fixes)
+
+Second small upstream PR, [HakanSeven12/cadcodec#51](https://github.com/HakanSeven12/cadcodec/pull/51): STYLE generation
+flags (group 71 was hard-coded to 0), the STYLE oblique angle (group 50 is degrees; it was written and read as raw radians)
+and the DIMSTYLE text-style name (resolved from the group 340 handle). Three commits, three regression tests, independent of
+#48 (merged locally with it; the combined suite passes). Not included: `true_type_font` and the block description, which need
+an XDATA layout that cannot be verified here. OCS still pins the unfixed revision, so the canaries in
+`audit_python_text_and_dim_styles_over_real_ipc` still assert the wrong result until #51 is merged and OCS repins.
+
