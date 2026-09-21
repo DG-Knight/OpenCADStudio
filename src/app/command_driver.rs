@@ -1409,6 +1409,7 @@ impl OpenCADStudio {
             dimension.into_iter().collect(),
             parameter.into_iter().collect(),
         );
+        self.tabs[i].scene.bump_constraints_epoch();
         if self.tabs[i].scene.selected_constraint == Some(id) {
             self.tabs[i].scene.selected_constraint = None;
         }
@@ -1720,6 +1721,9 @@ impl OpenCADStudio {
                 self.tabs[i]
                     .scene
                     .record_undo_parametric_constraints_before(scope, before);
+                // A parameter rename rewrites the `Named` driving references
+                // pointing at it — the glyph labels change with them.
+                let mut renamed = false;
                 for constraint in
                     &mut self.tabs[i].scene.parametric_constraints[set_index].constraints
                 {
@@ -1728,8 +1732,12 @@ impl OpenCADStudio {
                     {
                         if name == &current.name {
                             *name = typed.clone();
+                            renamed = true;
                         }
                     }
+                }
+                if renamed {
+                    self.tabs[i].scene.bump_constraints_epoch();
                 }
             }
         }
@@ -1866,6 +1874,10 @@ impl OpenCADStudio {
                 if let Some(constraint) = set.constraints.iter_mut().find(|c| c.id == id) {
                     constraint.enabled = !reference;
                 }
+                // Toggling `enabled` changes the glyph placement set (and the
+                // dynamic pills), so the memoised placements must miss next
+                // frame — same guarantee `set_constraint_enabled` gives.
+                self.tabs[i].scene.bump_constraints_epoch();
                 self.tabs[i].scene.refresh_dynamic_dimension_texts();
                 self.tabs[i].scene.sync_native_parametric_graph();
                 self.tabs[i].dirty = true;

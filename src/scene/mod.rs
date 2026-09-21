@@ -2321,6 +2321,25 @@ pub struct Scene {
         parametric_constraints::ParametricScope,
         parametric_constraints::ConstraintId,
     )>,
+    /// Bumped on every parametric-constraint-set mutation (add / remove /
+    /// metadata edit / visibility override / whole-set restore). The
+    /// constraint-glyph memoization keys on this so a stale cache can never
+    /// outlive the edit that invalidated it — a missed bump is a
+    /// correctness bug (stale glyphs), not just a perf miss.
+    constraints_epoch: u64,
+    /// Memoised constraint-glyph placements for the latest [`GlyphKey`](parametric_constraints::GlyphKey)
+    /// (Task 3; overlay/hit consumers adopt it in Task 4). Single-slot memo:
+    /// within one frame view + hit-test + dwell + click share the key (hits),
+    /// camera motion misses once per frame by design, and edits just miss on
+    /// the stale entry — no leak possible. `RefCell` + `Arc` shape mirrors
+    /// `layout_names_cache`; a missed constraint bump serves stale glyphs, so
+    /// every set mutation must bump `constraints_epoch`.
+    glyph_cache: RefCell<
+        Option<(
+            parametric_constraints::GlyphKey,
+            Arc<[parametric_constraints::GlyphEntry]>,
+        )>,
+    >,
     /// Document-wide named-parameter and expression table decoded from
     /// standard associative variables.
     pub(crate) named_parameters: named_parameters::ParameterTable,
@@ -2656,6 +2675,8 @@ impl Scene {
             dynamic_dimension_camera_gen: None,
             hidden_parametric_constraints: HashSet::default(),
             shown_parametric_constraints: HashSet::default(),
+            constraints_epoch: 0,
+            glyph_cache: RefCell::new(None),
             named_parameters: named_parameters::ParameterTable::new(),
             has_associative_centers: std::cell::Cell::new(None),
             block_defn_cache: RefCell::new(HashMap::default()),
@@ -5703,6 +5724,9 @@ impl Scene {
             .collect();
         self.object_isolation.hidden.extend(hide);
         self.object_isolation.keep = Some(keep);
+        // Isolation hides entities the memoised glyph placements read
+        // (`entity_temporarily_hidden`), so invalidate them too.
+        self.bump_constraints_epoch();
         if !changes.is_empty() {
             self.bump_entities(&changes);
         }
@@ -5726,6 +5750,9 @@ impl Scene {
         self.selected.clear();
         self.selected_order.clear();
         self.bump_selection_set();
+        // Newly hidden entities change `entity_temporarily_hidden`, which the
+        // memoised glyph placements read — invalidate them too.
+        self.bump_constraints_epoch();
         self.bump_entities(&changes);
     }
 
@@ -5742,6 +5769,12 @@ impl Scene {
             .map(|handle| (handle, ChangeKind::Modified))
             .collect();
         self.object_isolation = ObjectIsolationState::default();
+        // Restoring isolated entities changes `entity_temporarily_hidden`,
+        // which the memoised glyph placements read — invalidate them too.
+        // (`reset_transient_visibility` needs no bump: it only runs on
+        // doc-replace, where `load_parametric_constraints_from_document`
+        // already bumps the epoch for the whole-set replace.)
+        self.bump_constraints_epoch();
         if !changes.is_empty() {
             self.bump_entities(&changes);
         }
@@ -6025,6 +6058,20 @@ impl Scene {
 
     pub fn bump_scale_epoch(&mut self) {
         self.scale_epoch += 1;
+    }
+
+    /// Current parametric-constraint-set epoch (cache key input for the
+    /// memoised `cached_glyph_placements` accessor).
+    #[allow(dead_code)]
+    pub(crate) fn constraints_epoch(&self) -> u64 {
+        self.constraints_epoch
+    }
+
+    /// Invalidate constraint-glyph consumers. Call on EVERY mutation of the
+    /// constraint set or its visibility overrides — a missed bump serves
+    /// stale glyphs.
+    pub(crate) fn bump_constraints_epoch(&mut self) {
+        self.constraints_epoch += 1;
     }
 
     pub fn cached_scale_picker_list(&self) -> std::sync::Arc<Vec<(String, f32, f64)>> {

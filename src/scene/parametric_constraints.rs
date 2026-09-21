@@ -2,6 +2,8 @@
 
 use super::named_parameters::DrivingValue;
 use acadrust::types::{Handle, Vector3};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// One endpoint a constraint attaches to: an entity plus which sub-element
 /// of it.
@@ -1579,6 +1581,170 @@ pub(crate) fn constraint_hover_points(
     points
 }
 
+/// Memoised key for `Scene::cached_glyph_placements`.
+/// `sel_sig` hashes the hide sets the dynamic pills read on EVERY display
+/// mode (`preview_hidden`, `command_preview_hidden`,
+/// `hidden_dynamic_dimensions` — `constraint_glyph_placements_screen` filters
+/// `entity_temporarily_hidden` unconditionally) PLUS, only when
+/// `display_mode & 2 != 0`, the selection-gated sets (`selected`,
+/// `hidden_parametric_constraints`, `shown_parametric_constraints`, and again
+/// `preview_hidden` as a selection source). Hover and selection-highlight
+/// state deliberately stay OUT — they only affect the highlight, never the
+/// placement set. Isolation contents stay OUT — the isolation mutators bump
+/// `constraints_epoch` instead, so no key input is needed for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlyphKey {
+    pub scope: ParametricScope,
+    pub c_epoch: u64,
+    pub g_epoch: u64,
+    pub cam_gen: u64,
+    pub active_vp: Option<Handle>,
+    pub layout_is_model: bool,
+    pub vp_bits: (u32, u32),
+    pub show_values: bool,
+    pub disp: i16,
+    pub bar: i16,
+    pub sel_sig: u64,
+    pub annotation_scale: u32,
+}
+
+/// One cached glyph placement: the `constraint_glyph_placements_screen`
+/// tuple plus its precomputed overlay layout (`size`, `tangent_dx`,
+/// `top_left`), so overlay consumers never re-clone labels or recompute
+/// offsets. `is_selected` and the tooltip stay OUT — applied post-hoc.
+#[derive(Debug, Clone)]
+pub struct GlyphEntry {
+    pub id: ConstraintId,
+    pub anchor: iced::Point,
+    pub outward: [f32; 2],
+    pub label: Arc<str>,
+    pub conflicting: bool,
+    pub hover: Arc<[iced::Point]>,
+    pub size: iced::Size,
+    pub tangent_dx: f32,
+    pub top_left: iced::Point,
+}
+
+// Single source of truth for constraint-glyph layout (Task 4): the overlay
+// side was deleted and imports these instead, so the drawn pills, the
+// hit-test, and the cached `top_left`/`tangent_dx` can never drift apart.
+pub(crate) const GLYPH_SIZE: f32 = 14.0;
+const GLYPH_PAD_X: f32 = 7.0;
+const GLYPH_PAD_Y: f32 = 4.0;
+const GLYPH_GAP: f32 = 6.0;
+const GLYPH_ROW_GAP: f32 = 4.0;
+const GLYPH_COINCIDENT_SIZE: f32 = 9.0;
+
+pub(crate) fn glyph_is_compact(label: &str) -> bool {
+    matches!(label, "≡" | "∈")
+}
+
+pub(crate) fn glyph_is_fixed(label: &str) -> bool {
+    label == "F" || label == FIXED_POINT_GLYPH
+}
+
+pub(crate) fn glyph_is_vertical(label: &str) -> bool {
+    label == "│" || label == VERTICAL_POINTS_GLYPH
+}
+
+pub(crate) fn constraint_glyph_size(label: &str) -> iced::Size {
+    if glyph_is_compact(label) {
+        return iced::Size::new(GLYPH_COINCIDENT_SIZE, GLYPH_COINCIDENT_SIZE);
+    }
+    if label == "G²"
+        || glyph_is_fixed(label)
+        || glyph_is_vertical(label)
+        || label == DYNAMIC_DIMENSION_GLYPH
+    {
+        let side = GLYPH_SIZE + GLYPH_PAD_Y * 2.0;
+        return iced::Size::new(side, side);
+    }
+    let w = label.chars().count() as f32 * GLYPH_SIZE * 0.62 + GLYPH_PAD_X * 2.0;
+    let h = GLYPH_SIZE + GLYPH_PAD_Y * 2.0;
+    iced::Size::new(w, h)
+}
+
+pub(crate) fn constraint_glyph_box(
+    anchor: iced::Point,
+    outward: [f32; 2],
+    label: &str,
+    tangent_offset: f32,
+) -> (iced::Point, iced::Size) {
+    let size = constraint_glyph_size(label);
+    let gap = if glyph_is_compact(label) {
+        1.0
+    } else {
+        GLYPH_GAP
+    };
+    let distance =
+        outward[0].abs() * size.width * 0.5 + outward[1].abs() * size.height * 0.5 + gap;
+    let tangent = [-outward[1], outward[0]];
+    (
+        iced::Point::new(
+            anchor.x + outward[0] * distance + tangent[0] * tangent_offset - size.width * 0.5,
+            anchor.y + outward[1] * distance + tangent[1] * tangent_offset - size.height * 0.5,
+        ),
+        size,
+    )
+}
+
+pub(crate) fn constraint_glyph_offsets(glyphs: &[(iced::Point, [f32; 2], &str)]) -> Vec<f32> {
+    let mut groups: rustc_hash::FxHashMap<[u32; 4], Vec<usize>> =
+        rustc_hash::FxHashMap::default();
+    for (index, (anchor, outward, _)) in glyphs.iter().enumerate() {
+        groups
+            .entry([
+                anchor.x.to_bits(),
+                anchor.y.to_bits(),
+                outward[0].to_bits(),
+                outward[1].to_bits(),
+            ])
+            .or_default()
+            .push(index);
+    }
+
+    let mut offsets = vec![0.0; glyphs.len()];
+    for indices in groups.values().filter(|indices| indices.len() > 1) {
+        let half_extents: Vec<f32> = indices
+            .iter()
+            .map(|index| {
+                let (_, outward, label) = &glyphs[*index];
+                let size = constraint_glyph_size(label);
+                let tangent = [-outward[1], outward[0]];
+                tangent[0].abs() * size.width * 0.5 + tangent[1].abs() * size.height * 0.5
+            })
+            .collect();
+        let total =
+            half_extents.iter().sum::<f32>() * 2.0 + GLYPH_ROW_GAP * (indices.len() - 1) as f32;
+        let mut cursor = -total * 0.5;
+        for (index, half_extent) in indices.iter().zip(half_extents) {
+            offsets[*index] = cursor + half_extent;
+            cursor += half_extent * 2.0 + GLYPH_ROW_GAP;
+        }
+    }
+    offsets
+}
+
+/// Hit-tests screen point `p` against the precomputed `top_left`/`size` boxes
+/// in `entries` — the same pills `draw` renders, including the tangential
+/// fan-out baked into `tangent_dx` at cache time. Returns the index of the
+/// topmost (last-drawn) match. Shared by `Scene::constraint_glyph_hit` and
+/// the overlay draw/hover paths so the clickable area can never drift from
+/// what's drawn and no caller recomputes offsets.
+pub(crate) fn glyph_hit_test_entries(entries: &[GlyphEntry], p: iced::Point) -> Option<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, entry)| {
+            let within = p.x >= entry.top_left.x
+                && p.x <= entry.top_left.x + entry.size.width
+                && p.y >= entry.top_left.y
+                && p.y <= entry.top_left.y + entry.size.height;
+            within.then_some(index)
+        })
+}
+
 impl super::Scene {
     /// Expand through enabled constraints. Whole-object translations follow
     /// point connections; grip previews include curve relations as well.
@@ -1772,6 +1938,10 @@ impl super::Scene {
         } else {
             self.shown_parametric_constraints.remove(&(scope, id));
         }
+        // Every production `add` flows through here, so this bump covers all
+        // constraint creations (add / add_axis_constraint / AUTOCONSTRAIN /
+        // DCCONVERT / Coincident / Equal / Fixed / dimensional handlers).
+        self.bump_constraints_epoch();
     }
 
     pub fn set_parametric_constraint_visibility(
@@ -1806,6 +1976,9 @@ impl super::Scene {
             }
         }
         self.refresh_hidden_dynamic_dimensions();
+        if !ids.is_empty() {
+            self.bump_constraints_epoch();
+        }
         ids.len()
     }
 
@@ -1959,7 +2132,46 @@ impl super::Scene {
             .map(|handle| (handle, super::ChangeKind::Modified))
             .collect();
         self.hidden_dynamic_dimensions = desired;
+        // The memoised glyph placements read this set on every display mode
+        // (dynamic pills filter `entity_temporarily_hidden` unconditionally),
+        // so a change here must invalidate them — this covers all four
+        // callers, including the DYNCONSTRAINTDISPLAY toggle that has no
+        // call-site bump of its own.
+        self.bump_constraints_epoch();
         self.bump_entities(&changes);
+    }
+
+    /// Enables or disables one constraint without losing it — the production
+    /// path for toggling `ParametricConstraint::enabled` (a re-solve skips a
+    /// disabled constraint; glyph placements filter it out). Returns whether
+    /// a constraint with `id` exists in `scope`. Bumps the constraints epoch
+    /// exactly when the value actually changes so future callers cannot
+    /// introduce a stale-glyph path by writing the field directly.
+    pub fn set_constraint_enabled(
+        &mut self,
+        scope: ParametricScope,
+        id: ConstraintId,
+        enabled: bool,
+    ) -> bool {
+        let mut found = false;
+        let mut changed = false;
+        if let Some(set) = self
+            .parametric_constraints
+            .iter_mut()
+            .find(|set| set.scope == scope)
+        {
+            if let Some(constraint) = set.constraints.iter_mut().find(|c| c.id == id) {
+                found = true;
+                if constraint.enabled != enabled {
+                    constraint.enabled = enabled;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.bump_constraints_epoch();
+        }
+        found
     }
 
     /// Infers relations already present in the selected geometry.
@@ -2298,10 +2510,11 @@ impl super::Scene {
     /// `vp_size` is the full canvas size (as `SelectionState::vp_size`
     /// reports it), matching what `viewport_edit_frame`/
     /// `active_model_tile_bounds` expect. Mirrors the projection
-    /// `crate::app::view` builds its own render list with, and is reused by
-    /// [`constraint_glyph_hit`](Self::constraint_glyph_hit) — both feed the
-    /// same `(anchor, outward, label)` triples into
-    /// `crate::ui::overlay::constraint_glyph_box`/`constraint_glyph_offsets`,
+    /// `crate::app::view` builds its own render list with. The memoised
+    /// [`cached_glyph_placements`](Self::cached_glyph_placements) maps these
+    /// same `(anchor, outward, label)` triples through
+    /// [`constraint_glyph_box`](crate::scene::parametric_constraints::constraint_glyph_box)/
+    /// [`constraint_glyph_offsets`](crate::scene::parametric_constraints::constraint_glyph_offsets),
     /// so hit-testing can never drift from what's actually drawn.
     pub fn constraint_glyph_placements_screen(
         &self,
@@ -2503,10 +2716,9 @@ impl super::Scene {
     }
 
     /// Hit-tests screen point `p` (same coordinate space as `p_full` in the
-    /// viewport click handler) against the glyph pills from
-    /// [`constraint_glyph_placements_screen`](Self::constraint_glyph_placements_screen),
-    /// via `crate::ui::overlay::constraint_glyph_hit_test`'s shared layout
-    /// math, so a click only registers where the pill is actually drawn.
+    /// viewport click handler) against the memoised [`cached_glyph_placements`](Self::cached_glyph_placements)
+    /// entries, so a click only registers where the pill is actually drawn —
+    /// with no placement recompute on the mouse-move/click hot path.
     pub fn constraint_glyph_hit(
         &self,
         scope: ParametricScope,
@@ -2516,6 +2728,111 @@ impl super::Scene {
         bar_mode: i16,
         p: iced::Point,
     ) -> Option<ConstraintId> {
+        let entries = self.cached_glyph_placements(scope, vp_size, show_values, display_mode, bar_mode);
+        let index = glyph_hit_test_entries(&entries, p)?;
+        Some(entries[index].id)
+    }
+
+    /// Order-independent hash of the visibility sets that feed
+    /// [`constraint_glyph_placements_screen`](Self::constraint_glyph_placements_screen).
+    /// The dynamic pills filter `entity_temporarily_hidden` on EVERY display
+    /// mode, so `preview_hidden`, `command_preview_hidden` and
+    /// `hidden_dynamic_dimensions` are hashed UNCONDITIONALLY; `selected` and
+    /// the hidden/shown override sets only affect the `should_display` filter
+    /// when `display_mode & 2 != 0`, so they stay conditional (and the key
+    /// stays shared across selection changes in the other modes).
+    pub(crate) fn glyph_selection_signature(&self, display_mode: i16) -> u64 {
+        fn item_hash(item: &impl Hash) -> u64 {
+            let mut hasher = rustc_hash::FxHasher::default();
+            item.hash(&mut hasher);
+            hasher.finish()
+        }
+        // Order-independent single pass: per-item hashes combine
+        // commutatively (wrapping add), so iteration order never matters;
+        // one FxHasher over (combined, count) folds in the total length, no
+        // alloc/sort on the hot hit path.
+        let mut combined: u64 = 0;
+        let mut count: u64 = 0;
+        // Always-read hide sets: the dynamic-dimension pills consult these
+        // whatever the display mode, so a stale signature here would serve a
+        // pill for a just-hidden dimension (or hide a just-shown one).
+        for item in self.preview_hidden.iter() {
+            combined = combined.wrapping_add(item_hash(item));
+            count += 1;
+        }
+        for item in self.command_preview_hidden.iter() {
+            combined = combined.wrapping_add(item_hash(item));
+            count += 1;
+        }
+        for item in self.hidden_dynamic_dimensions.iter() {
+            combined = combined.wrapping_add(item_hash(item));
+            count += 1;
+        }
+        if display_mode & 2 != 0 {
+            for item in self.selected.iter() {
+                combined = combined.wrapping_add(item_hash(item));
+                count += 1;
+            }
+            for item in self.hidden_parametric_constraints.iter() {
+                combined = combined.wrapping_add(item_hash(item));
+                count += 1;
+            }
+            for item in self.shown_parametric_constraints.iter() {
+                combined = combined.wrapping_add(item_hash(item));
+                count += 1;
+            }
+        }
+        let mut hasher = rustc_hash::FxHasher::default();
+        combined.hash(&mut hasher);
+        count.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Memoised [`constraint_glyph_placements_screen`](Self::constraint_glyph_placements_screen),
+    /// keyed by [`GlyphKey`]: the miss path calls the existing placements fn
+    /// VERBATIM (no algorithm change), maps each tuple to a [`GlyphEntry`]
+    /// with precomputed layout, and stores the `Arc<[GlyphEntry]>` in the
+    /// Scene-owned single-slot memo. NaN filtering is the placements fn's own and is
+    /// cached as-is. Camera/layout/selection state is read from `self`, so
+    /// the `(scope, vp_size, show_values, display_mode, bar_mode)` signature
+    /// stays identical to the stub's.
+    ///
+    /// Single-slot rationale: within one frame, view + hit-test + dwell +
+    /// click all share the key (hits); across camera motion each frame misses
+    /// once by design; across edits the stale single entry just misses — no
+    /// leak possible (an unbounded map would orphan an entry per camera frame
+    /// and per edit, since `cam_gen` is in the key).
+    pub fn cached_glyph_placements(
+        &self,
+        scope: ParametricScope,
+        vp_size: (f32, f32),
+        show_values: bool,
+        display_mode: i16,
+        bar_mode: i16,
+    ) -> std::sync::Arc<[GlyphEntry]> {
+        let key = GlyphKey {
+            scope,
+            c_epoch: self.constraints_epoch,
+            g_epoch: self.geometry_epoch,
+            cam_gen: self.camera_generation,
+            active_vp: self.active_viewport,
+            layout_is_model: self.current_layout == "Model",
+            vp_bits: (vp_size.0.to_bits(), vp_size.1.to_bits()),
+            show_values,
+            disp: display_mode,
+            bar: bar_mode,
+            sel_sig: self.glyph_selection_signature(display_mode),
+            // The dynamic pills anchor through `dynamic_dimension_lock_anchor`
+            // with this scale — a CANNOSCALE change moves them, so it is keyed
+            // (bitwise: NaN never occurs here, and distinct bit patterns must
+            // miss rather than alias).
+            annotation_scale: self.annotation_scale.to_bits(),
+        };
+        if let Some((cached_key, cached_arc)) = self.glyph_cache.borrow().as_ref() {
+            if *cached_key == key {
+                return std::sync::Arc::clone(cached_arc);
+            }
+        }
         let placements = self.constraint_glyph_placements_screen(
             scope,
             vp_size,
@@ -2523,14 +2840,36 @@ impl super::Scene {
             display_mode,
             bar_mode,
         );
-        let glyphs: Vec<(iced::Point, [f32; 2], String, bool)> = placements
-            .iter()
-            .map(|(_, point, direction, label, is_conflicting, _)| {
-                (*point, *direction, label.clone(), *is_conflicting)
-            })
+        let offsets = constraint_glyph_offsets(
+            &placements
+                .iter()
+                .map(|(_, point, direction, label, _, _)| (*point, *direction, label.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let entries: Vec<GlyphEntry> = placements
+            .into_iter()
+            .zip(offsets)
+            .map(
+                |((id, anchor, outward, label, conflicting, hover), tangent_dx)| {
+                    let size = constraint_glyph_size(&label);
+                    let (top_left, _) = constraint_glyph_box(anchor, outward, &label, tangent_dx);
+                    GlyphEntry {
+                        id,
+                        anchor,
+                        outward,
+                        label: Arc::from(label),
+                        conflicting,
+                        hover: Arc::from(hover),
+                        size,
+                        tangent_dx,
+                        top_left,
+                    }
+                },
+            )
             .collect();
-        let index = crate::ui::overlay::constraint_glyph_hit_test(&glyphs, p)?;
-        Some(placements[index].0)
+        let arc: Arc<[GlyphEntry]> = Arc::from(entries);
+        *self.glyph_cache.borrow_mut() = Some((key, Arc::clone(&arc)));
+        arc
     }
 
     /// Handle remapping lives in each command that duplicates
@@ -2598,6 +2937,7 @@ impl super::Scene {
         }
         touched.sort();
         touched.dedup();
+        self.bump_constraints_epoch();
         let changes: Vec<(Handle, super::ChangeKind)> = touched
             .into_iter()
             .map(|h| (h, super::ChangeKind::Modified))
@@ -2894,6 +3234,135 @@ mod tests {
         assert!(
             set.get(horizontal_other).is_some(),
             "unrelated entity's constraint must survive"
+        );
+    }
+
+    #[test]
+    fn glyph_hit_test_entries_matches_precomputed_boxes() {
+        let mut scene = super::super::Scene::new();
+        let scope = ParametricScope::ModelSpace;
+        let line = scene.add_entity(acadrust::EntityType::Line(
+            acadrust::entities::Line::from_points(
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            ),
+        ));
+        scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        let id = scene.parametric_constraint_set_mut(scope).add(
+            ConstraintKind::Horizontal,
+            vec![ParametricRef::whole(line)],
+            None,
+        );
+        scene.note_parametric_constraint_applied(scope, id, 3);
+        let vp = (800.0_f32, 600.0_f32);
+        let entries = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        assert!(!entries.is_empty(), "fixture must yield glyphs");
+        // A click at the centre of the precomputed box must hit that entry,
+        // using the cached layout only (no offset recompute).
+        let centre = iced::Point::new(
+            entries[0].top_left.x + entries[0].size.width * 0.5,
+            entries[0].top_left.y + entries[0].size.height * 0.5,
+        );
+        assert_eq!(super::glyph_hit_test_entries(&entries, centre), Some(0));
+        // Far away from every box must miss.
+        assert_eq!(
+            super::glyph_hit_test_entries(&entries, iced::Point::new(-5000.0, -5000.0)),
+            None
+        );
+        // `constraint_glyph_hit` must agree with the cached entries (it reuses
+        // the cache rather than recomputing placements).
+        assert_eq!(
+            scene.constraint_glyph_hit(scope, vp, true, 3, 4095, centre),
+            Some(entries[0].id)
+        );
+    }
+
+    #[test]
+    fn cached_glyph_placements_hit_returns_same_arc() {
+        let mut scene = super::super::Scene::new();
+        let scope = ParametricScope::ModelSpace;
+        let line = scene.add_entity(acadrust::EntityType::Line(
+            acadrust::entities::Line::from_points(
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            ),
+        ));
+        scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        let id = scene.parametric_constraint_set_mut(scope).add(
+            ConstraintKind::Horizontal,
+            vec![ParametricRef::whole(line)],
+            None,
+        );
+        scene.note_parametric_constraint_applied(scope, id, 3);
+        let vp = (800.0_f32, 600.0_f32);
+        let first = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        let second = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        assert!(
+            !first.is_empty(),
+            "fixture must yield at least one glyph placement"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "identical key inputs must return the same cached Arc"
+        );
+    }
+
+    #[test]
+    fn cached_glyph_placements_invalidated_by_metadata_edit() {
+        let mut scene = super::super::Scene::new();
+        let scope = ParametricScope::ModelSpace;
+        let line = scene.add_entity(acadrust::EntityType::Line(
+            acadrust::entities::Line::from_points(
+                Vector3::new(-1.0, 0.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+            ),
+        ));
+        scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        let id = scene.parametric_constraint_set_mut(scope).add(
+            ConstraintKind::Horizontal,
+            vec![ParametricRef::whole(line)],
+            None,
+        );
+        scene.note_parametric_constraint_applied(scope, id, 3);
+        let vp = (800.0_f32, 600.0_f32);
+        let before = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        assert!(
+            !before.is_empty(),
+            "fixture must yield at least one glyph placement"
+        );
+        // NOTE: no production set_enabled/toggle_enabled method exists (grep:
+        // `enabled` is only written in `add()`, DWG import, and tests), so the
+        // metadata edit goes through the REAL production Scene-level toggle
+        // used by draw/update paths — hiding the geometric constraint — which
+        // Task 2 must wire to an epoch bump. Not a direct field write.
+        scene.set_parametric_constraint_visibility(scope, None, false, false);
+        let after = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "metadata edit must invalidate the cache (new Arc)"
+        );
+        assert!(
+            after.is_empty(),
+            "output must reflect the edit: hidden constraint yields no glyphs"
+        );
+        // A selection change must also miss when `display_mode & 2 != 0`
+        // (sel_sig is part of the key): restore, warm, then reselect.
+        scene.set_parametric_constraint_visibility(scope, None, false, true);
+        let restored = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        assert!(
+            !restored.is_empty(),
+            "restored constraint must yield glyphs again"
+        );
+        let reselected_warm = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        assert!(
+            std::sync::Arc::ptr_eq(&restored, &reselected_warm),
+            "identical key inputs must return the same cached Arc"
+        );
+        scene.selected.insert(line);
+        let reselected = scene.cached_glyph_placements(scope, vp, true, 3, 4095);
+        assert!(
+            !std::sync::Arc::ptr_eq(&reselected_warm, &reselected),
+            "selection change must invalidate the cache (new Arc)"
         );
     }
 

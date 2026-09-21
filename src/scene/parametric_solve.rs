@@ -3772,6 +3772,9 @@ impl Scene {
                     let before = self.parametric_constraints[i].clone();
                     self.record_undo_parametric_constraints_before(scope, before);
                     self.parametric_constraints[i].remove_all_touching(*handle);
+                    // Erasing an entity deletes its constraints with it — the
+                    // glyph set changed.
+                    self.bump_constraints_epoch();
                 }
             }
         }
@@ -3824,10 +3827,17 @@ impl Scene {
             };
             if initial_fixed_refs.is_empty() {
                 self.parametric_constraints[i].dof = Some(dof);
-                self.parametric_constraints[i].conflicts = conflicts;
+                if self.parametric_constraints[i].conflicts != conflicts {
+                    self.parametric_constraints[i].conflicts = conflicts;
+                    // Conflict badges render on the glyphs themselves.
+                    self.bump_constraints_epoch();
+                }
             } else {
                 self.parametric_constraints[i].dof = None;
-                self.parametric_constraints[i].conflicts.clear();
+                if !self.parametric_constraints[i].conflicts.is_empty() {
+                    self.parametric_constraints[i].conflicts.clear();
+                    self.bump_constraints_epoch();
+                }
             }
             // A dimensional constraint set to zero means the collapse.
             let zero_collapse: HashSet<Handle> = {

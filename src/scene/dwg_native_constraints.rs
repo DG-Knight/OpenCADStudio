@@ -2841,6 +2841,10 @@ impl Scene {
                 self.parametric_constraints.push(set);
             }
         }
+        // Whole-set replace (file open / reload): covers the DWG-import
+        // `enabled` / `axis_direction` / `distance_direction` / `angle_sector`
+        // writes, which happen on the local set during decode.
+        self.bump_constraints_epoch();
     }
 
     /// Makes the standard associative graph match the live command model.

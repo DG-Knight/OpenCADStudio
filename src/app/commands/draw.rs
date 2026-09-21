@@ -1159,6 +1159,7 @@ impl OpenCADStudio {
                         set.remove(*id);
                     }
                     self.purge_dimensional_extras(i, dimensions, parameters);
+                    self.tabs[i].scene.bump_constraints_epoch();
                     let changes: Vec<_> = handles
                         .iter()
                         .copied()

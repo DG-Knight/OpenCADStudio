@@ -978,6 +978,9 @@ impl OpenCADStudio {
         }
         let changes = self.tabs[i].scene.apply_entity_delta(&d.entities, undo);
         let scene = &mut self.tabs[i].scene;
+        if !d.parametric_constraints.is_empty() {
+            scene.bump_constraints_epoch();
+        }
         for entry in &d.parametric_constraints {
             let value = if undo { &entry.before } else { &entry.after };
             *scene.parametric_constraint_set_mut(entry.scope) = value.clone();

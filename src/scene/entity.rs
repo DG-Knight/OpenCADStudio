@@ -2710,6 +2710,7 @@ impl Scene {
         // and named parameters into the fresh one.
         self.parametric_constraints.clear();
         self.named_parameters = crate::scene::named_parameters::ParameterTable::new();
+        self.bump_constraints_epoch();
         self.bump_geometry();
         self.bump_layout_epoch();
         self.bump_scale_epoch();

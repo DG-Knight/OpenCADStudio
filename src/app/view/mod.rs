@@ -863,39 +863,26 @@ bg={bg_ms:.1}ms n={view_count}"
                         .map(|constraint| constraint.kind.glyph_symbol().to_string())
                 })
             };
-            let constraint_glyphs: Vec<(
-                iced::Point,
-                [f32; 2],
-                String,
-                bool,
-                bool,
-                Vec<iced::Point>,
-            )> = if is_paper {
-                Vec::new()
+            let constraint_glyphs: std::sync::Arc<
+                [crate::scene::parametric_constraints::GlyphEntry],
+            > = if is_paper {
+                std::sync::Arc::from([])
             } else {
                 let scope = tab.current_parametric_scope();
-                tab.scene
-                    .constraint_glyph_placements_screen(
-                        scope,
-                        sel_ref.vp_size,
-                        self.show_constraint_values,
-                        self.constraint_bar_display,
-                        self.constraint_bar_mode,
-                    )
-                    .into_iter()
-                    .map(|(id, point, direction, label, is_conflicting, hover_points)| {
-                        let selected = tab.scene.selected_constraint == Some(id);
-                        (
-                            point,
-                            direction,
-                            label,
-                            is_conflicting,
-                            selected,
-                            hover_points,
-                        )
-                    })
-                    .collect()
+                tab.scene.cached_glyph_placements(
+                    scope,
+                    sel_ref.vp_size,
+                    self.show_constraint_values,
+                    self.constraint_bar_display,
+                    self.constraint_bar_mode,
+                )
             };
+            // Selection stays OUTSIDE the cache (applied post-hoc): a selection
+            // change must not invalidate the placement memo.
+            let constraint_glyph_selected: std::sync::Arc<[bool]> = constraint_glyphs
+                .iter()
+                .map(|entry| tab.scene.selected_constraint == Some(entry.id))
+                .collect();
             crate::ui::overlay::selection_overlay(
                 std::sync::Arc::clone(&tab.scene.selection),
                 snap_info,
@@ -939,6 +926,7 @@ bg={bg_ms:.1}ms n={view_count}"
                     grip_hover: self.model_space.grip_hover,
                 },
                 constraint_glyphs,
+                constraint_glyph_selected,
                 self.constraint_glyph_tooltip
                     .map(|kind| crate::t!(kind.label()).into_owned()),
                 constraint_cursor_badge,

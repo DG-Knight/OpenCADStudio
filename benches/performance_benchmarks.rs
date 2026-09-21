@@ -1618,6 +1618,99 @@ fn bench_ui_grip_budget(runner: &mut BenchmarkRunner) {
     );
 }
 
+// ── 12e. UI Constraint-Glyph Cache Hit (memoised placements) ────────────────
+// Covers the parametric constraint-glyph memo (`Scene::cached_glyph_placements`,
+// src/scene/parametric_constraints.rs): dozens of constraints whose per-frame
+// view + hit-test + dwell + click share one key, so the hot path is a cache
+// hit (key build + Arc clone), not a placements recompute (entity lookups,
+// intersections, String labels, projections).
+//
+// NOTE: the bench calls the real `cached_glyph_placements` with the same key
+// inputs the production consumers (app/view, viewport hit paths, overlay) and
+// the `cached_glyph_placements_*` unit-test fixture use
+// (`ParametricScope::ModelSpace`, full-canvas vp, values on, display 3,
+// bar 4095), so the measured hit is exactly what the frame shares.
+
+fn bench_ui_constraint_glyphs(runner: &mut BenchmarkRunner) {
+    if !runner.should_run("ui_constraint_glyphs") {
+        return;
+    }
+
+    // Fixture: dozens of horizontal constraints over a grid of short lines
+    // around the origin — mirrors the `cached_glyph_placements_*` unit-test
+    // fixture (Scene::new + add_entity + constraint add + note applied).
+    let n_constraints = if runner.quick_mode { 24 } else { 60 };
+    let mut scene = Scene::new();
+    let cols = 8;
+    for i in 0..n_constraints {
+        let x = ((i % cols) as f64) * 30.0 - 100.0;
+        let y = ((i / cols) as f64) * 30.0 - 100.0;
+        let line = scene.add_entity(EntityType::Line(Line::from_points(
+            Vector3::new(x, y, 0.0),
+            Vector3::new(x + 20.0, y, 0.0),
+        )));
+        let id = scene
+            .parametric_constraint_set_mut(ParametricScope::ModelSpace)
+            .add(
+                ConstraintKind::Horizontal,
+                vec![ParametricRef::whole(line)],
+                None,
+            );
+        scene.note_parametric_constraint_applied(ParametricScope::ModelSpace, id, 3);
+    }
+    scene.selection.borrow_mut().vp_size = (1920.0, 1080.0);
+    let vp = (1920.0_f32, 1080.0_f32);
+
+    // Prime the cache so every timed call below is a hit (same key, same Arc).
+    let primed =
+        scene.cached_glyph_placements(ParametricScope::ModelSpace, vp, true, 3, 4095);
+    assert!(
+        !primed.is_empty(),
+        "glyph fixture must yield placements"
+    );
+    let n_glyphs = primed.len();
+
+    // Warm-up for allocator settling.
+    for _ in 0..10 {
+        let hit =
+            scene.cached_glyph_placements(ParametricScope::ModelSpace, vp, true, 3, 4095);
+        black_box(hit);
+    }
+
+    let n = if runner.quick_mode { 200 } else { 1_000 };
+    let runs = 5;
+    let mut samples = Vec::with_capacity(runs);
+
+    for _ in 0..runs {
+        let t0 = Instant::now();
+        for _ in 0..n {
+            let hit = scene.cached_glyph_placements(
+                black_box(ParametricScope::ModelSpace),
+                black_box(vp),
+                black_box(true),
+                black_box(3),
+                black_box(4095),
+            );
+            black_box(hit);
+        }
+        let per_us = (t0.elapsed().as_micros() as f64) / (n as f64);
+        samples.push(per_us);
+    }
+
+    let median_us = samples[samples.len() / 2];
+    runner.record(
+        "ui_constraint_glyphs",
+        &format!(
+            "Constraint-glyph cache hit over {} glyphs (key build + Arc clone, no recompute)",
+            n_glyphs
+        ),
+        "µs",
+        samples,
+        Some(((n_glyphs as f64) / (median_us / 1_000_000.0), "glyphs/s")),
+        Some(0.5), // Target threshold < 0.5 µs (measured ~0.06 µs quick / ~0.15 µs full, ~3x headroom)
+    );
+}
+
 // ── 13. Wide & Tapered Arc + Donut Tessellation ─────────────────────────────
 
 fn bench_wide_and_tapered_arc_tessellation(runner: &mut BenchmarkRunner) {
@@ -2023,6 +2116,7 @@ fn main() {
     bench_ui_plotstyle_layer_usage(&mut runner);
     bench_ui_statusbar_derived_data(&mut runner);
     bench_ui_grip_budget(&mut runner);
+    bench_ui_constraint_glyphs(&mut runner);
     bench_wide_and_tapered_arc_tessellation(&mut runner);
     bench_zoom_extents_calculation(&mut runner);
     bench_batch_entity_mutation(&mut runner);
