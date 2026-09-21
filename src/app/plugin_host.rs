@@ -503,9 +503,18 @@ impl<'a> HostSession<'a> {
             }
             return removed;
         }
+        let owner = self.document().get_entity(handle).map(|entity| entity.common().owner_handle);
         self.app.tabs[self.tab].scene.erase_entities(&[handle]);
         let removed = self.document().get_entity(handle).is_none();
         if removed {
+            // The document keeps a block record's member list separately from the
+            // entity store, and removing an entity leaves its handle listed; drop
+            // it so a definition never lists a member that no longer exists.
+            if let Some(owner) = owner {
+                if let Some(record) = self.document_mut().block_records.iter_mut().find(|record| record.handle == owner) {
+                    record.entity_handles.retain(|member| *member != handle);
+                }
+            }
             self.publish_document_view();
         }
         removed
@@ -1248,7 +1257,8 @@ impl<'a> HostSession<'a> {
             other @ (TableOperation::BlockCreate { .. }
             | TableOperation::BlockModify { .. }
             | TableOperation::BlockRename { .. }
-            | TableOperation::BlockDelete { .. }) => self.block_operation(other),
+            | TableOperation::BlockDelete { .. }
+            | TableOperation::BlockEntityAdd { .. }) => self.block_operation(other),
             other => self.style_operation(other),
         }
     }
@@ -1332,6 +1342,42 @@ impl<'a> HostSession<'a> {
                 }
                 if erase_originals {
                     self.app.tabs[self.tab].scene.erase_entities(&entities);
+                }
+                self.finish_block_change();
+                Ok(handle)
+            }
+            TableOperation::BlockEntityAdd { block, mut entity } => {
+                let (name, record_handle) = editable_block(self.document(), block.trim())?;
+                if matches!(
+                    entity,
+                    E::Viewport(_) | E::Block(_) | E::BlockEnd(_) | E::AttributeEntity(_) | E::Unknown(_) | E::RasterImage(_)
+                ) {
+                    return Err("an entity of this kind cannot be added to a block from a script".to_owned());
+                }
+                if self.app.tabs[self.tab].scene.block_edit_block.is_some() {
+                    return Err("finish the open block editor before adding entities to a block".to_owned());
+                }
+                if let E::Insert(insert) = &entity {
+                    if insert.block_name.eq_ignore_ascii_case(&name) || block_nests(self.document(), &insert.block_name, &name, 0) {
+                        return Err(format!("inserting {:?} into {name:?} would nest a block inside itself", insert.block_name));
+                    }
+                }
+                entity.common_mut().owner_handle = record_handle;
+                ocs_plugin_api::entity_coverage::validate_new_canvas_entity(&entity)?;
+                ocs_plugin_api::entity_coverage::bind_canvas_entity_references(self.document(), &mut entity)?;
+                if self.document().layers.get(&entity.common().layer).is_some_and(|layer| layer.is_locked()) {
+                    return Err(format!("layer {:?} is locked", entity.common().layer));
+                }
+                self.push_undo("Add to block");
+                entity.common_mut().handle = Handle::NULL;
+                entity.common_mut().owner_handle = record_handle;
+                // The scene routes an add into the block being edited; reuse that
+                // path so the entity gets the same preparation as any new entity.
+                self.app.tabs[self.tab].scene.block_edit_block = Some(record_handle);
+                let handle = self.add_entity(entity);
+                self.app.tabs[self.tab].scene.block_edit_block = None;
+                if handle.is_null() {
+                    return Err(format!("the entity could not be added to block {name:?}"));
                 }
                 self.finish_block_change();
                 Ok(handle)
@@ -1664,6 +1710,22 @@ impl<'a> HostSession<'a> {
         self.publish_document_view();
         true
     }
+}
+
+/// True when block `outer` (transitively) contains an insert of `target`.
+fn block_nests(doc: &CadDocument, outer: &str, target: &str, depth: usize) -> bool {
+    if depth > 64 {
+        return true;
+    }
+    let Some(record) = doc.block_records.get(outer) else {
+        return false;
+    };
+    record.entity_handles.iter().filter_map(|h| doc.get_entity(*h)).any(|entity| match entity {
+        EntityType::Insert(insert) => {
+            insert.block_name.eq_ignore_ascii_case(target) || block_nests(doc, &insert.block_name, target, depth + 1)
+        }
+        _ => false,
+    })
 }
 
 /// A layer name AutoCAD would accept: 1-255 characters, none of `<>/\":;?*|=\``.
@@ -7137,6 +7199,115 @@ B.delete('Widget2')
         let members = |name: &str| document.block_records.get(name).map(|r| r.entity_handles.len());
         assert_eq!(members("Gadget"), Some(2), "undo restored Gadget with its members");
         assert_eq!(members("Widget2"), Some(1), "undo restored Widget2");
+    }
+
+    /// Block contents through Python over the real runner: add entities
+    /// (including an attribute definition) to a definition, edit and delete them
+    /// with the ordinary entity API, refuse bad requests, persist through
+    /// DWG/DXF and undo.
+    #[test]
+    fn audit_python_block_contents_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dir = std::env::temp_dir();
+        let run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+            let script = dir.join(format!("ocs_bcontents_{tag}_{}.py", std::process::id()));
+            std::fs::write(&script, format!(concat!(
+                "def P(x, y, z): return {{'x': x, 'y': y, 'z': z}}\n",
+                "doc = ocs.active_document\nB = doc.blocks\nL = doc.layers\n",
+                "refused, accepted = [], []\n",
+                "def check(tag, fn):\n",
+                "    try:\n        fn()\n    except (RuntimeError, TypeError, ValueError):\n        refused.append(tag)\n",
+                "    else:\n        accepted.append(tag)\n",
+                "try:\n{body}\n",
+                "except Exception as error:\n",
+                "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
+                "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(accepted))\n",
+            ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
+            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            let _ = std::fs::remove_file(&script);
+        };
+        let report = |document: &CadDocument| -> (usize, Vec<String>) {
+            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+                .expect("script report layer");
+            let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
+            (refused.trim().parse().unwrap(), accepted.split_whitespace().map(str::to_owned).collect())
+        };
+
+        run(&mut host, "build", r#"
+seed = doc.create_entity('Circle', center=P(0, 0, 0), radius=1)
+B.create('Part', [seed], erase_originals=True)
+line = doc.create_entity('Line', start=P(0, 0, 0), end=P(5, 0, 0), block='Part')
+arc = doc.create_entity('Arc', center=P(0, 0, 0), radius=5.0, start_angle=0.0, end_angle=1.5, block='Part')
+tag = doc.create_entity('AttributeDefinition', block='Part', tag='PART_NO', prompt='Part number', default_value='PN-001', insertion_point=P(1, 2, 0), height=2.5)
+with doc.transaction('Lengthen'):
+    line.end = (8, 0, 0)
+doc.delete_entity(arc)
+B.create('Outer', [doc.create_entity('Circle', center=P(0, 0, 0), radius=1)], erase_originals=True)
+doc.create_entity('Insert', block_name='Part', insert_point=P(0, 0, 0), block='Outer')
+check('missing_block', lambda: doc.create_entity('Line', start=P(0, 0, 0), end=P(1, 0, 0), block='Nope'))
+check('layout_block', lambda: doc.create_entity('Line', start=P(0, 0, 0), end=P(1, 0, 0), block='*Model_Space'))
+check('zero_circle', lambda: doc.create_entity('Circle', center=P(1, 1, 0), radius=0, block='Part'))
+check('viewport', lambda: doc.create_entity('Viewport', block='Part'))
+check('bad_tag', lambda: doc.create_entity('AttributeDefinition', block='Part', tag='  ', prompt='p', default_value='', insertion_point=P(0, 0, 0), height=1))
+check('bad_height', lambda: doc.create_entity('AttributeDefinition', block='Part', tag='T', prompt='p', default_value='', insertion_point=P(0, 0, 0), height=0))
+check('self_insert', lambda: doc.create_entity('Insert', block_name='Part', insert_point=P(0, 0, 0), block='Part'))
+check('cycle', lambda: doc.create_entity('Insert', block_name='Outer', insert_point=P(0, 0, 0), block='Part'))
+check('unknown_insert_block', lambda: doc.create_entity('Insert', block_name='Ghost', insert_point=P(0, 0, 0), block='Part'))
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert_eq!(refused, 9);
+
+        let check_state = |label: &str, document: &CadDocument| {
+            let record = document.block_records.get("Part").unwrap_or_else(|| panic!("{label}: Part missing"));
+            let members: Vec<EntityType> = document.entities()
+                .filter(|e| e.common().owner_handle == record.handle && !matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)))
+                .cloned().collect();
+            assert_eq!(members.len(), 3, "{label}: circle, line, attribute definition (the arc was deleted): {:?}",
+                members.iter().map(|e| format!("{e:?}").chars().take(10).collect::<String>()).collect::<Vec<_>>());
+            let line = members.iter().find_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: line"));
+            assert_eq!((line.end.x, line.end.y), (8.0, 0.0), "{label}: edited inside the block");
+            assert!(members.iter().any(|e| matches!(e, EntityType::Circle(_))), "{label}: circle from the seed");
+            let attdef = members.iter().find_map(|e| match e { EntityType::AttributeDefinition(a) => Some(a.clone()), _ => None }).unwrap_or_else(|| panic!("{label}: attdef"));
+            assert_eq!((attdef.tag.as_str(), attdef.prompt.as_str(), attdef.default_value.as_str()), ("PART_NO", "Part number", "PN-001"), "{label}");
+            assert!(!members.iter().any(|e| matches!(e, EntityType::Arc(_))), "{label}: arc deleted");
+            let outer = document.block_records.get("Outer").unwrap_or_else(|| panic!("{label}: Outer missing"));
+            let nested = document.entities().any(|e| matches!(e, EntityType::Insert(i) if i.block_name == "Part" && i.common.owner_handle == outer.handle));
+            assert!(nested, "{label}: Part is inserted inside Outer");
+        };
+        check_state("live", host.document());
+        let dwg = crate::io::load_bytes("bc.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("bc.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        check_state("DWG", &dwg);
+        check_state("DXF", &dxf);
+
+        // U: one more add, then the report layer; undoing both leaves the block as before.
+        run(&mut host, "extra", "doc.create_entity('Circle', center=P(9, 9, 0), radius=2, block='Part')");
+        assert_eq!(report(host.document()).1.len(), 0);
+        {
+            let document = host.document();
+            let record = document.block_records.get("Part").unwrap();
+            let live: Vec<_> = record.entity_handles.iter().map(|h| (h.value(), document.get_entity(*h).is_some())).collect();
+            assert_eq!(record.entity_handles.len(), 4, "record entity_handles (handle, exists): {live:?}");
+        }
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        app.undo_steps(2);
+        // Membership bookkeeping is intrinsic to an add and stays listed across an entity-delta
+        // undo (see `Scene::add_entity_internal`), so count the entities that really exist.
+        let document = &app.tabs[0].scene.document;
+        let part = document.block_records.get("Part").unwrap();
+        let existing = part.entity_handles.iter().filter(|h| document.get_entity(**h).is_some()).count();
+        assert_eq!(existing, 3, "undo removed the added member");
     }
 
     #[test]

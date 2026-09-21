@@ -141,6 +141,10 @@ mod tests {
             TableOperation::BlockModify { name: "B".into(), description: None, explodable: Some(false), scale_uniformly: Some(true) },
             TableOperation::BlockRename { from: "B".into(), to: "C".into() },
             TableOperation::BlockDelete { name: "C".into() },
+            TableOperation::BlockEntityAdd {
+                block: "C".into(),
+                entity: acadrust::EntityType::Line(acadrust::entities::Line::new()),
+            },
         ] {
             let bytes = bincode::serialize(&PluginRequest::TableOperation { operation: operation.clone() }).unwrap();
             assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),

@@ -227,3 +227,16 @@ unit tests. One more cadcodec finding (DXF drops the block description) is pinne
 editing a definition's contents in place, and attribute definitions inside a scripted block. Next: linetypes and
 layouts, then headless commands.
 
+### 2026-09-21: block contents (`create_entity(..., block=)`)
+
+`TableOperation::BlockEntityAdd` adds a validated entity to a definition: the host sets the owner, runs the same
+validation and reference binding as a new model-space entity, refuses viewports, raster images, block markers,
+nested attributes and self-nesting inserts (direct or transitive), then reuses the scene's block-editor routing so
+the entity gets normal preparation. Editing and deleting members already worked through the entity API; deleting a
+member now also drops its handle from the block record, because the core document leaves a removed entity
+listed (`entity_handles`). An entity-delta undo of an add still leaves the handle listed (documented scene behaviour),
+so consumers must treat `entity_handles` as candidates and confirm with `get_entity`; the Python block records
+already do. Evidence: `audit_python_block_contents_over_real_ipc` (9 refusals; create, edit, delete in a block;
+attribute definition inside a block; nested insert; live/DWG/DXF persistence; undo), IPC and Python unit tests.
+Next: linetypes and layouts, then headless commands.
+

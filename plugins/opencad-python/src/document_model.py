@@ -473,11 +473,17 @@ class _Document:
     def transaction(self, label):
         return _Transaction(self, label)
 
-    def create_entity(self, kind, **properties):
-        """Create one mapped entity and return its live document descriptor."""
+    def create_entity(self, kind, block=None, **properties):
+        """Create one mapped entity and return its live document descriptor.
+        With `block="Name"` the entity is added to that block definition
+        instead of the drawing (its owner is set by the host)."""
         if "kind" in properties or "handle" in properties:
             raise ValueError("kind and handle are managed by create_entity")
-        handle = ocs.add(dict(kind=kind, **_coerce_points(kind, properties)))
+        entity = dict(kind=kind, **_coerce_points(kind, properties))
+        if block is not None:
+            handle = ocs.add_to_block(str(block), entity)
+        else:
+            handle = ocs.add(entity)
         return self.entities[handle]
 
     def delete_entity(self, entity):

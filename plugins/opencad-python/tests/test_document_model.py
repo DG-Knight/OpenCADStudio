@@ -41,6 +41,7 @@ class DocumentModelTests(unittest.TestCase):
             style_operation=lambda kind, op, name, options: self.calls.append((kind, op, name, options)) or 9,
             block_records=lambda: [{"name": n, "entities": []} for n in ("Widget", "Gadget")],
             block_operation=lambda op, name, options: self.calls.append(("block", op, name, options)) or 9,
+            add_to_block=lambda block, entity: self.calls.append(("add_to_block", block, entity)) or 1,
         )
         namespace = {"ocs": self.ocs}
         exec(MODEL.read_text(), namespace)
@@ -95,6 +96,14 @@ class DocumentModelTests(unittest.TestCase):
         self.assertEqual(self.calls[-1], ("dim", "delete", "Metric", None))
         dim.set_current("Standard")
         self.assertEqual(self.calls[-1], ("dim", "set_current", "Standard", None))
+
+    def test_create_entity_in_block(self):
+        self.doc.create_entity("Line", block="Widget", start={"x": 0, "y": 0, "z": 0}, end={"x": 1, "y": 0, "z": 0})
+        self.assertEqual(self.calls[-1][:2], ("add_to_block", "Widget"))
+        self.assertEqual(self.calls[-1][2]["kind"], "Line")
+        self.assertNotIn("block", self.calls[-1][2])
+        self.doc.create_entity("Line", start={"x": 0, "y": 0, "z": 0}, end={"x": 1, "y": 0, "z": 0})
+        self.assertEqual(self.calls[-1][0], "add")
 
     def test_blocks(self):
         blocks = self.doc.blocks

@@ -142,6 +142,11 @@ pub enum TableOperation {
     BlockRename { from: String, to: String },
     /// Delete an unreferenced block definition and its contents.
     BlockDelete { name: String },
+    /// Add a new entity to a block definition, validated exactly as a new
+    /// model-space entity is. The entity's owner is set by the host. Returns the
+    /// new entity's handle. Edit and delete members with the ordinary entity
+    /// operations.
+    BlockEntityAdd { block: String, entity: EntityType },
 }
 
 /// The style tables `TableOperation` can rename, delete or make current.

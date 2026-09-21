@@ -4263,6 +4263,31 @@ mod ocs {
         .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?
     }
 
+    /// Add a new entity, built from `entity` like `add`, to the block definition
+    /// `block`. Returns the new entity's handle.
+    #[cfg(feature = "experimental-host-model")]
+    #[pyfunction]
+    fn add_to_block(block: String, entity: PyObjectRef, vm: &VirtualMachine) -> PyResult<u64> {
+        let dict = entity.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?;
+        let mut built = dict_to_entity(&dict, vm)?;
+        let result = host_ctx::with_host(|host| -> PyResult<Result<Handle, String>> {
+            let owner = host
+                .document()
+                .block_records
+                .get(block.trim())
+                .map(|record| record.handle)
+                .ok_or_else(|| vm.new_runtime_error(format!("ocs.add_to_block: block {block:?} does not exist")))?;
+            built.common_mut().owner_handle = owner;
+            ocs_plugin_api::entity_coverage::validate_new_canvas_entity(&built)
+                .map_err(|error| vm.new_value_error(error))?;
+            Ok(host.table_operation(ocs_plugin_api::host::TableOperation::BlockEntityAdd { block, entity: built }))
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))??;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.add_to_block: {error}")))
+    }
+
     /// Update `handle` by merging `entity`'s keys onto its *current* value —
     /// a key `entity` doesn't mention is left exactly as it was, not reset to
     /// a type default (Felix's Phase 1 review: reconstructing from a partial

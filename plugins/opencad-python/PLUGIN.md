@@ -209,9 +209,20 @@ block, a viewport, a non-finite base point, renaming or deleting layout,
 anonymous or externally referenced blocks, and a case-only rename. Deleting also
 removes the definition's contents. Records list user blocks only (`handle`,
 `name`, `description`, `explodable`, `scale_uniformly`, `base_point`,
-`insert_count`, `entities` as `{handle, kind}`). Editing a definition's contents
-in place and creating attribute definitions inside a block from a script are not
-available yet. A DXF save drops the block description (cadcodec); DWG keeps it.
+`insert_count`, `entities` as `{handle, kind}`). A DXF save drops the block
+description (cadcodec); DWG keeps it.
+
+**Block contents.** Add to a definition with `create_entity(kind, block="Part",
+...)`. It is validated exactly like a model-space entity and the host sets the
+owner (so attribute definitions work: `create_entity("AttributeDefinition",
+block="Part", tag=..., prompt=..., default_value=..., insertion_point=...,
+height=...)`). Members are read, edited (`entity.end = (8, 0, 0)` inside
+`doc.transaction(...)`) and deleted (`doc.delete_entity`) with the ordinary entity
+API, using the handles in `blocks["Part"]["entities"]`. Refused: an unknown,
+layout, anonymous or external block, an invalid entity, a viewport, raster image,
+block marker or nested attribute, an entity on a locked layer, and an insert that
+would nest a block inside itself directly or through other blocks. Adding while the
+block editor is open is refused. Each add or delete is one undo step.
 
 ### Historical command-replay experiment (not in the default build)
 
