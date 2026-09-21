@@ -1100,6 +1100,161 @@ impl<'a> HostSession<'a> {
         Some(handle)
     }
 
+    /// Validated, undoable layer-table operations (API v7, additive). Every
+    /// refusal happens before the undo step is recorded, so a failure leaves the
+    /// drawing and its history untouched.
+    pub fn table_operation(
+        &mut self,
+        operation: ocs_plugin_api::host::TableOperation,
+    ) -> Result<Handle, String> {
+        use ocs_plugin_api::host::TableOperation;
+        let layer_handle = |doc: &CadDocument, name: &str| -> Result<Handle, String> {
+            doc.layers
+                .get(name)
+                .map(|layer| layer.handle)
+                .ok_or_else(|| format!("layer {name:?} does not exist"))
+        };
+        let protected = |name: &str| {
+            let name = name.trim();
+            name == "0" || name.eq_ignore_ascii_case("Defpoints")
+        };
+        let same_name = |a: &str, b: &str| a.trim().to_uppercase() == b.trim().to_uppercase();
+        let check_color = |color: &acadrust::types::Color| match color {
+            acadrust::types::Color::ByLayer
+            | acadrust::types::Color::ByBlock
+            | acadrust::types::Color::None => Err("a layer color must be an index 1-255 or an RGB value".to_owned()),
+            acadrust::types::Color::Index(0) => Err("a layer color index must be 1-255".to_owned()),
+            _ => Ok(()),
+        };
+        let check_config = |config: &ocs_plugin_api::host::LayerConfig| -> Result<(), String> {
+            if let Some(color) = &config.color {
+                check_color(color)?;
+            }
+            if let Some(acadrust::types::LineWeight::Value(value)) = config.lineweight {
+                if !(0..=211).contains(&value) {
+                    return Err("a layer lineweight must be between 0 and 211 (1/100 mm)".to_owned());
+                }
+            }
+            Ok(())
+        };
+        match operation {
+            TableOperation::LayerCreate { config } => {
+                let name = validated_layer_name(&config.name)?;
+                if self.document().layers.contains(&name) {
+                    return Err(format!("layer {name:?} already exists"));
+                }
+                check_config(&config)?;
+                if let Some(linetype) = &config.linetype {
+                    if resolve_linetype(self.document_mut(), linetype).is_none() {
+                        return Err(format!("linetype {linetype:?} does not exist in this drawing"));
+                    }
+                }
+                self.push_undo("Create layer");
+                let config = ocs_plugin_api::host::LayerConfig { name, ..config };
+                self.add_layer(config).ok_or_else(|| "the layer could not be created".to_owned())
+            }
+            TableOperation::LayerModify { config } => {
+                let name = config.name.trim().to_owned();
+                let handle = layer_handle(self.document(), &name)?;
+                if config.color.is_none()
+                    && config.linetype.is_none()
+                    && config.lineweight.is_none()
+                    && config.off.is_none()
+                    && config.frozen.is_none()
+                    && config.locked.is_none()
+                    && config.plottable.is_none()
+                    && config.transparency.is_none()
+                    && config.description.is_none()
+                {
+                    return Err("no layer properties to change".to_owned());
+                }
+                check_config(&config)?;
+                if config.frozen == Some(true)
+                    && same_name(&self.document().header.current_layer_name, &name)
+                {
+                    return Err("the current layer cannot be frozen".to_owned());
+                }
+                if let Some(linetype) = &config.linetype {
+                    if resolve_linetype(self.document_mut(), linetype).is_none() {
+                        return Err(format!("linetype {linetype:?} does not exist in this drawing"));
+                    }
+                }
+                self.push_undo("Modify layer");
+                if self.modify_layer(config) {
+                    Ok(handle)
+                } else {
+                    Err("the layer could not be changed".to_owned())
+                }
+            }
+            TableOperation::LayerRename { from, to } => {
+                let handle = layer_handle(self.document(), from.trim())?;
+                if protected(&from) {
+                    return Err(format!("layer {:?} cannot be renamed", from.trim()));
+                }
+                let to = validated_layer_name(&to)?;
+                if from.trim() == to {
+                    return Err("the new layer name is the same as the current one".to_owned());
+                }
+                if !same_name(&from, &to) && self.document().layers.contains(&to) {
+                    return Err(format!("layer {to:?} already exists"));
+                }
+                self.push_undo("Rename layer");
+                if !self.app.tabs[self.tab].rename_layer(from.trim(), &to) {
+                    return Err("the layer could not be renamed".to_owned());
+                }
+                self.finish_layer_change(&[from.trim().to_owned(), to]);
+                Ok(handle)
+            }
+            TableOperation::LayerDelete { name, erase_objects } => {
+                let name = name.trim().to_owned();
+                let handle = layer_handle(self.document(), &name)?;
+                if protected(&name) {
+                    return Err(format!("layer {name:?} cannot be deleted"));
+                }
+                if same_name(&self.document().header.current_layer_name, &name) {
+                    return Err("the current layer cannot be deleted".to_owned());
+                }
+                if name.contains('|') {
+                    return Err("an externally referenced layer cannot be deleted".to_owned());
+                }
+                let key = name.to_uppercase();
+                let on_layer: Vec<Handle> = self
+                    .document()
+                    .entities()
+                    .filter(|entity| entity.common().layer.to_uppercase() == key)
+                    .map(|entity| entity.common().handle)
+                    .collect();
+                if !on_layer.is_empty() && !erase_objects {
+                    return Err(format!(
+                        "layer {name:?} still holds {} object(s); pass erase_objects=True to erase them with the layer",
+                        on_layer.len()
+                    ));
+                }
+                self.push_undo("Delete layer");
+                self.document_mut().layers.remove(&name);
+                if !on_layer.is_empty() {
+                    self.app.tabs[self.tab].scene.erase_entities(&on_layer);
+                }
+                self.finish_layer_change(&[name]);
+                Ok(handle)
+            }
+            TableOperation::LayerSetCurrent { name } => {
+                let name = name.trim().to_owned();
+                let handle = layer_handle(self.document(), &name)?;
+                let stored = self.document().layers.get(&name).map(|l| l.name.clone()).unwrap_or(name);
+                self.app.set_current_layer_name(self.tab, &stored)?;
+                Ok(handle)
+            }
+        }
+    }
+
+    fn finish_layer_change(&mut self, names: &[String]) {
+        self.app.tabs[self.tab].dirty = true;
+        self.app.tabs[self.tab].scene.invalidate_layer_dependencies(names);
+        self.app.refresh_layer_panel();
+        self.publish_document_view();
+    }
+
     pub fn modify_layer(&mut self, config: ocs_plugin_api::host::LayerConfig) -> bool {
         let trimmed = config.name.trim();
         if trimmed.is_empty() {
@@ -1161,6 +1316,21 @@ impl<'a> HostSession<'a> {
         self.publish_document_view();
         true
     }
+}
+
+/// A layer name AutoCAD would accept: 1-255 characters, none of `<>/\":;?*|=\``.
+fn validated_layer_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("a layer name cannot be empty".to_owned());
+    }
+    if name.chars().count() > 255 {
+        return Err("a layer name is limited to 255 characters".to_owned());
+    }
+    if let Some(bad) = name.chars().find(|c| "<>/\\\":;?*|=`".contains(*c) || c.is_control()) {
+        return Err(format!("a layer name cannot contain {bad:?}"));
+    }
+    Ok(name.to_owned())
 }
 
 /// The stored spelling of `name` in the drawing's linetype table, loading the
@@ -1309,6 +1479,9 @@ impl HostApi for HostSession<'_> {
     }
     fn modify_layer(&mut self, config: ocs_plugin_api::host::LayerConfig) -> bool {
         self.modify_layer(config)
+    }
+    fn table_operation(&mut self, operation: ocs_plugin_api::host::TableOperation) -> Result<Handle, String> {
+        self.table_operation(operation)
     }
 }
 
@@ -6090,6 +6263,133 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Layer table through Python over the real runner: create, modify, rename,
+    /// delete and make current, with refusals that leave the drawing untouched,
+    /// one undo step per change, and DWG/DXF persistence of every property.
+    #[test]
+    fn audit_python_layer_table_over_real_ipc() {
+        use acadrust::types::{Color, LineWeight};
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let dir = std::env::temp_dir();
+        let mut run = |host: &mut HostSession<'_>, tag: &str, body: &str| {
+            let script = dir.join(format!("ocs_layers_{tag}_{}.py", std::process::id()));
+            std::fs::write(&script, format!(concat!(
+                "def P(x, y, z): return {{'x': x, 'y': y, 'z': z}}\n",
+                "doc = ocs.active_document\nL = doc.layers\n",
+                "refused, accepted = [], []\n",
+                "def check(tag, fn):\n",
+                "    try:\n        fn()\n    except (RuntimeError, TypeError, ValueError):\n        refused.append(tag)\n",
+                "    else:\n        accepted.append(tag)\n",
+                "try:\n{body}\n",
+                "except Exception as error:\n",
+                "    accepted.append('SCRIPTERROR_' + ''.join(c if c.isalnum() else '_' for c in str(error))[:120])\n",
+                "L.create('REPORT ' + ' '.join(refused) + ' ~ ' + ' '.join(accepted))\n",
+            ), body = body.lines().map(|line| format!("    {line}")).collect::<Vec<_>>().join("\n"))).unwrap();
+            assert!(process.dispatch(host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+            let _ = std::fs::remove_file(&script);
+        };
+        let report = |document: &CadDocument| -> (Vec<String>, Vec<String>) {
+            let name = document.layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last()
+                .expect("script report layer");
+            let (refused, accepted) = name["REPORT".len()..].split_once('~').unwrap();
+            let words = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            (words(refused), words(accepted))
+        };
+
+        // Build: two layers with full properties, a modify, an entity, a rename, and the refusals.
+        run(&mut host, "build", r#"
+L.create('Walls', color=1, lineweight=50, description='load bearing', transparency=30)
+L.create('Grid', color=(10, 200, 30), linetype='Continuous', off=True, plottable=False)
+L.modify('Walls', color=5, locked=True)
+doc.create_entity('Line', start=P(0, 0, 0), end=P(1, 0, 0), layer='Walls')
+L.rename('Walls', 'Structure')
+check('dup', lambda: L.create('structure'))
+check('badname', lambda: L.create('a<b'))
+check('empty', lambda: L.create('  '))
+check('badcolor0', lambda: L.create('C1', color=0))
+check('badcolorlayer', lambda: L.create('C1', color={'kind': 'ByLayer'}))
+check('badltype', lambda: L.create('C2', linetype='Nope'))
+check('badweight', lambda: L.create('C3', lineweight=999))
+check('badtransp', lambda: L.create('C4', transparency=95))
+check('unknownkey', lambda: L.create('C5', colour=1))
+check('rename0', lambda: L.rename('0', 'X'))
+check('renameclash', lambda: L.rename('Grid', 'STRUCTURE'))
+check('renamemissing', lambda: L.rename('Nope', 'X2'))
+check('del0', lambda: L.delete('0'))
+check('delcurrent', lambda: L.delete(L.current['name']))
+check('delused', lambda: L.delete('Structure'))
+check('freezecurrent', lambda: L.modify(L.current['name'], frozen=True))
+check('modnone', lambda: L.modify('Grid'))
+check('modmissing', lambda: L.modify('Nope', off=True))
+check('currentmissing', lambda: L.set_current('Nope'))
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "accepted invalid requests: {accepted:?}");
+        assert_eq!(refused.len(), 19, "{refused:?}");
+
+        let check_state = |label: &str, document: &CadDocument| {
+            let names: Vec<_> = document.layers.iter().map(|l| l.name.as_str()).collect();
+            assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("Walls")), "{label}: old name gone: {names:?}");
+            assert!(!names.iter().any(|n| n.starts_with('C') && n.len() == 2), "{label}: a refused request left a layer: {names:?}");
+            let structure = document.layers.get("Structure").unwrap_or_else(|| panic!("{label}: Structure missing"));
+            assert_eq!(structure.color, Color::Index(5), "{label}");
+            assert_eq!(structure.line_weight, LineWeight::Value(50), "{label}");
+            assert!(structure.flags.locked, "{label}");
+            assert_eq!(structure.description, "load bearing", "{label}");
+            assert_ne!(structure.transparency, acadrust::types::Transparency::ByLayer, "{label}: transparency");
+            let grid = document.layers.get("Grid").unwrap_or_else(|| panic!("{label}: Grid missing"));
+            assert_eq!(grid.color, Color::Rgb { r: 10, g: 200, b: 30 }, "{label}");
+            assert!(grid.flags.off && !grid.is_plottable, "{label}");
+            assert_eq!(grid.line_type.to_uppercase(), "CONTINUOUS", "{label}");
+            let line = document.entities().find_map(|e| match e { EntityType::Line(l) => Some(l.clone()), _ => None })
+                .unwrap_or_else(|| panic!("{label}: line missing"));
+            assert_eq!(line.common.layer, "Structure", "{label}: entity followed the rename");
+        };
+        check_state("live", host.document());
+        let dwg = crate::io::load_bytes("layers.dwg", acadrust::DwgWriter::write_to_vec(host.document()).unwrap()).unwrap();
+        let dxf = crate::io::load_bytes("layers.dxf", acadrust::DxfWriter::new(host.document()).write_to_vec().unwrap()).unwrap();
+        check_state("DWG", &dwg);
+        check_state("DXF", &dxf);
+
+        // Destroy: current layer, delete with and without objects.
+        run(&mut host, "destroy", r#"
+L.set_current('Grid')
+check('delcurrent2', lambda: L.delete('Grid'))
+check('freezecurrent2', lambda: L.modify('Grid', frozen=True))
+L.set_current('0')
+L.delete('Grid')
+check('delused2', lambda: L.delete('Structure'))
+L.delete('Structure', erase_objects=True)
+"#);
+        let (refused, accepted) = report(host.document());
+        assert!(accepted.is_empty(), "{accepted:?}");
+        assert_eq!(refused, vec!["delcurrent2", "freezecurrent2", "delused2"]);
+        let document = host.document();
+        assert!(document.layers.get("Grid").is_none() && document.layers.get("Structure").is_none());
+        assert_eq!(document.header.current_layer_name, "0");
+        assert!(!document.entities().any(|e| matches!(e, EntityType::Line(_))), "erase_objects erased the line");
+
+        // U: the last two steps are the report layer and the erasing delete;
+        // undoing them restores the deleted layer and its object together.
+        drop(process);
+        drop(host);
+        app.finish_pending_history(0);
+        let before = app.tabs[0].history.undo_stack.len();
+        app.undo_steps(2);
+        assert_eq!(app.tabs[0].history.undo_stack.len(), before - 2);
+        let document = &app.tabs[0].scene.document;
+        assert!(document.layers.get("Structure").is_some(), "undo restored the layer");
+        assert!(document.entities().any(|e| matches!(e, EntityType::Line(_))), "undo restored the line");
     }
 
     #[test]

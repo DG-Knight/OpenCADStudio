@@ -155,6 +155,8 @@ pub enum PluginRequest {
     SetSelection { handles: Vec<Handle> },
     /// V7 (additive): kernel-backed solid create or transform.
     SolidOperation { operation: crate::host::SolidOperation },
+    /// V7 (additive): drawing table record create/modify/rename/delete.
+    TableOperation { operation: crate::host::TableOperation },
 }
 
 /// Responses the host sends back for `PluginRequest`.
@@ -189,6 +191,7 @@ pub enum PluginResponse {
     Selection(Vec<Handle>),
     SelectionResult(Result<(), String>),
     SolidResult(Result<Handle, String>),
+    TableResult(Result<Handle, String>),
 }
 
 /// Messages sent from the host to the plugin runner.

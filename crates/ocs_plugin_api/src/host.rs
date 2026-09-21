@@ -85,6 +85,25 @@ pub enum SolidBoolean {
     Intersect,
 }
 
+/// A change to a drawing table record (API v7, additive). The host validates
+/// the request, records one undo step and refuses without changing anything
+/// when it cannot honour it; the result is the record's handle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TableOperation {
+    /// Create a layer. `config.name` must be unused and valid.
+    LayerCreate { config: LayerConfig },
+    /// Change only the properties `config` sets on an existing layer.
+    LayerModify { config: LayerConfig },
+    /// Rename a layer; entities on it follow. Layer `0` and `Defpoints` stay.
+    LayerRename { from: String, to: String },
+    /// Delete a layer. A layer that still holds objects is refused unless
+    /// `erase_objects` is set, which erases them with the layer. Layer `0`,
+    /// `Defpoints` and the current layer are never deleted.
+    LayerDelete { name: String, erase_objects: bool },
+    /// Make an existing layer current.
+    LayerSetCurrent { name: String },
+}
+
 /// A kernel operation on ACIS-backed solids (API v7, additive). The host owns
 /// the geometry: a script never sees or rewrites the payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -689,6 +708,12 @@ pub trait HostApi {
     /// perform it losslessly (API v7, additive).
     fn solid_operation(&mut self, _operation: SolidOperation) -> Result<Handle, String> {
         Err("solid operations are not supported by this host".to_owned())
+    }
+
+    /// Create, change, rename, delete or select a drawing table record (API v7,
+    /// additive). Returns the record's handle; a refusal changes nothing.
+    fn table_operation(&mut self, _operation: TableOperation) -> Result<Handle, String> {
+        Err("table operations are not supported by this host".to_owned())
     }
     /// Add a layer to the active document with full initial properties.
     /// If an optional property in `config` is `None`, standard CAD defaults are applied.

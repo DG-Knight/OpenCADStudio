@@ -796,6 +796,18 @@ impl HostApi for V4PluginHostApi {
         }
     }
 
+    fn table_operation(&mut self, operation: crate::host::TableOperation) -> Result<Handle, String> {
+        match self.request(PluginRequest::TableOperation { operation }) {
+            Ok(PluginResponse::TableResult(result)) => {
+                if result.is_ok() { self.document_cache = OnceCell::new(); }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected table operation response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn set_selection(&mut self, handles: &[Handle]) -> Result<(), String> {
         match self.request(PluginRequest::SetSelection { handles: handles.to_vec() }) {
             Ok(PluginResponse::SelectionResult(result)) => result,

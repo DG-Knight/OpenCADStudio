@@ -110,5 +110,6 @@ pub fn handle_plugin_request(
         GetSelection => PluginResponse::Selection(host.selection()),
         SetSelection { handles } => PluginResponse::SelectionResult(host.set_selection(&handles)),
         SolidOperation { operation } => PluginResponse::SolidResult(host.solid_operation(operation)),
+        TableOperation { operation } => PluginResponse::TableResult(host.table_operation(operation)),
     }
 }

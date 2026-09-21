@@ -129,6 +129,32 @@ CPython's C-function argument parsing, does *not* implicitly coerce an
 instead accepts anything with `__float__`/`__index__`, matching how a script
 author actually writes coordinates.)
 
+### Layers: `ocs.active_document.layers`
+
+The layer table, with every change validated by the host, recorded as one undo
+step, and refused (a `RuntimeError`, nothing changed) when it cannot be honoured.
+
+```python
+L = ocs.active_document.layers
+L.create("Walls", color=1, lineweight=50, description="load bearing")
+L.create("Grid", color=(10, 200, 30), linetype="Continuous", off=True)
+L.modify("Walls", color=5, locked=True)      # only the properties given
+L.rename("Walls", "Structure")               # entities on it follow
+L.set_current("Grid")
+L.delete("Structure", erase_objects=True)    # refused if it holds objects otherwise
+"Grid" in L, L["Grid"]["color"], L.current, L.names()
+```
+
+Properties: `color` (ACI 1-255, an `(r, g, b)` tuple or a Color dict), `linetype`
+(must exist in the drawing), `lineweight` (1/100 mm, 0-211; -1 ByLayer, -2 ByBlock,
+-3 Default), `off`, `frozen`, `locked`, `plottable`, `transparency` (percent 0-90),
+`description`. Records also carry `handle`, `entity_count` and `current`.
+Refused: an existing or invalid name (empty, over 255 characters, or containing
+`<>/\":;?*|=` or a backquote), a color of ByLayer/ByBlock/0, an unknown property,
+renaming or deleting layer `0` or `Defpoints`, deleting or freezing the current
+layer, deleting an externally referenced layer, and modifying with no properties.
+Making a layer current is a setting, not an undo step.
+
 ### Historical command-replay experiment (not in the default build)
 
 The following records an earlier experiment. The bundled build does **not**

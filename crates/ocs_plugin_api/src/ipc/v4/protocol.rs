@@ -106,6 +106,35 @@ mod tests {
     }
 
     #[test]
+    fn table_operation_request_and_response_roundtrip() {
+        use crate::host::{LayerConfig, TableOperation};
+        for operation in [
+            TableOperation::LayerCreate {
+                config: LayerConfig {
+                    name: "Walls".into(),
+                    color: Some(acadrust::types::Color::Index(5)),
+                    frozen: Some(true),
+                    description: Some("d".into()),
+                    ..Default::default()
+                },
+            },
+            TableOperation::LayerModify { config: LayerConfig { name: "Walls".into(), off: Some(true), ..Default::default() } },
+            TableOperation::LayerRename { from: "A".into(), to: "B".into() },
+            TableOperation::LayerDelete { name: "A".into(), erase_objects: true },
+            TableOperation::LayerSetCurrent { name: "A".into() },
+        ] {
+            let bytes = bincode::serialize(&PluginRequest::TableOperation { operation: operation.clone() }).unwrap();
+            assert!(matches!(bincode::deserialize::<PluginRequest>(&bytes).unwrap(),
+                PluginRequest::TableOperation { operation: decoded } if decoded == operation));
+        }
+        for result in [Ok(acadrust::Handle::new(9)), Err("refused".to_owned())] {
+            let bytes = bincode::serialize(&PluginResponse::TableResult(result.clone())).unwrap();
+            assert!(matches!(bincode::deserialize::<PluginResponse>(&bytes).unwrap(),
+                PluginResponse::TableResult(decoded) if decoded == result));
+        }
+    }
+
+    #[test]
     fn solid_operation_request_and_response_roundtrip() {
         use crate::host::{SolidOperation, SolidPrimitive};
         for operation in [

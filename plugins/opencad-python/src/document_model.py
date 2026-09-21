@@ -199,9 +199,91 @@ class _Solids:
         return self.transform(entity, ocs.mirror_matrix(index, [float(v) for v in about]))
 
 
+class _Layers:
+    """The drawing's layer table. Every change goes through the host: it is
+    validated, becomes one undo step, and a refusal raises `RuntimeError`
+    without changing the drawing."""
+
+    _KEYS = ("color", "linetype", "lineweight", "off", "frozen", "locked",
+             "plottable", "transparency", "description")
+
+    def _records(self):
+        return ocs.layer_records()
+
+    def __iter__(self):
+        return iter(self._records())
+
+    def __len__(self):
+        return len(self._records())
+
+    def __contains__(self, name):
+        wanted = str(name).strip().upper()
+        return any(r["name"].upper() == wanted for r in self._records())
+
+    def __getitem__(self, name):
+        wanted = str(name).strip().upper()
+        for record in self._records():
+            if record["name"].upper() == wanted:
+                return record
+        raise KeyError(name)
+
+    def get(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+    def names(self):
+        return [r["name"] for r in self._records()]
+
+    @property
+    def current(self):
+        for record in self._records():
+            if record["current"]:
+                return record
+        return None
+
+    @current.setter
+    def current(self, name):
+        self.set_current(name)
+
+    def _options(self, properties):
+        unknown = [k for k in properties if k not in self._KEYS]
+        if unknown:
+            raise TypeError("unknown layer propert%s: %s" % ("y" if len(unknown) == 1 else "ies", ", ".join(sorted(unknown))))
+        return {k: v for k, v in properties.items() if v is not None}
+
+    def create(self, name, **properties):
+        """Create a layer and return its record. `color` is an ACI index
+        (1-255), an (r, g, b) tuple or a Color dict; `lineweight` is in
+        1/100 mm (-1 ByLayer, -2 ByBlock, -3 Default); `transparency` is a
+        percentage 0-90."""
+        ocs.layer_operation("create", str(name), self._options(properties))
+        return self[name]
+
+    def modify(self, name, **properties):
+        """Change only the properties given and return the updated record."""
+        ocs.layer_operation("modify", str(name), self._options(properties))
+        return self[name]
+
+    def rename(self, name, new_name):
+        ocs.layer_operation("rename", str(name), {"to": str(new_name)})
+        return self[new_name]
+
+    def delete(self, name, erase_objects=False):
+        """Delete a layer. A layer that still holds objects is refused unless
+        `erase_objects=True`. Layer 0, Defpoints and the current layer stay."""
+        ocs.layer_operation("delete", str(name), {"erase_objects": bool(erase_objects)})
+
+    def set_current(self, name):
+        ocs.layer_operation("set_current", str(name), None)
+        return self[name]
+
+
 class _Document:
     def __init__(self):
         self._pending = None
+        self.layers = _Layers()
         self.entities = _Entities(self)
         self.solids = _Solids(self)
 

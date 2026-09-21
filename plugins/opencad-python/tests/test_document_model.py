@@ -34,6 +34,8 @@ class DocumentModelTests(unittest.TestCase):
             tab_id=lambda: 7,
             request_input=lambda prompt, entity: (prompt, entity),
             poll_input=lambda token: {"status": "point", "point": [1, 2, 3]},
+            layer_records=lambda: [{"name": "0", "current": True}, {"name": "Walls", "current": False}],
+            layer_operation=lambda op, name, options: self.calls.append((op, name, options)) or 9,
         )
         namespace = {"ocs": self.ocs}
         exec(MODEL.read_text(), namespace)
@@ -53,6 +55,22 @@ class DocumentModelTests(unittest.TestCase):
                 line.layer = "A"
                 raise ValueError()
         self.assertEqual(len(self.calls), 1)
+
+    def test_layers_lookup_and_options(self):
+        layers = self.doc.layers
+        self.assertIn("WALLS", layers)
+        self.assertEqual(layers["walls"]["name"], "Walls")
+        self.assertEqual(layers.current["name"], "0")
+        self.assertEqual(layers.names(), ["0", "Walls"])
+        with self.assertRaises(KeyError):
+            layers["Nope"]
+        layers.modify("Walls", color=3, linetype=None, off=False)
+        self.assertEqual(self.calls[-1], ("modify", "Walls", {"color": 3, "off": False}))
+        layers.delete("Walls", erase_objects=1)
+        self.assertEqual(self.calls[-1], ("delete", "Walls", {"erase_objects": True}))
+        with self.assertRaises(TypeError):
+            layers.create("New", colour=1)
+        self.assertEqual(len(self.calls), 2)
 
     def test_create_and_delete_use_document_model(self):
         line = self.doc.create_entity("Line", start={"x": 0, "y": 0, "z": 0},

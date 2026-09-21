@@ -952,6 +952,165 @@ mod ocs {
         Ok(vm.ctx.new_list(output).into())
     }
 
+    fn layer_options(
+        name: String,
+        options: &rustpython_vm::builtins::PyDictRef,
+        vm: &VirtualMachine,
+    ) -> PyResult<ocs_plugin_api::host::LayerConfig> {
+        use acadrust::types::{Color, LineWeight, Transparency};
+        ensure_known_entity_keys(
+            options,
+            "layer",
+            &["color", "linetype", "lineweight", "off", "frozen", "locked", "plottable", "transparency", "description"],
+            vm,
+        )?;
+        let present = |key: &str| -> PyResult<Option<PyObjectRef>> {
+            Ok(options.get_item_opt(key, vm)?.filter(|v| !vm.is_none(v)))
+        };
+        let mut config = ocs_plugin_api::host::LayerConfig { name, ..Default::default() };
+        if let Some(value) = present("color")? {
+            config.color = Some(if let Ok(index) = value.clone().try_into_value::<i64>(vm) {
+                let index = u8::try_from(index)
+                    .ok()
+                    .filter(|i| *i != 0)
+                    .ok_or_else(|| vm.new_value_error("ocs: a layer color index must be 1..=255".to_owned()))?;
+                Color::Index(index)
+            } else if let Ok(rgb) = value.clone().try_into_value::<Vec<i64>>(vm) {
+                let byte = |v: i64| {
+                    u8::try_from(v).map_err(|_| vm.new_value_error("ocs: RGB components must be 0..=255".to_owned()))
+                };
+                match rgb.as_slice() {
+                    [r, g, b] => Color::Rgb { r: byte(*r)?, g: byte(*g)?, b: byte(*b)? },
+                    _ => return Err(vm.new_value_error("ocs: an RGB color needs three numbers".to_owned())),
+                }
+            } else {
+                py_to_color_dict(value, vm)?
+            });
+        }
+        if let Some(value) = present("linetype")? {
+            config.linetype = Some(value.try_into_value::<String>(vm)?);
+        }
+        if let Some(value) = present("lineweight")? {
+            let weight = value.try_into_value::<i64>(vm)?;
+            let weight = i16::try_from(weight)
+                .map_err(|_| vm.new_value_error("ocs: lineweight is out of range".to_owned()))?;
+            config.lineweight = Some(LineWeight::from_value(weight));
+        }
+        for (key, slot) in [
+            ("off", &mut config.off),
+            ("frozen", &mut config.frozen),
+            ("locked", &mut config.locked),
+            ("plottable", &mut config.plottable),
+        ] {
+            if let Some(value) = present(key)? {
+                *slot = Some(value.try_into_value::<bool>(vm)?);
+            }
+        }
+        if let Some(value) = present("transparency")? {
+            let percent = py_number_to_f64(value, vm)?;
+            if !(0.0..=90.0).contains(&percent) {
+                return Err(vm.new_value_error("ocs: layer transparency is a percentage from 0 to 90".to_owned()));
+            }
+            config.transparency = Some(if percent == 0.0 { Transparency::ByLayer } else { Transparency::from_percent(percent) });
+        }
+        if let Some(value) = present("description")? {
+            config.description = Some(value.try_into_value::<String>(vm)?);
+        }
+        Ok(config)
+    }
+
+    /// Layer-table change through the host: `op` is `create`, `modify`,
+    /// `rename` (`options={"to": ...}`), `delete` (`options={"erase_objects": bool}`)
+    /// or `set_current`. Returns the layer's handle.
+    #[pyfunction]
+    fn layer_operation(op: String, name: String, options: PyObjectRef, vm: &VirtualMachine) -> PyResult<u64> {
+        use ocs_plugin_api::host::TableOperation;
+        let options = if vm.is_none(&options) {
+            vm.ctx.new_dict()
+        } else {
+            options.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?
+        };
+        let operation = match op.as_str() {
+            "create" => TableOperation::LayerCreate { config: layer_options(name, &options, vm)? },
+            "modify" => TableOperation::LayerModify { config: layer_options(name, &options, vm)? },
+            "rename" => {
+                ensure_known_entity_keys(&options, "layer rename", &["to"], vm)?;
+                let to = options
+                    .get_item_opt("to", vm)?
+                    .ok_or_else(|| vm.new_value_error("ocs: rename needs the new name".to_owned()))?
+                    .try_into_value::<String>(vm)?;
+                TableOperation::LayerRename { from: name, to }
+            }
+            "delete" => {
+                ensure_known_entity_keys(&options, "layer delete", &["erase_objects"], vm)?;
+                let erase_objects = get_opt_bool(&options, "erase_objects", vm)?;
+                TableOperation::LayerDelete { name, erase_objects }
+            }
+            "set_current" => TableOperation::LayerSetCurrent { name },
+            other => return Err(vm.new_value_error(format!("ocs.layer_operation: unknown operation {other:?}"))),
+        };
+        let result = host_ctx::with_host(|host| host.table_operation(operation))
+            .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        result
+            .map(|handle| handle.value())
+            .map_err(|error| vm.new_runtime_error(format!("ocs.layer_operation: {error}")))
+    }
+
+    /// Every layer with its full properties, in table order.
+    #[pyfunction]
+    fn layer_records(vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        use acadrust::types::{LineWeight, Transparency};
+        let rows = host_ctx::with_host(|host| {
+            let document = host.document();
+            let mut counts = std::collections::HashMap::<String, usize>::new();
+            for entity in document.entities() {
+                *counts.entry(entity.common().layer.to_uppercase()).or_default() += 1;
+            }
+            let current = document.header.current_layer_name.to_uppercase();
+            document
+                .layers
+                .iter()
+                .map(|layer| {
+                    (
+                        layer.clone(),
+                        counts.get(&layer.name.to_uppercase()).copied().unwrap_or(0),
+                        layer.name.to_uppercase() == current,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| vm.new_runtime_error("ocs: not running inside a PY_ command".to_owned()))?;
+        let mut output = Vec::with_capacity(rows.len());
+        for (layer, count, is_current) in rows {
+            let dict = vm.ctx.new_dict();
+            dict.set_item("handle", vm.new_pyobj(layer.handle.value()), vm)?;
+            dict.set_item("name", vm.new_pyobj(layer.name.clone()), vm)?;
+            dict.set_item("color", color_to_py_dict(vm, &layer.color)?, vm)?;
+            dict.set_item("linetype", vm.new_pyobj(layer.line_type.clone()), vm)?;
+            let weight = match layer.line_weight {
+                LineWeight::ByLayer => -1,
+                LineWeight::ByBlock => -2,
+                LineWeight::Default => -3,
+                LineWeight::Value(v) => i64::from(v),
+            };
+            dict.set_item("lineweight", vm.new_pyobj(weight), vm)?;
+            dict.set_item("off", vm.new_pyobj(layer.flags.off), vm)?;
+            dict.set_item("frozen", vm.new_pyobj(layer.flags.frozen), vm)?;
+            dict.set_item("locked", vm.new_pyobj(layer.flags.locked), vm)?;
+            dict.set_item("plottable", vm.new_pyobj(layer.is_plottable), vm)?;
+            let transparency = match layer.transparency {
+                Transparency::Explicit(_) => layer.transparency.as_percent(),
+                _ => 0.0,
+            };
+            dict.set_item("transparency", vm.new_pyobj(transparency), vm)?;
+            dict.set_item("description", vm.new_pyobj(layer.description.clone()), vm)?;
+            dict.set_item("entity_count", vm.new_pyobj(count), vm)?;
+            dict.set_item("current", vm.new_pyobj(is_current), vm)?;
+            output.push(dict.into());
+        }
+        Ok(vm.ctx.new_list(output).into())
+    }
+
     /// Layer names, visibility flags, and top-level entity counts.
     #[pyfunction]
     fn layers(vm: &VirtualMachine) -> PyResult<PyObjectRef> {

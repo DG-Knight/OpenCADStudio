@@ -186,3 +186,17 @@ exact queue above and update statuses with evidence after each increment.
 - Completed `Ole2Frame` by adding creation. `SolidOperation::EmbedPicture` and `doc.embed_picture` build the frame from a picture file with OCS's own embedding code, so a script never touches the opaque storage; PNG, JPEG and BMP are stored byte-for-byte and other formats are re-encoded as PNG. The lifecycle test now creates through Python and the new creation-rules test covers formats, aspect, origin, layer and seven refusals. 30 kinds are complete.
 - Completed `Viewport` by closing its missing canvas oracle and its derived state. The shared driver now switches the scene to the layout that owns a viewport and requires a drawn frame. The host assigns a unique id (at least 2) and derives `custom_scale = height / view_height` on every scripted create or edit, as MVIEW does, so `custom_scale` became read-only. A control showed my earlier suspicion was wrong: the default id 0 still draws a frame in a layout with no sheet viewport, so the id matters for uniqueness, not visibility. 31 kinds are complete.
 - Improved `RasterImage` linkage. A scripted image now reuses one definition per file and registers it in `ACAD_IMAGE_DICT`, which owns it; this persists through DWG and DXF. The `IMAGEDEF_REACTOR` is deliberately not written: its owner convention is ambiguous between cadcodec's struct docs and its DXF writer and cannot be checked against AutoCAD here, so the kind stays integration-tested. An exploratory spike also showed that OCS's own IMAGE command creates bare images that lose their file path on save, an OCS bug outside this plugin work that is flagged separately.
+
+### 2026-09-21: beyond entities, the layer table (`doc.layers`)
+
+Entity CRUD is at its ceiling without the cadcodec fixes (PR HakanSeven12/cadcodec#48), so work moved to
+drawing objects a script needs. New additive v7 request `TableOperation` (`LayerCreate`, `LayerModify`,
+`LayerRename`, `LayerDelete { erase_objects }`, `LayerSetCurrent`) with `HostApi::table_operation`,
+executed by `HostSession::table_operation`. Every refusal (invalid or duplicate name, bad color,
+unknown linetype, out-of-range lineweight or transparency, protected layer `0`/`Defpoints`, current
+layer, layer holding objects without `erase_objects`) is decided before the undo step is recorded, so
+nothing changes. Python: `ocs.active_document.layers` (`create`, `modify`, `rename`, `delete`,
+`set_current`, `current`, lookup and iteration). Evidence: `audit_python_layer_table_over_real_ipc`
+(19 refusals, live/DWG/DXF persistence of colour, lineweight, transparency, flags, linetype,
+description, rename following entities, `erase_objects` and one-step undo), an IPC round-trip test and a
+Python unit test. Next: text and dimension styles, linetypes, blocks, layouts; then headless commands.
