@@ -3,7 +3,8 @@
 This note describes how a script controls OCS and what the host guarantees. The
 per-kind evidence is in the [coverage ledger](plugin-host-model-coverage-ledger.md),
 the increment-by-increment record in the [completion plan](plugin-host-model-completion-plan.md),
-and the script-facing reference in `plugins/opencad-python/PLUGIN.md`.
+and the script-facing reference in `plugins/opencad-python/PLUGIN.md`. A reviewer new to
+the change should start with the [review guide](plugin-host-review-guide.md).
 
 ## Shape
 
