@@ -432,7 +432,7 @@ impl<'a> HostSession<'a> {
             let cmd_name = parts[0];
             let resolved = self.app.resolve_alias(cmd_name);
             let effective = resolved.as_deref().unwrap_or(cmd_name);
-            let _ = self.app.dispatch_command(effective);
+            let _ = self.app.dispatch_command_without_plugins(effective);
         }
 
         let mut paused = false;
