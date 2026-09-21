@@ -79,6 +79,8 @@ impl OpenCADStudio {
             .layers
             .iter()
             .map(|l| l.name.clone())
+            // The reference's hidden system layers (`*ADSK_CONSTRAINTS`) stay out.
+            .filter(|name| !name.starts_with('*'))
             .collect();
         let linetype_items: Vec<ui::properties::LinetypeItem> = self.tabs[i]
             .scene
@@ -2301,6 +2303,7 @@ impl OpenCADStudio {
                         Some((set, constraint)) => {
                             sections = dynamic_dimension_sections(
                                 &self.tabs[i].scene,
+                                handle,
                                 set,
                                 constraint,
                                 sections,
@@ -3614,22 +3617,30 @@ fn set_row(sections: &mut [crate::scene::model::object::PropSection], field: &st
 
 /// Replace a row's value with an arbitrary control (editable field, dropdown,
 /// colour picker …) rather than plain read-only text.
-/// A dynamic dimension's Properties as the reference shows them: the
-/// Constraint rows, then only the text rotation of the dimension itself.
+/// A dimensional constraint's Properties as the reference shows them: the
+/// Constraint rows, then only the text rotation for a dynamic dimension
+/// and the full dimension sections for an annotational one.
 fn dynamic_dimension_sections(
     scene: &crate::scene::Scene,
+    handle: Handle,
     set: &crate::scene::parametric_constraints::ParametricConstraintSet,
     constraint: &crate::scene::parametric_constraints::ParametricConstraint,
     sections: Vec<crate::scene::model::object::PropSection>,
 ) -> Vec<crate::scene::model::object::PropSection> {
     use crate::scene::model::object::{PropSection, PropValue, Property};
     use crate::scene::named_parameters::DrivingValue;
+    use crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER;
     let table = if set.local_parameters.is_empty() {
         scene.named_parameters()
     } else {
         &set.local_parameters
     };
-    let (name, expression, value) = match &constraint.driving_param {
+    let reference = !constraint.enabled;
+    let annotational = scene
+        .document
+        .get_entity(handle)
+        .is_some_and(|entity| entity.common().layer != DYNAMIC_DIMENSION_LAYER);
+    let (name, expression, value, description) = match &constraint.driving_param {
         Some(DrivingValue::Named(name)) => (
             name.clone(),
             table
@@ -3638,14 +3649,21 @@ fn dynamic_dimension_sections(
                 .map(|parameter| parameter.source.clone())
                 .unwrap_or_default(),
             table.resolve(name).ok(),
+            table.description(name).to_string(),
         ),
-        Some(DrivingValue::Literal(value)) => (String::new(), format!("{value}"), Some(*value)),
-        None => (String::new(), String::new(), None),
+        Some(DrivingValue::Literal(value)) => {
+            (String::new(), format!("{value}"), Some(*value), String::new())
+        }
+        None => (String::new(), String::new(), None, String::new()),
     };
     let row = |label: &str, field: &'static str, value: PropValue| Property {
         label: label.to_string(),
         field,
         value,
+    };
+    let yes_no = |flag: bool| PropValue::Choice {
+        selected: if flag { t!("Yes") } else { t!("No") }.into_owned(),
+        options: vec![t!("Yes").into_owned(), t!("No").into_owned()],
     };
     let text_rotation = sections
         .iter()
@@ -3658,18 +3676,26 @@ fn dynamic_dimension_sections(
             row(
                 t!("Constraint Form").as_ref(),
                 "dyn_constraint_form",
-                PropValue::ReadOnly("Dynamic".to_string()),
+                PropValue::Choice {
+                    selected: if annotational { "Annotational" } else { "Dynamic" }.to_string(),
+                    options: vec!["Dynamic".to_string(), "Annotational".to_string()],
+                },
             ),
             row(
                 t!("Reference").as_ref(),
                 "dyn_constraint_reference",
-                PropValue::ReadOnly(t!("No").into_owned()),
+                yes_no(reference),
             ),
             row(t!("Name").as_ref(), "dyn_constraint_name", PropValue::EditText(name)),
             row(
                 t!("Expression").as_ref(),
                 "dyn_constraint_expression",
-                PropValue::EditText(expression),
+                // A reference constraint's expression is the measurement.
+                if reference {
+                    PropValue::ReadOnly(expression)
+                } else {
+                    PropValue::EditText(expression)
+                },
             ),
             row(
                 t!("Value").as_ref(),
@@ -3679,11 +3705,13 @@ fn dynamic_dimension_sections(
             row(
                 t!("Description").as_ref(),
                 "dyn_constraint_description",
-                PropValue::ReadOnly(String::new()),
+                PropValue::EditText(description),
             ),
         ],
     }];
-    if let Some(text_rotation) = text_rotation {
+    if annotational {
+        result.extend(sections);
+    } else if let Some(text_rotation) = text_rotation {
         result.push(PropSection {
             title: t!("Text").into_owned(),
             props: vec![text_rotation],

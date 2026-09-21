@@ -364,15 +364,58 @@ pub(crate) fn next_dimensional_parameter_name(
 /// The constraint-bar label that draws a dynamic dimension's lock mark.
 pub const DYNAMIC_DIMENSION_GLYPH: &str = "\u{1F512}";
 
+/// The layer the reference keeps dynamic dimensions on; an annotational
+/// dimensional constraint sits on an ordinary layer instead.
+pub(crate) const DYNAMIC_DIMENSION_LAYER: &str = "*ADSK_CONSTRAINTS";
+
 /// The text a dynamic dimension shows: CONSTRAINTNAMEFORMAT 0 = name,
-/// 1 = value, 2 = name=value.
-pub(crate) fn dynamic_dimension_text(name: &str, value: f64, format: u8) -> String {
-    match format {
+/// 1 = value, 2 = name=value, the value with its trailing zeros dropped
+/// (`d9=80`, `d1=111.8034`). A parameter defined by a formula shows the
+/// formula behind `fx:` (`fx: len=d1*2`); a reference (driven) constraint's
+/// text sits in parentheses.
+pub(crate) fn dynamic_dimension_text(
+    name: &str,
+    value: f64,
+    format: u8,
+    reference: bool,
+    expression: Option<&str>,
+) -> String {
+    let formula = expression
+        .map(str::trim)
+        .filter(|source| !source.is_empty() && source.parse::<f64>().is_err());
+    let shown = match formula {
+        Some(source) => source.to_string(),
+        None => {
+            let text = format!("{value:.4}");
+            let text = text.trim_end_matches('0').trim_end_matches('.');
+            if text.is_empty() || text == "-" {
+                "0".to_string()
+            } else {
+                text.to_string()
+            }
+        }
+    };
+    let text = match format {
         0 => name.to_string(),
-        1 => format!("{value:.4}"),
-        _ => format!("{name}={value:.4}"),
+        1 => shown,
+        _ => format!("{name}={shown}"),
+    };
+    let text = if formula.is_some() {
+        format!("fx: {text}")
+    } else {
+        text
+    };
+    if reference {
+        format!("({text})")
+    } else {
+        text
     }
 }
+
+/// Screen height of a dynamic dimension's text and its arrows, in pixels —
+/// the reference keeps them readable at any zoom.
+const DYNAMIC_TEXT_PX: f32 = 12.0;
+const DYNAMIC_ARROW_PX: f32 = 8.0;
 
 /// The expression a measured value seeds a parameter with: twelve
 /// significant digits with the trailing zeros dropped (`100`,
@@ -1593,8 +1636,11 @@ impl super::Scene {
     pub(crate) fn refresh_dynamic_dimension_texts(&mut self) {
         let format = self.constraint_name_format;
         let mut updates: Vec<(Handle, String, Option<(Vector3, Vector3)>)> = Vec::new();
+        // A reference (driven) constraint's parameter follows the geometry.
+        let mut followed: Vec<(String, f64)> = Vec::new();
         for set in &self.parametric_constraints {
-            let table = if set.local_parameters.is_empty() {
+            let model_table = set.local_parameters.is_empty();
+            let table = if model_table {
                 &self.named_parameters
             } else {
                 &set.local_parameters
@@ -1602,13 +1648,6 @@ impl super::Scene {
             for (id, dimension) in &set.dimensions {
                 let Some(constraint) = set.get(*id) else {
                     continue;
-                };
-                let (name, value) = match &constraint.driving_param {
-                    Some(DrivingValue::Named(name)) => {
-                        (name.clone(), table.resolve(name).unwrap_or(f64::NAN))
-                    }
-                    Some(DrivingValue::Literal(value)) => (String::new(), *value),
-                    None => continue,
                 };
                 let world = |reference: &ParametricRef| {
                     let entity = self.document.get_entity(reference.entity)?;
@@ -1618,11 +1657,54 @@ impl super::Scene {
                     [first, second, ..] => world(first).zip(world(second)),
                     _ => None,
                 };
+                let reference = !constraint.enabled;
+                let measured = points.map(|(first, second)| {
+                    let delta = second - first;
+                    let axis = match self.document.get_entity(*dimension) {
+                        Some(acadrust::EntityType::Dimension(
+                            acadrust::entities::Dimension::Linear(linear),
+                        )) => Some((linear.rotation.cos(), linear.rotation.sin())),
+                        _ => None,
+                    };
+                    match (constraint.kind, axis) {
+                        (ConstraintKind::DistanceX, _) => delta.x.abs(),
+                        (ConstraintKind::DistanceY, _) => delta.y.abs(),
+                        (ConstraintKind::DistanceDirected, Some((ax, ay))) => {
+                            (delta.x * ax + delta.y * ay).abs()
+                        }
+                        _ => delta.length(),
+                    }
+                });
+                let (name, value, source) = match &constraint.driving_param {
+                    Some(DrivingValue::Named(name)) => {
+                        let value = match (reference, measured) {
+                            (true, Some(measured)) => {
+                                if model_table {
+                                    followed.push((name.clone(), measured));
+                                }
+                                measured
+                            }
+                            _ => table.resolve(name).unwrap_or(f64::NAN),
+                        };
+                        let source = (!reference)
+                            .then(|| table.get(name).map(|parameter| parameter.source.clone()))
+                            .flatten();
+                        (name.clone(), value, source)
+                    }
+                    Some(DrivingValue::Literal(value)) => (String::new(), *value, None),
+                    None => continue,
+                };
                 updates.push((
                     *dimension,
-                    dynamic_dimension_text(&name, value, format),
+                    dynamic_dimension_text(&name, value, format, reference, source.as_deref()),
                     points,
                 ));
+            }
+        }
+        for (name, measured) in followed {
+            let source = measured_expression(measured);
+            if self.named_parameters.get(&name).map(|p| p.source.as_str()) != Some(source.as_str()) {
+                let _ = self.named_parameters.set(&name, &source);
             }
         }
         for (handle, text, points) in updates {
@@ -1715,6 +1797,63 @@ impl super::Scene {
         }
         self.refresh_hidden_dynamic_dimensions();
         ids.len()
+    }
+
+    /// True for a dynamic-form dimensional constraint dimension — the ones
+    /// on the reference's constraints layer, which never plot; an
+    /// annotational one on an ordinary layer plots like any dimension.
+    pub(crate) fn is_plot_hidden_dynamic_dimension(&self, handle: Handle) -> bool {
+        self.is_dynamic_dimension(handle)
+            && self
+                .document
+                .get_entity(handle)
+                .is_some_and(|entity| entity.common().layer == DYNAMIC_DIMENSION_LAYER)
+    }
+
+    /// Keeps dynamic dimensions readable at any zoom: their text and arrows
+    /// measure a fixed screen size, as the reference draws them. Runs every
+    /// tick and touches an entity only when the zoom moved it off size.
+    pub(crate) fn refresh_dynamic_dimension_sizes(&mut self) {
+        use crate::entities::dim_override as dov;
+        let Some(wpp) = self.world_per_pixel() else {
+            return;
+        };
+        let text_height = (DYNAMIC_TEXT_PX * wpp) as f64;
+        let arrow = (DYNAMIC_ARROW_PX * wpp) as f64;
+        let handles: Vec<Handle> = self
+            .parametric_constraints
+            .iter()
+            .flat_map(|set| set.dimensions.values().copied())
+            .collect();
+        for handle in handles {
+            let Some(entity) = self.document.get_entity(handle) else {
+                continue;
+            };
+            // An annotational dimension keeps its style's sizes.
+            if entity.common().layer != DYNAMIC_DIMENSION_LAYER {
+                continue;
+            }
+            let current = dov::real(&entity.common().extended_data, dov::DIMTXT);
+            if current.is_some_and(|height| (height - text_height).abs() <= text_height * 0.02) {
+                continue;
+            }
+            let mut entity = entity.clone();
+            dov::set_on_entity(&mut entity, dov::DIMSCALE, Some(acadrust::xdata::XDataValue::Real(1.0)));
+            dov::set_on_entity(&mut entity, dov::DIMTXT, Some(acadrust::xdata::XDataValue::Real(text_height)));
+            dov::set_on_entity(&mut entity, dov::DIMASZ, Some(acadrust::xdata::XDataValue::Real(arrow)));
+            self.update_entity(entity);
+        }
+    }
+
+    /// Makes sure the reference's dynamic dimension layer exists.
+    pub(crate) fn ensure_dynamic_dimension_layer(&mut self) {
+        if self.document.layers.contains(DYNAMIC_DIMENSION_LAYER) {
+            return;
+        }
+        let mut layer = acadrust::tables::Layer::new(DYNAMIC_DIMENSION_LAYER);
+        layer.color = acadrust::types::Color::from_index(7);
+        layer.handle = self.document.allocate_handle();
+        let _ = self.document.layers.add(layer);
     }
 
     /// True for a dimension that shows a dimensional constraint.

@@ -1625,10 +1625,13 @@ fn build_constraint(
                 distance_direction_type::PARALLEL_TO_LINE
                     | distance_direction_type::PERPENDICULAR_TO_LINE
             ) {
-                if let Some(line) = direction_ref
-                    .first()
-                    .and_then(|reference| whole_line(sys, cache, *reference))
-                {
+                if let Some(line) = direction_ref.first().and_then(|reference| {
+                    // A text baseline or an ellipse axis directs the
+                    // distance the same way a line does.
+                    whole_line(sys, cache, *reference).or_else(|| {
+                        directional_line(sys, cache, *reference).map(|(line, _)| line)
+                    })
+                }) {
                     let current = {
                         let store = sys.store();
                         let delta = [
@@ -3808,6 +3811,24 @@ impl Scene {
                 self.parametric_constraints[i].dof = None;
                 self.parametric_constraints[i].conflicts.clear();
             }
+            // A dimensional constraint set to zero means the collapse.
+            let zero_collapse: HashSet<Handle> = {
+                let set = &self.parametric_constraints[i];
+                let params = if set.local_parameters.is_empty() {
+                    &self.named_parameters
+                } else {
+                    &set.local_parameters
+                };
+                set.constraints
+                    .iter()
+                    .filter(|c| {
+                        c.enabled
+                            && c.kind == ConstraintKind::Distance
+                            && resolved_target(params, c).is_some_and(|v| v.abs() <= f64::EPSILON)
+                    })
+                    .flat_map(|c| c.refs.iter().map(|r| r.entity))
+                    .collect()
+            };
             for (handle, new_entity) in solved {
                 // An edit the constraints can only satisfy by collapsing the
                 // entity (a rotated line whose start is fixed and direction
@@ -3816,7 +3837,8 @@ impl Scene {
                 let new_entity = match originals.get(&handle) {
                     Some(original)
                         if collapsed_by_solve(&new_entity)
-                            && !collapsed_by_solve(original.as_ref()) =>
+                            && !collapsed_by_solve(original.as_ref())
+                            && !zero_collapse.contains(&handle) =>
                     {
                         original.as_ref().clone()
                     }

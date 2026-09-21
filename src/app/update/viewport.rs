@@ -785,6 +785,8 @@ impl OpenCADStudio {
     pub(super) fn on_tick(&mut self, t: Instant) -> Task<Message> {
         let i = self.active_tab;
         self.tabs[i].scene.update(t - self.start);
+        // Dynamic dimensions keep a fixed screen size across zooms.
+        self.tabs[i].scene.refresh_dynamic_dimension_sizes();
 
         // If the camera moved since we last synced, write it back to
         // the document and mark the file dirty.

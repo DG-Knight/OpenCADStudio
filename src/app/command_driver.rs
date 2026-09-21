@@ -1432,6 +1432,11 @@ impl OpenCADStudio {
                 current.name.clone(),
             ),
             ParamField::Name => {
+                let description = self.tabs[i]
+                    .scene
+                    .named_parameters()
+                    .description(&current.name)
+                    .to_string();
                 self.tabs[i]
                     .scene
                     .named_parameters_mut()
@@ -1440,12 +1445,19 @@ impl OpenCADStudio {
                     .scene
                     .named_parameters_mut()
                     .set(&typed, &current.source);
-                if outcome.is_err() {
+                let kept = if outcome.is_err() {
                     let _ = self.tabs[i]
                         .scene
                         .named_parameters_mut()
                         .set(&current.name, &current.source);
-                }
+                    current.name.as_str()
+                } else {
+                    typed.as_str()
+                };
+                self.tabs[i]
+                    .scene
+                    .named_parameters_mut()
+                    .set_description(kept, &description);
                 (outcome, typed.clone())
             }
         };
@@ -1497,6 +1509,133 @@ impl OpenCADStudio {
             self.commit_undo_delta(i, pd);
         }
         self.refresh_properties();
+        Task::none()
+    }
+
+    /// The dynamic dimension the Properties panel targets: its handle, scope,
+    /// constraint id and parameter name.
+    fn dynamic_dimension_target(
+        &self,
+        i: usize,
+    ) -> Option<(
+        Handle,
+        crate::scene::parametric_constraints::ParametricScope,
+        crate::scene::parametric_constraints::ConstraintId,
+        String,
+    )> {
+        use crate::scene::named_parameters::DrivingValue;
+        use crate::scene::parametric_constraints::dynamic_dimension_constraint;
+        let handle = *self.property_target_handles(i).first()?;
+        let (set, constraint) =
+            dynamic_dimension_constraint(&self.tabs[i].scene.parametric_constraints, handle)?;
+        let Some(DrivingValue::Named(name)) = &constraint.driving_param else {
+            return None;
+        };
+        Some((handle, set.scope, constraint.id, name.clone()))
+    }
+
+    /// Commits a dynamic dimension's Description row into its parameter.
+    pub(super) fn on_dynamic_dimension_description_commit(
+        &mut self,
+        field: &'static str,
+    ) -> Task<Message> {
+        use crate::ui::properties::FieldKey;
+        let i = self.active_tab;
+        self.tabs[i].properties.active_field = None;
+        let Some(typed) = self.tabs[i]
+            .properties
+            .edit_buf
+            .remove(&FieldKey::Geom(field))
+        else {
+            return Task::none();
+        };
+        let Some((_, _, _, name)) = self.dynamic_dimension_target(i) else {
+            self.refresh_properties();
+            return Task::none();
+        };
+        let pending = self.begin_undo(i, "Constraint description", 0, true);
+        self.tabs[i].scene.record_undo_named_parameters_before();
+        self.tabs[i]
+            .scene
+            .named_parameters_mut()
+            .set_description(&name, &typed);
+        self.tabs[i].dirty = true;
+        if let Some(pd) = pending {
+            self.commit_undo_delta(i, pd);
+        }
+        self.refresh_properties();
+        Task::none()
+    }
+
+    /// Applies a dynamic dimension's Constraint Form or Reference choice.
+    pub(super) fn on_dynamic_dimension_choice(
+        &mut self,
+        field: &'static str,
+        value: &str,
+    ) -> Task<Message> {
+        use crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER;
+        let i = self.active_tab;
+        let Some((handle, scope, id, _)) = self.dynamic_dimension_target(i) else {
+            return Task::none();
+        };
+        match field {
+            "dyn_constraint_form" => {
+                // Annotational: an ordinary dimension on the current layer
+                // that plots; Dynamic: the gray one on the constraints layer.
+                let annotational = value.eq_ignore_ascii_case("Annotational");
+                let active_layer = self.tabs[i].active_layer.clone();
+                if !annotational {
+                    self.tabs[i].scene.ensure_dynamic_dimension_layer();
+                }
+                self.apply_property_op(i, "Constraint form", &[handle], |app, handle| {
+                    let Some(mut entity) = app.tabs[i].scene.document.get_entity(handle).cloned()
+                    else {
+                        return;
+                    };
+                    if annotational {
+                        entity.as_entity_mut().set_layer(active_layer.clone());
+                        entity.common_mut().color = acadrust::types::Color::ByLayer;
+                    } else {
+                        entity
+                            .as_entity_mut()
+                            .set_layer(DYNAMIC_DIMENSION_LAYER.to_string());
+                        entity.common_mut().color = acadrust::types::Color::Rgb {
+                            r: 103,
+                            g: 109,
+                            b: 118,
+                        };
+                    }
+                    app.tabs[i].scene.update_entity(entity);
+                });
+            }
+            "dyn_constraint_reference" => {
+                // A reference constraint reads the geometry instead of
+                // driving it; its text sits in parentheses.
+                let reference =
+                    value.eq_ignore_ascii_case("Yes") || value == crate::t!("Yes").as_ref();
+                let Some(before) = self.tabs[i].scene.parametric_constraint_set(scope).cloned()
+                else {
+                    return Task::none();
+                };
+                let pending = self.begin_undo(i, "Constraint reference", 0, true);
+                self.tabs[i]
+                    .scene
+                    .record_undo_parametric_constraints_before(scope, before);
+                self.tabs[i].scene.record_undo_named_parameters_before();
+                let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
+                if let Some(constraint) = set.constraints.iter_mut().find(|c| c.id == id) {
+                    constraint.enabled = !reference;
+                }
+                self.tabs[i].scene.refresh_dynamic_dimension_texts();
+                self.tabs[i].scene.sync_native_parametric_graph();
+                self.tabs[i].dirty = true;
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
+                self.refresh_properties();
+            }
+            _ => {}
+        }
         Task::none()
     }
 
@@ -3718,6 +3857,8 @@ impl OpenCADStudio {
                     &name,
                     value,
                     self.tabs[i].scene.constraint_name_format,
+                    false,
+                    Some(&expression),
                 );
                 let mut entity = if kind == ConstraintKind::Distance {
                     aligned_dim::aligned_dimension_entity(
@@ -3739,10 +3880,12 @@ impl OpenCADStudio {
                     &self.tabs[i].scene.document,
                     &mut entity,
                 );
-                let layer = self.tabs[i].active_layer.clone();
-                if layer != "0" {
-                    entity.as_entity_mut().set_layer(layer);
-                }
+                // A dynamic dimension lives on the reference's constraints
+                // layer, hidden from the layer lists and never plotted.
+                self.tabs[i].scene.ensure_dynamic_dimension_layer();
+                entity.as_entity_mut().set_layer(
+                    crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER.to_string(),
+                );
                 // A dynamic dimension draws in the constraint gray, not the
                 // current color.
                 entity.common_mut().color = acadrust::types::Color::Rgb {
@@ -3857,10 +4000,13 @@ impl OpenCADStudio {
                         id,
                         self.constraint_bar_display,
                     );
-                    // The first line stays; the second turns parallel to it.
+                    // The first line stays; the second turns about its start
+                    // to run parallel, as the reference keeps that start.
+                    let mut pins = first_ends.to_vec();
+                    pins.push(second_ends[0]);
                     self.tabs[i].scene.bump_entities_with_parametric_policy(
                         &[(second_line.entity, crate::scene::ChangeKind::Modified)],
-                        &first_ends,
+                        &pins,
                         self.constraint_solve_mode,
                     );
                     self.tabs[i].dirty = true;
@@ -8299,10 +8445,22 @@ fn entity_at_typed_point(
         extent = extent
             .max((bounds.max.x - bounds.min.x).abs())
             .max((bounds.max.y - bounds.min.y).abs());
-        let Some(distance) =
-            crate::scene::viewport_dimension_pick::planar_pick_distance(entity, point)
-        else {
-            continue;
+        let distance = match crate::scene::viewport_dimension_pick::planar_pick_distance(entity, point) {
+            Some(distance) => distance,
+            // A text or an ellipse answers by its extent, the way a click
+            // inside it picks it.
+            None if matches!(
+                entity,
+                acadrust::EntityType::Text(_)
+                    | acadrust::EntityType::MText(_)
+                    | acadrust::EntityType::Ellipse(_)
+            ) =>
+            {
+                let dx = (bounds.min.x - point.x).max(point.x - bounds.max.x).max(0.0);
+                let dy = (bounds.min.y - point.y).max(point.y - bounds.max.y).max(0.0);
+                dx.hypot(dy)
+            }
+            None => continue,
         };
         if nearest.is_none_or(|(best, _)| distance < best) {
             nearest = Some((distance, common.handle));

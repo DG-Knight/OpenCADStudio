@@ -204,6 +204,24 @@ impl DimConstraintCommand {
                     ParametricRef::point(handle, end),
                 )
             }
+            // A text's baseline or an ellipse's axis is a line whose one
+            // constraint point is the insertion point / the center.
+            EntityType::Text(_) | EntityType::MText(_) => {
+                return Self::axis_target(entity, ParametricRef::text_baseline(handle), ParametricRef::point(handle, 0));
+            }
+            EntityType::Ellipse(_) => {
+                let center = ParametricRef::point(handle, -3);
+                let major = Self::axis_target(entity, ParametricRef::ellipse_major_axis(handle), center);
+                let minor = Self::axis_target(entity, ParametricRef::ellipse_minor_axis(handle), center);
+                let gap = |target: &LineTarget| {
+                    let offset = point - target.ends[0].1;
+                    (offset.x * target.dir.y - offset.y * target.dir.x).abs()
+                };
+                return match (major, minor) {
+                    (Some(major), Some(minor)) => Some(if gap(&minor) < gap(&major) { minor } else { major }),
+                    (major, minor) => major.or(minor),
+                };
+            }
             _ => return None,
         };
         let start = Self::world(entity, first)?;
@@ -213,6 +231,24 @@ impl DimConstraintCommand {
             line,
             dir,
             ends: [(first, start), (second, finish)],
+        })
+    }
+
+    /// A directional axis (text baseline, ellipse axis) as a line target
+    /// whose only constraint point is `anchor`.
+    fn axis_target(entity: &EntityType, axis: ParametricRef, anchor: ParametricRef) -> Option<LineTarget> {
+        let [start, end] =
+            crate::scene::parametric_constraints::directional_axis_endpoints(entity, axis)?;
+        let (start, end) = (
+            DVec3::new(start.x, start.y, start.z),
+            DVec3::new(end.x, end.y, end.z),
+        );
+        let dir = (end - start).try_normalize()?;
+        let anchor_point = Self::world(entity, anchor)?;
+        Some(LineTarget {
+            line: axis,
+            dir,
+            ends: [(anchor, anchor_point), (anchor, anchor_point)],
         })
     }
 

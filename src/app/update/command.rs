@@ -2188,6 +2188,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         field: &'static str,
         value: String,
     ) -> Task<Message> {
+        if matches!(field, "dyn_constraint_form" | "dyn_constraint_reference") {
+            return self.on_dynamic_dimension_choice(field, &value);
+        }
         let i = self.active_tab;
         let handles = self.property_target_handles(i);
 
@@ -3268,6 +3271,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 };
                 if let Some(param_field) = dynamic_field {
                     return self.on_dynamic_dimension_field_commit(field, param_field);
+                }
+                if field == "dyn_constraint_description" {
+                    return self.on_dynamic_dimension_description_commit(field);
                 }
                 let i = self.active_tab;
                 self.tabs[i].properties.active_field = None;
