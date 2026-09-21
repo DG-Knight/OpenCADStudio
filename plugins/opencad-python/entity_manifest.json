@@ -973,5 +973,46 @@
         }
       }
     }
+  },
+  "required_struct_fields": {
+    "LwVertex": [
+      "location"
+    ],
+    "Vertex2D": [
+      "location"
+    ],
+    "Vertex3D": [
+      "location"
+    ],
+    "Vertex3DPolyline": [
+      "position"
+    ],
+    "PolygonMeshVertex": [
+      "location"
+    ],
+    "PolyfaceVertex": [
+      "location"
+    ],
+    "MLineVertex": [
+      "position"
+    ],
+    "LineEdge": [
+      "start",
+      "end"
+    ],
+    "CircularArcEdge": [
+      "center",
+      "radius"
+    ],
+    "EllipticArcEdge": [
+      "center",
+      "major_axis_endpoint"
+    ],
+    "PolylineEdge": [
+      "vertices"
+    ],
+    "SectionSymbolPoint": [
+      "point"
+    ]
   }
 }

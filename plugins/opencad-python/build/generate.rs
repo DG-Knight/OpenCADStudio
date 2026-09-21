@@ -40,6 +40,11 @@ pub struct Manifest {
     pub base_fields: Vec<String>,
     #[serde(default)]
     pub overrides: std::collections::BTreeMap<String, EntityOverride>,
+    /// Fields of nested structs (a polyline vertex, a hatch edge) that must be
+    /// present in a scripted dict. Everything else in a nested struct still
+    /// defaults when absent, but an unknown key is always refused.
+    #[serde(default)]
+    pub required_struct_fields: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 fn default_base_fields() -> Vec<String> {
@@ -668,12 +673,24 @@ fn default_{snake}() -> {path} {{
     )
 }
 
-fn gen_struct(name: &str, info: &TypeInfo, registry: &TypeRegistry) -> String {
+fn gen_struct(name: &str, info: &TypeInfo, registry: &TypeRegistry, required: &[String]) -> String {
     let path = type_path(name);
     let snake = snake_case(name);
     let mut to_dict_body = String::new();
     let mut from_dict_fields = String::new();
     let mut default_fields = String::new();
+    let mut allowed: Vec<String> = Vec::new();
+    for f in &info.fields {
+        if f.type_id.as_str() != "EntityCommon" {
+            allowed.push(format!("\"{}\"", f.name));
+        }
+    }
+    let allowed_list = allowed.join(", ");
+    let required_list = required
+        .iter()
+        .map(|field| format!("\"{field}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     for f in &info.fields {
         if f.type_id.as_str() == "EntityCommon" {
             // A sub-record's own common data (layer, XDATA, handles) is not part
@@ -717,6 +734,19 @@ fn gen_struct(name: &str, info: &TypeInfo, registry: &TypeRegistry) -> String {
 
 fn dict_to_{snake}(value: PyObjectRef, vm: &VirtualMachine) -> PyResult<{path}> {{
     let dict = value.try_into_value::<rustpython_vm::builtins::PyDictRef>(vm)?;
+    let allowed: &[&str] = &[{allowed_list}];
+    for key in dict.keys_vec() {{
+        let key = key.try_into_value::<String>(vm)?;
+        if !allowed.contains(&key.as_str()) {{
+            return Err(vm.new_value_error(format!("{name} has no property {{key:?}}; it takes: {{}}", allowed.join(", "))));
+        }}
+    }}
+    let required_fields: &[&str] = &[{required_list}];
+    for required in required_fields.iter().copied() {{
+        if dict.get_item_opt(required, vm)?.map_or(true, |v| vm.is_none(&v)) {{
+            return Err(vm.new_value_error(format!("{name} needs {{required}}")));
+        }}
+    }}
     Ok({path} {{
 {from_dict_fields}    }})
 }}
@@ -1050,7 +1080,16 @@ pub fn generate_entity_crud(manifest: &Manifest, registry: &TypeRegistry) -> Str
             Classify::UnitEnum => out.push_str(&gen_unit_enum(&name, info)),
             Classify::TaggedEnum => out.push_str(&gen_tagged_enum(&name, info, registry)),
             Classify::BitFlags => out.push_str(&gen_bitflags(&name, info)),
-            Classify::Struct => out.push_str(&gen_struct(&name, info, registry)),
+            Classify::Struct => {
+                let required = manifest.required_struct_fields.get(&name).cloned().unwrap_or_default();
+                for field in &required {
+                    assert!(
+                        info.fields.iter().any(|f| &f.name == field),
+                        "entity_manifest.json: required_struct_fields: {name} has no field {field}"
+                    );
+                }
+                out.push_str(&gen_struct(&name, info, registry, &required))
+            }
         }
     }
 

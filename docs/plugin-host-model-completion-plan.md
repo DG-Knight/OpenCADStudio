@@ -284,3 +284,16 @@ the joined line without its parts, the two pieces after a break, the stretched a
 `create_entity("Hatch")`: its command needs an interactive boundary pick that no scripted step can supply. Not wrapped: PEDIT,
 path and 3-D arrays, and the remaining commands, which stay reachable through `doc.command` and `start_command`.
 
+### 2026-09-21: nested input is validated (vertex validation gap)
+
+Found while writing the `explode` audit: an `LwPolyline` created from vertices that used the wrong key (`{'x': .., 'y': ..}` instead of
+`{'location': ..}`) was accepted and became zero-coordinate vertices. The generated dict-to-struct conversions for nested records
+defaulted every absent field and ignored unknown keys, so any typo inside a list of vertices, edges or faces vanished silently.
+The generator now (1) refuses an unknown key in every nested record, naming the keys it takes, and (2) enforces a manifest list,
+`required_struct_fields`, of the fields that define a nested record's geometry: `LwVertex.location`, `Vertex2D.location`,
+`Vertex3D.location`, `Vertex3DPolyline.position`, `PolygonMeshVertex.location`, `PolyfaceVertex.location`, `MLineVertex.position`,
+`LineEdge.start/end`, `CircularArcEdge.center/radius`, `EllipticArcEdge.center/major_axis_endpoint`, `PolylineEdge.vertices` and
+`SectionSymbolPoint.point`. A `None` counts as missing. Everything else in a nested record still defaults when absent. Evidence:
+`audit_python_nested_input_is_validated_over_real_ipc` (eight refusals with the right messages for LwPolyline, Polyline2D and
+PolygonMesh; nothing invalid reaches the drawing; the valid forms still create), and every existing per-kind lifecycle audit still passes.
+

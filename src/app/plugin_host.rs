@@ -8159,6 +8159,61 @@ step('undo_move', lambda: M.move([u], (0, 0, 0), (7, 0, 0)))
         assert!(!moved(&app.tabs[0].scene.document, 1007.0));
     }
 
+    /// A scripted dict is checked all the way down: a nested record (a polyline
+    /// vertex, a mesh vertex) may not carry an unknown key or omit the field that
+    /// defines its geometry, so a typo never turns into a silent zero coordinate.
+    #[test]
+    fn audit_python_nested_input_is_validated_over_real_ipc() {
+        let Some(plugin_path) = std::env::var_os("OCS_TEST_PYTHON_PLUGIN") else {
+            return;
+        };
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+        let process = ocs_plugin_api::process::PluginProcess::spawn(
+            std::path::Path::new(&plugin_path), &mut host, crate::plugin::v4_support::notification_handler(),
+        ).unwrap();
+        let script = std::env::temp_dir().join(format!("ocs_nested_{}.py", std::process::id()));
+        std::fs::write(&script, concat!(
+            "def P(x, y, z=0.0): return {'x': x, 'y': y, 'z': z}\n",
+            "doc = ocs.active_document\nL = doc.layers\n",
+            "refused, problems = [], []\n",
+            "def check(tag, fn, expect):\n",
+            "    try:\n        fn()\n    except (RuntimeError, TypeError, ValueError) as error:\n",
+            "        if expect in str(error):\n            refused.append(tag)\n",
+            "        else:\n            problems.append('WRONGMESSAGE_' + tag)\n",
+            "    else:\n        problems.append('ACCEPTED_' + tag)\n",
+            "def lw(vertices): return lambda: doc.create_entity('LwPolyline', vertices=vertices)\n",
+            "ok = {'location': P(0, 0)}\n",
+            "check('lw_xy_keys', lw([ok, {'x': 5, 'y': 5}]), 'no property')\n",
+            "check('lw_empty_vertex', lw([ok, {}]), 'needs location')\n",
+            "check('lw_null_location', lw([ok, {'location': None}]), 'needs location')\n",
+            "check('lw_typo', lw([ok, {'location': P(1, 1), 'bulgee': 0.5}]), 'no property')\n",
+            "check('lw_message_lists_keys', lw([ok, {'lokation': P(1, 1)}]), 'location')\n",
+            "check('poly2d_missing_location', lambda: doc.create_entity('Polyline2D', vertices=[{'flags': 0}, {'location': P(1, 1)}]), 'needs location')\n",
+            "check('poly2d_typo', lambda: doc.create_entity('Polyline2D', vertices=[{'location': P(0, 0)}, {'loc': P(1, 1)}]), 'no property')\n",
+            "check('mesh_missing_location', lambda: doc.create_entity('PolygonMesh', vertices=[{}]), 'needs location')\n",
+            "good = doc.create_entity('LwPolyline', vertices=[ok, {'location': P(10, 0), 'bulge': 0.5}, {'location': P(10, 10)}])\n",
+            "good2 = doc.create_entity('Polyline2D', vertices=[{'location': P(0, 0)}, {'location': P(5, 5)}])\n",
+            "L.create('REPORT ' + str(len(refused)) + ' ~ ' + ' '.join(problems))\n",
+        )).unwrap();
+        assert!(process.dispatch(&mut host, &format!("PY_RUN {}", script.display()), &mut |_| {}).unwrap());
+        let _ = std::fs::remove_file(&script);
+        let name = host.document().layers.iter().map(|l| l.name.clone()).filter(|n| n.starts_with("REPORT")).last().expect("script report layer");
+        let (refused, problems) = name["REPORT".len()..].split_once('~').unwrap();
+        assert_eq!(problems.trim(), "", "problems: {problems}");
+        assert_eq!(refused.trim(), "8");
+        // Nothing invalid reached the drawing; the two valid polylines did.
+        let document = host.document();
+        let lw: Vec<_> = document.entities().filter_map(|e| match e { EntityType::LwPolyline(p) => Some(p.clone()), _ => None }).collect();
+        assert_eq!(lw.len(), 1, "only the valid LwPolyline was created");
+        assert_eq!(lw[0].vertices.len(), 3);
+        assert_eq!(lw[0].vertices[1].bulge, 0.5);
+        assert_eq!(document.entities().filter(|e| matches!(e, EntityType::Polyline2D(_))).count(), 1);
+        assert!(!document.entities().any(|e| matches!(e, EntityType::PolygonMesh(_))));
+        drop(process);
+    }
+
     /// Exploration harness (not a gate): prints how the real commands answer
     /// each step so the wrappers are written against observed prompts.
     #[test]
