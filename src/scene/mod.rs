@@ -2300,6 +2300,12 @@ pub struct Scene {
     /// Conservative association hint: unknown until scanned, then updated from
     /// changed entities. Retaining `true` after deletion only costs an extra scan.
     has_associative_centers: std::cell::Cell<Option<bool>>,
+    /// Conservative hint for whether any Face3D entities exist in the document.
+    pub(crate) has_face3d: std::cell::Cell<Option<bool>>,
+    /// Cached resolved document render environment (fog and background image), keyed by (geometry_epoch, document.objects.len()).
+    document_render_env_cache: RefCell<Option<(u64, usize, crate::scene::view::render::CachedDocumentRenderEnvironment)>>,
+    /// Memoized background image resolution to avoid repeated filesystem probes on each render frame.
+    background_image_cache: RefCell<HashMap<String, Option<crate::scene::model::image_model::DecodedImage>>>,
     /// Runtime parametric constraint sets decoded from standard graph scopes.
     pub(crate) parametric_constraints: Vec<parametric_constraints::ParametricConstraintSet>,
     /// CONSTRAINTNAMEFORMAT: what a dynamic dimension's text shows —
@@ -2679,6 +2685,9 @@ impl Scene {
             glyph_cache: RefCell::new(None),
             named_parameters: named_parameters::ParameterTable::new(),
             has_associative_centers: std::cell::Cell::new(None),
+            has_face3d: std::cell::Cell::new(None),
+            document_render_env_cache: RefCell::new(None),
+            background_image_cache: RefCell::new(HashMap::default()),
             block_defn_cache: RefCell::new(HashMap::default()),
             entity_index_cache: RefCell::new(None),
             last_render_aspect: std::cell::Cell::new(16.0 / 9.0),
@@ -3236,6 +3245,19 @@ impl Scene {
         any
     }
 
+    /// Fast check for whether any Face3D entities exist in the document.
+    pub(crate) fn has_face3d(&self) -> bool {
+        if let Some(known) = self.has_face3d.get() {
+            return known;
+        }
+        let any = self
+            .document
+            .entities()
+            .any(|e| matches!(e, EntityType::Face3D(_)));
+        self.has_face3d.set(Some(any));
+        any
+    }
+
     pub fn bump_entities(&mut self, changes: &[(Handle, ChangeKind)]) {
         self.bump_entities_with_parametric_policy(changes, &[], false);
     }
@@ -3400,6 +3422,17 @@ impl Scene {
             }
             self.lighting_cache.borrow_mut().clear();
         }
+        if let Some(true) = self.has_face3d.get() {
+            if changes.iter().any(|(_, k)| matches!(k, ChangeKind::Removed)) {
+                self.has_face3d.set(None);
+            }
+        } else if changes.iter().any(|(h, _)| {
+            self.document
+                .get_entity(*h)
+                .is_some_and(|e| matches!(e, EntityType::Face3D(_)))
+        }) {
+            self.has_face3d.set(Some(true));
+        }
         let epoch = GEOMETRY_EPOCH.fetch_add(1, Ordering::Relaxed);
         self.geometry_epoch = epoch;
         self.invalidate_projection_bounds();
@@ -3467,6 +3500,9 @@ impl Scene {
         // A full structural change may move lights between blocks or alter
         // layer visibility without naming the affected handles.
         self.lighting_cache.borrow_mut().clear();
+        *self.document_render_env_cache.borrow_mut() = None;
+        self.background_image_cache.borrow_mut().clear();
+        self.has_face3d.set(None);
         // Default: also invalidate block definitions. Safe for every caller;
         // operations that know blocks are untouched use `bump_geometry_no_blocks`.
         self.block_epoch = GEOMETRY_EPOCH.fetch_add(1, Ordering::Relaxed);
@@ -3565,8 +3601,17 @@ impl Scene {
         self.geometry_epoch = epoch;
         self.invalidate_projection_bounds();
         self.lighting_cache.borrow_mut().clear();
+        *self.document_render_env_cache.borrow_mut() = None;
+        self.background_image_cache.borrow_mut().clear();
+        self.has_face3d.set(None);
         self.invalidate_dependency_index();
         self.push_geometry_delta(epoch, Vec::new(), true);
+    }
+
+    /// Invalidate the cached document render environment (fog parameters and image).
+    pub fn invalidate_render_environment_cache(&self) {
+        *self.document_render_env_cache.borrow_mut() = None;
+        self.background_image_cache.borrow_mut().clear();
     }
 
     /// Mark the selection / hover-highlight set dirty without invalidating the

@@ -19,6 +19,7 @@
 //! 15. Batch Entity Transformation & Incremental Dirty-Tracking
 //! 16. Draworder Depth Map Full Build & Incremental Patch
 //! 17. Delta-Undo Transaction Before-Image Recording
+//! 18. Viewport Render Pipeline Construction (10k Objects)
 //!
 //! Output:
 //! - Human-readable ASCII / Markdown summary table on stdout
@@ -2090,6 +2091,104 @@ fn bench_undo_delta_recording(runner: &mut BenchmarkRunner) {
     );
 }
 
+fn bench_view_render_viewport_construction(runner: &mut BenchmarkRunner) {
+    if !runner.should_run("view_render") {
+        return;
+    }
+    let obj_count = if runner.quick_mode { 1_000 } else { 10_000 };
+    let mut scene = Scene::new();
+
+    // Populate scene with non-graphical document objects
+    for i in 0..obj_count {
+        let handle = acadrust::Handle::new(0x2000 + i as u64);
+        scene.document.objects.insert(
+            handle,
+            acadrust::objects::ObjectType::Dictionary(acadrust::objects::Dictionary::default()),
+        );
+    }
+    // Add lines to model space
+    for i in 0..100 {
+        let x = (i % 10) as f64 * 10.0;
+        let y = (i / 10) as f64 * 10.0;
+        let mut line = Line::new();
+        line.start = Vector3::new(x, y, 0.0);
+        line.end = Vector3::new(x + 5.0, y + 5.0, 0.0);
+        scene.add_entity(EntityType::Line(line));
+    }
+
+    let runs = if runner.quick_mode { 10 } else { 30 };
+    let bounds = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+
+    // 1. Uncached / Before: Linear scans over document objects on every frame
+    let mut uncached_samples = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        scene.invalidate_render_environment_cache();
+        let t0 = Instant::now();
+        let primitive = scene.build_viewports(
+            bounds,
+            acadrust::entities::ViewportRenderMode::Wireframe2D,
+            None,
+            false,
+            false,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        black_box(primitive);
+        let elapsed_us = t0.elapsed().as_micros() as f64;
+        uncached_samples.push(elapsed_us);
+    }
+    let median_uncached_us = uncached_samples[uncached_samples.len() / 2];
+    let fps_uncached = 1_000_000.0 / median_uncached_us.max(1.0);
+    runner.record(
+        "view_render_viewport_uncached (Before)",
+        "Uncached: 2 linear scans over document objects on every frame",
+        "µs",
+        uncached_samples,
+        Some((fps_uncached, "FPS")),
+        None,
+    );
+
+    // 2. Cached / After: Memoized document render environment + O(1) fast paths
+    let _ = scene.build_viewports(
+        bounds,
+        acadrust::entities::ViewportRenderMode::Wireframe2D,
+        None,
+        false,
+        false,
+        [1.0, 1.0, 1.0, 1.0],
+    );
+
+    let mut cached_samples = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let t0 = Instant::now();
+        let primitive = scene.build_viewports(
+            bounds,
+            acadrust::entities::ViewportRenderMode::Wireframe2D,
+            None,
+            false,
+            false,
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        black_box(primitive);
+        let elapsed_us = t0.elapsed().as_micros() as f64;
+        cached_samples.push(elapsed_us);
+    }
+    let median_cached_us = cached_samples[cached_samples.len() / 2];
+    let fps_cached = 1_000_000.0 / median_cached_us.max(1.0);
+    runner.record(
+        "view_render_viewport_cached (After)",
+        "Memoized: O(1) render environment & Face3D fast-path",
+        "µs",
+        cached_samples,
+        Some((fps_cached, "FPS")),
+        Some(1000.0), // Target threshold < 1000 µs (1 ms)
+    );
+}
+
 // ── Main Entrypoint ─────────────────────────────────────────────────────────
 
 fn main() {
@@ -2122,6 +2221,7 @@ fn main() {
     bench_batch_entity_mutation(&mut runner);
     bench_draworder_evaluation(&mut runner);
     bench_undo_delta_recording(&mut runner);
+    bench_view_render_viewport_construction(&mut runner);
 
     runner.finish();
 }

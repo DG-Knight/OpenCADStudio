@@ -21,6 +21,8 @@ pub struct ObjectDataCache {
     light_entities: std::sync::Arc<Vec<Handle>>,
     sun_objects: std::sync::Arc<Vec<Handle>>,
     geo_objects: std::sync::Arc<Vec<Handle>>,
+    render_environments: std::sync::Arc<Vec<Handle>>,
+    render_settings: std::sync::Arc<Vec<Handle>>,
 }
 
 pub fn build_cache(document: &CadDocument) -> ObjectDataCache {
@@ -29,6 +31,8 @@ pub fn build_cache(document: &CadDocument) -> ObjectDataCache {
     let mut ordered_lights = Vec::new();
     let mut sun_objects = Vec::new();
     let mut geo_objects = Vec::new();
+    let mut render_environments = Vec::new();
+    let mut render_settings = Vec::new();
     for (handle, object) in &document.objects {
         match object {
             ObjectType::DynamicBlock(_) => dynamic_objects.push(*handle),
@@ -39,6 +43,14 @@ pub fn build_cache(document: &CadDocument) -> ObjectDataCache {
                     ordered_lights.extend(list.lights.iter().map(|entry| entry.handle));
                 }
                 acadrust::objects::ClassObjectData::Sun(_) => sun_objects.push(*handle),
+                acadrust::objects::ClassObjectData::RenderEnvironment(_) => {
+                    render_environments.push(*handle);
+                }
+                acadrust::objects::ClassObjectData::RenderSettings(_)
+                | acadrust::objects::ClassObjectData::MentalRayRenderSettings(_)
+                | acadrust::objects::ClassObjectData::RapidRtRenderSettings(_) => {
+                    render_settings.push(*handle);
+                }
                 _ => {}
             },
             _ => {}
@@ -57,6 +69,8 @@ pub fn build_cache(document: &CadDocument) -> ObjectDataCache {
     associative_objects.sort_by_key(|handle| handle.value());
     sun_objects.sort_by_key(|handle| handle.value());
     geo_objects.sort_by_key(|handle| handle.value());
+    render_environments.sort_by_key(|handle| handle.value());
+    render_settings.sort_by_key(|handle| handle.value());
     ObjectDataCache {
         document_sections: std::sync::Arc::new(build_document_sections(document)),
         dynamic_objects: std::sync::Arc::new(dynamic_objects),
@@ -64,6 +78,8 @@ pub fn build_cache(document: &CadDocument) -> ObjectDataCache {
         light_entities: std::sync::Arc::new(ordered_lights),
         sun_objects: std::sync::Arc::new(sun_objects),
         geo_objects: std::sync::Arc::new(geo_objects),
+        render_environments: std::sync::Arc::new(render_environments),
+        render_settings: std::sync::Arc::new(render_settings),
     }
 }
 
@@ -81,6 +97,14 @@ pub fn sun_objects(cache: &ObjectDataCache) -> &[Handle] {
 
 pub fn geo_objects(cache: &ObjectDataCache) -> &[Handle] {
     &cache.geo_objects
+}
+
+pub fn render_environments(cache: &ObjectDataCache) -> &[Handle] {
+    &cache.render_environments
+}
+
+pub fn render_settings(cache: &ObjectDataCache) -> &[Handle] {
+    &cache.render_settings
 }
 
 pub fn update_light_entity(
