@@ -410,6 +410,7 @@ impl OpenCADStudio {
     fn update_inner(&mut self, msg: Message) -> Task<Message> {
         match msg {
             Message::SpaceMouseWake => self.on_spacemouse_wake(),
+            Message::TrackpadPinch(magnification) => self.on_pinch_zoom(magnification),
             Message::SpaceMouseFrame(time) => {
                 self.spacemouse.frame(
                     time.saturating_duration_since(self.start).as_secs_f64() * 1000.,

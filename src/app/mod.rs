@@ -2023,6 +2023,8 @@ pub enum Message {
     SpaceMousePreferences,
     SpaceMouseDriverSettings,
     SpaceMouseDetails,
+    /// One magnification delta from a trackpad pinch, positive zooming in.
+    TrackpadPinch(f32),
     ControlRequest(control::Envelope),
     PollWebControl,
     ControlStep(String, Box<Message>),

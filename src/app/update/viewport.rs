@@ -35,6 +35,47 @@ fn pt_pt_d2(a: Point, b: Point) -> f32 {
     (a.x - b.x).powi(2) + (a.y - b.y).powi(2)
 }
 
+/// What one scroll delta asks the viewport to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ScrollIntent {
+    /// Wheel notches to zoom by; positive zooms in.
+    Zoom { notches: f32 },
+    /// Trackpad movement to pan by, in screen pixels.
+    ///
+    /// Built only where a pixel delta can only mean a trackpad, so it has no
+    /// constructor on the other targets.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Pan { dx: f32, dy: f32 },
+}
+
+/// A wheel notch zooms; a trackpad's two fingers pan.
+///
+/// A wheel reports notches, a precise-scrolling device reports pixels, and that
+/// is the whole distinction — there is no modifier to check and no setting to
+/// read. The pixels only mean "trackpad" on macOS: the browser build reports
+/// every wheel notch as pixels too, so everywhere else they keep zooming.
+fn scroll_intent(delta: mouse::ScrollDelta) -> ScrollIntent {
+    match delta {
+        // Both axes go straight through: the two-finger gesture moves the
+        // drawing the same way the middle-button drag moves it. If a pan ever
+        // comes out mirrored, this is the line.
+        #[cfg(target_os = "macos")]
+        mouse::ScrollDelta::Pixels { x, y } => ScrollIntent::Pan { dx: x, dy: y },
+        #[cfg(not(target_os = "macos"))]
+        mouse::ScrollDelta::Pixels { y, .. } => ScrollIntent::Zoom { notches: y * 0.01 },
+        mouse::ScrollDelta::Lines { y, .. } => ScrollIntent::Zoom { notches: y },
+    }
+}
+
+/// The camera step that pinches the view 1:1 with the fingers, from AppKit's
+/// magnification delta (0.05 = the fingers moved 5% further apart).
+///
+/// AppKit reports the increment of a scale factor, and a 5% wider pinch has to
+/// leave the view 5% closer, so the step solves `1 - step / 10 = 1 / (1 + m)`.
+fn pinch_zoom_steps(magnification: f32) -> f32 {
+    10.0 * magnification / (1.0 + magnification)
+}
+
 /// Whether a command point keeps the elevation of its snap instead of being
 /// clamped to the world XY plane.
 ///
@@ -1145,36 +1186,9 @@ impl OpenCADStudio {
                         return Task::none();
                     }
                 }
-                // Pan scale uses the active tile's size (ortho size
-                // is relative to viewport height), so a tiled pane
-                // pans at the correct rate.
-                let bounds = self.tabs[i]
-                    .scene
-                    .active_model_tile_bounds(vp_size.0, vp_size.1);
                 // Drop `sel` before calling mutable scene methods.
                 drop(sel);
-                if self.tabs[i].scene.active_viewport.is_some() {
-                    self.tabs[i].scene.pan_active_viewport(dx, dy, bounds);
-                    // Bump so the GPU re-uploads the viewport's re-culled
-                    // wire set — otherwise newly-revealed lines stay
-                    // invisible until MSPACE is exited.
-                    self.tabs[i].scene.camera_generation += 1;
-                } else {
-                    // `bounds` is the active tile; pan by its height so
-                    // the point under the cursor tracks correctly.
-                    self.tabs[i]
-                        .scene
-                        .camera
-                        .borrow_mut()
-                        .pan_screen(dx, dy, bounds.height);
-                    self.tabs[i].scene.camera_generation += 1;
-                    // Keep an in-progress box selection pinned to the
-                    // drawing as the view pans under it (#234).
-                    self.reproject_box_anchor(i, vp_size.0, vp_size.1);
-                }
-                self.tabs[i]
-                    .scene
-                    .record_nav_perf(crate::scene::NavPerfOp::Pan, move_started);
+                self.pan_active_view(i, dx, dy, move_started);
                 self.tabs[i].scene.selection.borrow_mut().middle_last_pos = Some(p);
                 return Task::none();
             }
@@ -5339,16 +5353,74 @@ properties={:.1}ms picked={}",
         Task::none()
     }
 
+    /// A wheel notch zooms; a trackpad's two fingers pan. Which one a delta
+    /// means is `scroll_intent`'s call.
     pub(super) fn on_viewport_scroll(&mut self, delta: mouse::ScrollDelta) -> Task<Message> {
-        let nav_started = Instant::now();
-        let mut s = match delta {
-            mouse::ScrollDelta::Lines { y, .. } => y,
-            mouse::ScrollDelta::Pixels { y, .. } => y * 0.01,
-        };
-        s *= self.zoom_factor as f32 / 60.0;
-        if self.zoom_wheel_reversed {
-            s = -s;
+        match scroll_intent(delta) {
+            ScrollIntent::Zoom { notches } => {
+                let mut s = notches * self.zoom_factor as f32 / 60.0;
+                if self.zoom_wheel_reversed {
+                    s = -s;
+                }
+                self.zoom_view_at_cursor(s)
+            }
+            ScrollIntent::Pan { dx, dy } => {
+                let i = self.active_tab;
+                self.tabs[i].scene.remember_current_view();
+                self.clear_navigation_hover(i);
+                self.pan_active_view(i, dx, dy, Instant::now());
+                self.arm_hover_after_navigation(i);
+                Task::none()
+            }
         }
+    }
+
+    /// Pinch the active view to zoom, as reported by the trackpad monitor
+    /// (`src/input/trackpad.rs`). The pivot is the cursor, like the wheel, and
+    /// the direction is the fingers' own, so ZOOMWHEEL does not apply to it.
+    pub(super) fn on_pinch_zoom(&mut self, magnification: f32) -> Task<Message> {
+        if magnification == 0.0 {
+            return Task::none();
+        }
+        self.zoom_view_at_cursor(pinch_zoom_steps(magnification))
+    }
+
+    /// Pan the active view by `dx`/`dy` screen pixels: the body shared by the
+    /// middle-button drag and the two-finger gesture.
+    fn pan_active_view(&mut self, i: usize, dx: f32, dy: f32, started: Instant) {
+        // Pan scale uses the active tile's size (ortho size is relative to
+        // viewport height), so a tiled pane pans at the correct rate.
+        let (vw, vh) = self.tabs[i].scene.selection.borrow().vp_size;
+        let bounds = self.tabs[i].scene.active_model_tile_bounds(vw, vh);
+        if self.tabs[i].scene.active_viewport.is_some() {
+            self.tabs[i].scene.pan_active_viewport(dx, dy, bounds);
+            // Bump so the GPU re-uploads the viewport's re-culled wire set —
+            // otherwise newly-revealed lines stay invisible until MSPACE is
+            // exited.
+            self.tabs[i].scene.camera_generation += 1;
+        } else {
+            // `bounds` is the active tile; pan by its height so the point
+            // under the cursor tracks correctly.
+            self.tabs[i]
+                .scene
+                .camera
+                .borrow_mut()
+                .pan_screen(dx, dy, bounds.height);
+            self.tabs[i].scene.camera_generation += 1;
+            // Keep an in-progress box selection pinned to the drawing as the
+            // view pans under it (#234).
+            self.reproject_box_anchor(i, vw, vh);
+        }
+        self.tabs[i]
+            .scene
+            .record_nav_perf(crate::scene::NavPerfOp::Pan, started);
+    }
+
+    /// Zoom the active view by `s`, in the camera's own units
+    /// (`Camera::zoom`: `distance *= 1 - s / 10`). Shared by the wheel and
+    /// the pinch.
+    fn zoom_view_at_cursor(&mut self, s: f32) -> Task<Message> {
+        let nav_started = Instant::now();
         let i = self.active_tab;
         self.tabs[i].scene.remember_current_view();
         self.clear_navigation_hover(i);
@@ -6302,6 +6374,42 @@ properties={:.1}ms picked={}",
         Task::none()
     }
 
+}
+
+#[cfg(test)]
+mod scroll_intent_tests {
+    use super::{pinch_zoom_steps, scroll_intent, ScrollIntent};
+    use iced::mouse::ScrollDelta;
+
+    #[test]
+    fn wheel_notches_zoom() {
+        assert_eq!(
+            scroll_intent(ScrollDelta::Lines { x: 0.0, y: 1.0 }),
+            ScrollIntent::Zoom { notches: 1.0 }
+        );
+    }
+
+    /// Both axes of the gesture have to reach the pan, and the drawing has to
+    /// follow the fingers rather than run away from them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn two_finger_scroll_pans() {
+        assert_eq!(
+            scroll_intent(ScrollDelta::Pixels { x: 4.0, y: 6.0 }),
+            ScrollIntent::Pan { dx: 4.0, dy: 6.0 }
+        );
+    }
+
+    /// A pinch is a scale factor, so the view has to end up exactly that much
+    /// closer: fingers 5% apart divide the camera distance by 1.05.
+    #[test]
+    fn pinch_is_one_to_one() {
+        let zoom_after = 1.0 - pinch_zoom_steps(0.05) / 10.0;
+        assert!((zoom_after - 1.0 / 1.05).abs() < 1e-6, "{zoom_after}");
+        assert!(pinch_zoom_steps(-0.05) < 0.0, "pinching in zooms out");
+        // No pinch, no step: a zero delta must not divide the view away.
+        assert_eq!(pinch_zoom_steps(0.0), 0.0);
+    }
 }
 
 #[cfg(test)]

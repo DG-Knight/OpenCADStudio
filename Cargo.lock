@@ -10,6 +10,7 @@ dependencies = [
  "ashpd",
  "base64",
  "bincode",
+ "block2 0.5.1",
  "bytemuck",
  "cadkernel",
  "cadkernel-constraints",

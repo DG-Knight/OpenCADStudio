@@ -74,7 +74,10 @@ ashpd = { version = "0.13.13", default-features = false, features = ["async-io",
 # here to the same versions Cargo already resolves for it.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
-objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSRunningApplication"] }
+# The `NSEvent`/`block2` features are for the trackpad pinch monitor in
+# `src/input/trackpad.rs` — see that file for why the gesture is read there.
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSRunningApplication", "NSEvent", "block2"] }
+block2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSURL", "NSString", "NSObject", "NSNotification", "NSThread", "NSEnumerator"] }
 
 [patch.crates-io]
