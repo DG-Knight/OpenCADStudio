@@ -23,6 +23,7 @@ impl OpenCADStudio {
             Some(K::LayerStateManager) => crate::tr!("modal", "layer-state-manager"),
             Some(K::LayerTranslator) => crate::t!("Layer Translator").into_owned(),
             Some(K::DrawingUnits) => crate::t!("Drawing Units").into_owned(),
+            Some(K::BlockDefinition) => crate::t!("Block Definition").into_owned(),
             Some(K::GeometricTolerance) => crate::t!("Geometric Tolerance").into_owned(),
             Some(K::DraftingSettings) => crate::t!("Drafting Settings").into_owned(),
             Some(K::AutoConstrainSettings) => crate::t!("Constraint Settings").into_owned(),
@@ -497,6 +498,12 @@ impl OpenCADStudio {
                 let state = self.drawing_units.as_ref()?;
                 sized_flow(ex, 560, 420, |flow| {
                     crate::ui::window::drawing_units::view_window(state, flow)
+                })
+            }
+            super::super::ModalKind::BlockDefinition => {
+                let state = self.block_definition.as_ref()?;
+                sized_flow(ex, 580, 390, |flow| {
+                    crate::ui::window::block_definition::view_window(state, flow)
                 })
             }
             super::super::ModalKind::GeometricTolerance => {

@@ -495,8 +495,8 @@ impl OpenCADStudio {
                     return Some(Task::none());
                 }
 
-                let insert = match self.tabs[i].scene.document.get_entity(insert_handle) {
-                    Some(acadrust::EntityType::Insert(ins)) => ins.clone(),
+                let block_name = match self.tabs[i].scene.document.get_entity(insert_handle) {
+                    Some(acadrust::EntityType::Insert(ins)) => ins.block_name.clone(),
                     _ => {
                         self.command_line
                             .push_error(crate::t!("BEDIT: selected object is not a block reference.").as_ref());
@@ -509,13 +509,13 @@ impl OpenCADStudio {
                     .scene
                     .document
                     .block_records
-                    .get(&insert.block_name)
+                    .get(&block_name)
                 {
                     Some(br) => (br.handle, br.flags.is_xref),
                     None => {
                         self.command_line.push_error(crate::tf!(
                             "BEDIT: block \"{}\" not found.",
-                            insert.block_name
+                            block_name
                         ).as_ref());
                         return Some(Task::none());
                     }
@@ -532,7 +532,7 @@ impl OpenCADStudio {
                 {
                     self.tabs[i].active_cmd = None;
                     return Some(Task::done(Message::BlockEditSwitch(
-                        insert.block_name.clone(),
+                        block_name.clone(),
                     )));
                 }
 
@@ -543,7 +543,7 @@ impl OpenCADStudio {
                         .scene
                         .document
                         .block_records
-                        .get(&insert.block_name)
+                        .get(&block_name)
                         .unwrap();
                     br.entity_handles
                         .iter()
@@ -564,7 +564,7 @@ impl OpenCADStudio {
                     .entities()
                     .filter_map(|entity| match entity {
                         acadrust::EntityType::Insert(reference)
-                            if reference.block_name.eq_ignore_ascii_case(&insert.block_name)
+                            if reference.block_name.eq_ignore_ascii_case(&block_name)
                                 && !reference.attributes.is_empty() =>
                         {
                             Some((
@@ -607,7 +607,7 @@ impl OpenCADStudio {
                 }
                 self.tabs[i].scene.block_edit_block = Some(br_handle);
                 self.tabs[i].block_edits.push(BlockEditSession {
-                    block_name: insert.block_name.clone(),
+                    block_name: block_name.clone(),
                     br_handle,
                     return_layout,
                     return_block,
@@ -651,7 +651,7 @@ impl OpenCADStudio {
                 self.tabs[i].dirty = true;
                 self.command_line.push_info(crate::tf!(
                     "BEDIT: Editing block \"{}\". Use Save Block or Discard to finish.",
-                    insert.block_name
+                    block_name
                 ).as_ref());
             }
 

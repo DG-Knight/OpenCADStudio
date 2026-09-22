@@ -3654,6 +3654,36 @@ impl OpenCADStudio {
                     }
                 }
             }
+            CmdResult::CreateBlockWithOptions { mut options } => {
+                options.handles.retain(|handle| !self.tabs[i].scene.is_layer_locked(*handle));
+                if options.handles.is_empty() {
+                    self.command_line
+                        .push_info(crate::t!("No editable objects selected.").as_ref());
+                    return Task::none();
+                }
+                self.push_undo_snapshot(i, "BLOCK");
+                let name = options.name.clone();
+                match self.tabs[i].scene.create_block_with_options(*options) {
+                    Ok(insert_handle) => {
+                        self.tabs[i].dirty = true;
+                        self.tabs[i].scene.deselect_all();
+                        if !insert_handle.is_null() {
+                            self.tabs[i].scene.select_entity(insert_handle, false);
+                        }
+                        self.tabs[i].scene.clear_preview_wire();
+                        self.tabs[i].active_cmd = None;
+                        self.tabs[i].snap_result = None;
+                        self.command_line
+                            .push_output(crate::tf!("Block \"{name}\" created.").as_ref());
+                        self.refresh_properties();
+                        self.refresh_block_palette();
+                    }
+                    Err(err) => {
+                        self.discard_last_undo_entry(i);
+                        self.command_line.push_error(&err);
+                    }
+                }
+            }
             CmdResult::CommitHatch(hatch) => {
                 let label = self.history_label_from_active_cmd(i, "HATCH");
                 let pending = self.begin_undo(i, label, 1, true);

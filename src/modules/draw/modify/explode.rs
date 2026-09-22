@@ -98,11 +98,20 @@ pub fn explode_entity(entity: &EntityType, document: &CadDocument) -> Vec<Entity
         {
             vec![]
         }
-        EntityType::Insert(ins) => ins
-            .explode_from_document(document)
-            .into_iter()
-            .map(normalize_insert_entity)
-            .collect(),
+        EntityType::Insert(ins) => {
+            let explodable = document
+                .block_records
+                .get(&ins.block_name)
+                .map_or(true, |br| br.explodable);
+            if !explodable {
+                vec![]
+            } else {
+                ins.explode_from_document(document)
+                    .into_iter()
+                    .map(normalize_insert_entity)
+                    .collect()
+            }
+        }
         EntityType::MLine(ml) => explode_mline(ml),
         EntityType::Dimension(dim) => explode_dimension(dim, document),
         _ => vec![],
@@ -1497,6 +1506,18 @@ mod tests {
         let mut insert = acadrust::entities::Insert::new("B1", Vector3::new(0.0, 0.0, 0.0));
         insert.row_count = u16::MAX;
         insert.column_count = u16::MAX;
+        assert!(explode_entity(&EntityType::Insert(insert), &doc).is_empty());
+    }
+
+    #[test]
+    fn unexplodable_block_is_not_exploded() {
+        let mut doc = CadDocument::new();
+        let mut block = acadrust::tables::BlockRecord::new("NO_EXPLODE");
+        block.handle = doc.allocate_handle();
+        block.explodable = false;
+        doc.block_records.add(block).unwrap();
+
+        let insert = acadrust::entities::Insert::new("NO_EXPLODE", Vector3::new(0.0, 0.0, 0.0));
         assert!(explode_entity(&EntityType::Insert(insert), &doc).is_empty());
     }
 

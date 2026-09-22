@@ -36,6 +36,7 @@ pub use dimension_assoc::{ReferenceStatus, ResolvedReference};
 pub use page_setup::{apply_default_page_setup, document_page_setups, rotated_margins};
 mod dwg_native_constraints;
 mod entity;
+pub use entity::CreateBlockOptions;
 #[cfg(test)]
 mod hatch_boundary;
 mod group_layer;

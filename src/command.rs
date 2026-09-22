@@ -1520,6 +1520,10 @@ pub enum CmdResult {
         name: String,
         base: DVec3,
     },
+    /// Create a block definition with full dialog options (Retain/Convert/Delete, units, annotative, etc.).
+    CreateBlockWithOptions {
+        options: Box<crate::scene::CreateBlockOptions>,
+    },
     /// Apply a transform to selected entities and end the command.
     TransformSelected(Vec<Handle>, EntityTransform),
     /// Copy selected entities with a transform; command stays active for more copies.

@@ -487,6 +487,8 @@ pub(super) struct OpenCADStudio {
     layer_translator: Option<crate::ui::window::layer_translator::State>,
     /// Working copy of the Drawing Units dialog; `None` while it is closed.
     drawing_units: Option<crate::ui::window::drawing_units::State>,
+    /// Working copy of the Block Definition dialog; `None` while it is closed.
+    block_definition: Option<crate::ui::window::block_definition::BlockDefinitionState>,
     /// Working copy of the structured feature-control-frame editor.
     geometric_tolerance: Option<crate::ui::window::geometric_tolerance::State>,
     /// PICKDRAG (#226): false (default) = press-drag lassoes; true =
@@ -1857,6 +1859,7 @@ pub enum ModalKind {
     LayerStateManager,
     LayerTranslator,
     DrawingUnits,
+    BlockDefinition,
     GeometricTolerance,
     DraftingSettings,
     AutoConstrainSettings,
@@ -2830,6 +2833,30 @@ pub enum Message {
     DrawingUnitsField(crate::ui::window::drawing_units::Field),
     /// Drawing Units OK — write the working copy into the drawing.
     DrawingUnitsApply,
+    /// Block Definition dialog field updates
+    BlockDefName(String),
+    BlockDefNameSelect(String),
+    BlockDefBaseOnScreen(bool),
+    BlockDefPickPoint,
+    BlockDefBaseX(String),
+    BlockDefBaseY(String),
+    BlockDefBaseZ(String),
+    BlockDefObjectsOnScreen(bool),
+    BlockDefSelectObjects,
+    BlockDefQuickSelect,
+    BlockDefObjectMode(crate::ui::window::block_definition::BlockObjectMode),
+    BlockDefAnnotative(bool),
+    BlockDefMatchOrientation(bool),
+    BlockDefScaleUniformly(bool),
+    BlockDefAllowExploding(bool),
+    BlockDefUnit(i16),
+    BlockDefDescription(String),
+    BlockDefDescriptionAction(iced::widget::text_editor::Action),
+    BlockDefHyperlink,
+    BlockDefApply,
+    BlockDefConfirmRedefine(bool),
+    BlockDefDismissError,
+    BlockDefHelp,
     /// One structured feature-control-frame field changed.
     ToleranceDialogField(crate::ui::window::geometric_tolerance::Field),
     /// One structured feature-control-frame option changed.
@@ -3902,6 +3929,7 @@ impl OpenCADStudio {
             last_layer_translation: None,
             layer_translator: None,
             drawing_units: None,
+            block_definition: None,
             geometric_tolerance: None,
             pick_drag_rect: false,
             perf_hud: false,

@@ -1117,6 +1117,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                 if let Some(state) = self.qselect.take() {
                     self.qselect_settings = Some((&state).into());
                     self.reset_modal_geometry();
+                    if self.block_definition.is_some() {
+                        self.active_modal = Some(crate::app::ModalKind::BlockDefinition);
+                    }
                     return Task::none();
                 }
                 {
