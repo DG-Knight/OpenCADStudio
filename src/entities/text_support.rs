@@ -5,6 +5,20 @@ use crate::scene::convert::acad_to_render::{GlyphRun, TextStroke};
 use crate::scene::text::font_face::Face;
 use crate::scene::text::lff;
 
+/// A font reference a drawing holds — a style's font file, or an inline `\f`
+/// code — turned into an installed family.
+///
+/// An embedded stroke font wins over anything installed, so `romans.shx` keeps
+/// rendering as it did even where a font of that name happens to be installed;
+/// only a name no stroke font answers to is looked up among the system faces,
+/// first by family and then by file name (see `sysfont::family_for_reference`).
+fn resolve_font_reference(reference: &str) -> Option<String> {
+    if lff::is_builtin(reference) {
+        return None;
+    }
+    crate::scene::text::sysfont::family_for_reference(reference)
+}
+
 pub struct ResolvedTextStyle {
     pub font_name: String,
     pub width_factor: f32,
@@ -21,14 +35,20 @@ pub fn resolve_text_style(style_name: &str, document: &CadDocument) -> ResolvedT
     });
 
     let mut font_name = if let Some(style) = style {
-        if !style.true_type_font.trim().is_empty() {
-            style.true_type_font.trim().to_string()
-        } else if !style.font_file.trim().is_empty() {
-            let file = style.font_file.trim();
+        // A style names a font *file* — `GOST2304_TypeA_italic.ttf`,
+        // `romans.shx`, sometimes with a directory; `true_type_font` carries the
+        // same thing for the styles that set it.
+        let file = if !style.true_type_font.trim().is_empty() {
+            style.true_type_font.trim()
+        } else {
+            style.font_file.trim()
+        };
+        if !file.is_empty() {
             // A .shx font that resolves on disk (as stored, or next to the
             // drawing) renders its REAL stroke glyphs — pass the absolute
-            // path through so `Face::resolve` picks the SHX face. Only an
-            // unresolvable file falls back to the stem's LFF substitute.
+            // path through so `Face::resolve` picks the SHX face. Fonts fetched
+            // from the community repository live in the per-user fonts folder,
+            // so that is searched last, after the drawing folder.
             let shx_path = file
                 .to_ascii_lowercase()
                 .ends_with(".shx")
@@ -38,10 +58,7 @@ pub fn resolve_text_style(style_name: &str, document: &CadDocument) -> ResolvedT
                         .as_deref()
                         .map(std::path::Path::new)
                         .and_then(|p| p.parent());
-                    crate::io::resolve_image_file(file, base)
-                        // Fonts fetched from the community repository live in
-                        // the per-user fonts folder — search it last.
-                        .or_else(|| {
+                    crate::io::resolve_image_file(file, base).or_else(|| {
                         crate::io::font_repo::local_font_file(file)
                             .map(|path| path.to_string_lossy().into_owned())
                     })
@@ -49,6 +66,11 @@ pub fn resolve_text_style(style_name: &str, document: &CadDocument) -> ResolvedT
                 .flatten();
             if let Some(p) = shx_path {
                 p
+            } else if let Some(family) = resolve_font_reference(file) {
+                // The file is installed, so its family is the face to draw with.
+                // Substituting a stroke font instead drops every letter that
+                // font does not have — for a Cyrillic drawing, all of them.
+                family
             } else {
                 let basename = file.rsplit(['/', '\\']).next().unwrap_or(file);
                 let stem = basename.split('.').next().unwrap_or(basename).trim();
@@ -900,10 +922,9 @@ pub fn resolve_font<'a>(state: &'a RunState, base: &'a str) -> std::borrow::Cow<
     if lff::is_builtin(font) {
         return std::borrow::Cow::Borrowed(font);
     }
-    if let Some(canonical) = crate::scene::text::sysfont::canonical_family_name(font) {
-        std::borrow::Cow::Owned(canonical)
-    } else {
-        std::borrow::Cow::Borrowed(base)
+    match resolve_font_reference(font) {
+        Some(canonical) => std::borrow::Cow::Owned(canonical),
+        None => std::borrow::Cow::Borrowed(base),
     }
 }
 
