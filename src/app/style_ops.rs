@@ -271,7 +271,7 @@ impl OpenCADStudio {
         }
     }
 
-    fn style_exists(&self, kind: StyleKind, name: &str) -> bool {
+    pub(super) fn style_exists(&self, kind: StyleKind, name: &str) -> bool {
         self.style_names(kind)
             .iter()
             .any(|n| n.eq_ignore_ascii_case(name))
@@ -308,7 +308,7 @@ impl OpenCADStudio {
 
     /// Refresh anything that mirrors the style list / current style after a
     /// mutation (ribbon dropdowns, geometry that depends on the style).
-    fn after_style_change(&mut self, kind: StyleKind) {
+    pub(super) fn after_style_change(&mut self, kind: StyleKind) {
         if kind.in_ribbon() {
             self.sync_ribbon_styles();
         }
@@ -405,7 +405,7 @@ impl OpenCADStudio {
         false
     }
 
-    fn remove_style_storage(&mut self, kind: StyleKind, name: &str) -> bool {
+    pub(super) fn remove_style_storage(&mut self, kind: StyleKind, name: &str) -> bool {
         let doc = &mut self.tabs[self.active_tab].scene.document;
         match kind {
             StyleKind::Text => doc.text_styles.remove(name).is_some(),
@@ -541,7 +541,7 @@ impl OpenCADStudio {
 
     /// Rename `old`→`new` in the backing store, re-keying table entries and
     /// rewriting name-based references + current-style pointers.
-    fn rename_style_storage(&mut self, kind: StyleKind, old: &str, new: &str) {
+    pub(super) fn rename_style_storage(&mut self, kind: StyleKind, old: &str, new: &str) {
         let i = self.active_tab;
         match kind {
             StyleKind::Text => {

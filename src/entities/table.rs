@@ -3339,3 +3339,29 @@ impl Transformable for Table {
         });
     }
 }
+
+/// Keep the per-cell merge dimensions (what DXF stores) in step with
+/// `merged_ranges` (what DWG stores) after a scripted create or edit. Cells a
+/// script did not touch keep their merge state when the ranges are unchanged.
+pub(crate) fn normalize_scripted_table(old: Option<&Table>, new: &mut Table) {
+    if old.is_some_and(|old| old.merged_ranges == new.merged_ranges) {
+        return;
+    }
+    for row in &mut new.rows {
+        for cell in &mut row.cells {
+            cell.merge_width = 1;
+            cell.merge_height = 1;
+        }
+    }
+    let ranges = new.merged_ranges.clone();
+    for range in &ranges {
+        if let Some(cell) = new
+            .rows
+            .get_mut(range.top_row)
+            .and_then(|row| row.cells.get_mut(range.left_col))
+        {
+            cell.merge_width = range.col_count() as i32;
+            cell.merge_height = range.row_count() as i32;
+        }
+    }
+}

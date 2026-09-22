@@ -36,6 +36,8 @@ pub mod manifest;
 pub mod ribbon;
 pub mod type_registry;
 pub mod type_registry_types;
+pub mod entity_coverage;
+pub mod entity_coverage_types;
 pub mod version_info;
 
 /// Runtime host surface — only built with the `host` feature (pulls `acadrust`).
@@ -73,6 +75,8 @@ pub use type_registry::{
     get_embedded_type_registry_json, EnumVariantInfo, FieldInfo, MethodInfo, ParameterInfo,
     TypeId, TypeInfo, TypeKind, TypeRegistry,
 };
+pub use entity_coverage::{get_embedded_entity_coverage_json, EntityCoverageCatalog,
+    EntityKindCoverage, EntityScope, ModelAccess, PropertyCoverage};
 pub use version_info::get_embedded_version_info_json;
 
 #[cfg(test)]

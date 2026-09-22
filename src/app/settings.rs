@@ -485,6 +485,10 @@ pub struct UserSettings {
     /// Minutes between autosaves to a `.sv$` recovery file (SAVETIME command).
     /// 0 disables autosave.
     pub savetime_min: i32,
+    /// SCRIPTCOMMANDS: whether a script (the Python plugin) may run OCS commands
+    /// through the host. On by default; a user turns it off with the
+    /// `SCRIPTCOMMANDS 0` command, and a script cannot change it.
+    pub script_commands: bool,
     /// File type and version used when a new/unsaved drawing is first saved.
     /// Existing drawings keep their own type and version.
     pub default_save_format: String,
@@ -685,6 +689,7 @@ impl Default for UserSettings {
             constraint_bar_display: 3,
             constraint_bar_mode: 4095,
             savetime_min: 10,
+            script_commands: true,
             default_save_format: crate::io::DEFAULT_SAVE_FORMAT.to_string(),
             pick_add: true,
             pick_drag_rect: false,
@@ -796,6 +801,19 @@ mod tests {
         );
         assert!(!cfg.settings.pick_add, "the rest of the file must survive");
         assert_eq!(cfg.settings.savetime_min, 42);
+    }
+
+    #[test]
+    fn script_commands_default_on_and_survive_a_round_trip() {
+        let missing: crate::app::config::AppConfig =
+            serde_json::from_str(r#"{"settings": {"pick_add": false}}"#).unwrap();
+        assert!(missing.settings.script_commands, "an old config keeps scripts allowed");
+        let off: crate::app::config::AppConfig =
+            serde_json::from_str(r#"{"settings": {"script_commands": false}}"#).unwrap();
+        assert!(!off.settings.script_commands);
+        let text = serde_json::to_string(&off).unwrap();
+        let back: crate::app::config::AppConfig = serde_json::from_str(&text).unwrap();
+        assert!(!back.settings.script_commands);
     }
 
     #[test]

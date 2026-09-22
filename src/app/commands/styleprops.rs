@@ -2745,21 +2745,7 @@ impl OpenCADStudio {
                     self.command_line
                         .push_output(crate::tf!("CLAYER = \"{cur}\"").as_ref());
                 } else {
-                    if self.tabs[i].scene.document.layers.contains(name_arg) {
-                        let handle = self.tabs[i]
-                            .scene
-                            .document
-                            .layers
-                            .get(name_arg)
-                            .map(|l| l.handle)
-                            .unwrap_or(acadrust::types::Handle::NULL);
-                        self.tabs[i].scene.document.header.current_layer_name =
-                            name_arg.to_string();
-                        self.tabs[i].scene.document.header.current_layer_handle = handle;
-                        self.tabs[i].active_layer = name_arg.to_string();
-                        self.tabs[i].layers.current_layer = name_arg.to_string();
-                        self.ribbon.active_layer = name_arg.to_string();
-                        self.tabs[i].dirty = true;
+                    if self.set_current_layer_name(i, name_arg).is_ok() {
                         self.command_line
                             .push_output(crate::tf!("CLAYER set to \"{name_arg}\"").as_ref());
                     } else {
@@ -2943,6 +2929,29 @@ impl OpenCADStudio {
                     }
                     _ => self.command_line.push_error(crate::t!("Requires 0 or 1").as_ref()),
                 }
+            }
+            cmd if cmd == "SCRIPTCOMMANDS" || cmd.starts_with("SCRIPTCOMMANDS ") => {
+                // A user setting, deliberately outside the script's reach: it is refused by
+                // the script command runner, so only the command line can change it.
+                let arg = cmd.trim_start_matches("SCRIPTCOMMANDS").trim();
+                match arg {
+                    "" => {}
+                    "1" | "ON" | "YES" => self.script_commands = true,
+                    "0" | "OFF" | "NO" => self.script_commands = false,
+                    _ => {
+                        self.command_line.push_error(
+                            crate::t!("SCRIPTCOMMANDS takes 1 (scripts may run commands) or 0 (they may not)")
+                                .as_ref(),
+                        );
+                        return Some(Task::none());
+                    }
+                }
+                if !arg.is_empty() {
+                    self.persist_settings_if_changed();
+                }
+                let state = if self.script_commands { 1 } else { 0 };
+                self.command_line
+                    .push_output(crate::tf!("SCRIPTCOMMANDS = {state}").as_ref());
             }
             "SAVETIME" => {
                 use crate::command::ValuePromptCommand;

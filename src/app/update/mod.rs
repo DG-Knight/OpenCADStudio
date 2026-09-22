@@ -284,6 +284,24 @@ impl OpenCADStudio {
         crate::plugin::v4_support::publish_selection_changed_v4(tab_id, handles);
     }
 
+    /// Refresh the shared V4 document after built-in geometry edits. Plugin
+    /// writes publish through HostSession immediately; the fingerprint avoids
+    /// sending a duplicate notification at this message boundary.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn notify_plugins_document_changed(&mut self) {
+        if self.active_tab >= self.tabs.len() {
+            return;
+        }
+        let tab = &self.tabs[self.active_tab];
+        let key = (tab.id, tab.scene.geometry_epoch);
+        if self.last_plugin_document == Some(key) {
+            return;
+        }
+        self.last_plugin_document = Some(key);
+        crate::plugin::v4_support::publish_drawing_changed(tab.id, tab.scene.geometry_epoch);
+        crate::plugin::v4_support::publish_document_view_v4(tab.id, &tab.scene.document);
+    }
+
     pub fn update(&mut self, msg: Message) -> Task<Message> {
         if let Some(tab) = self.tabs.get(self.active_tab) {
             crate::entities::common::set_unit_context(
@@ -355,7 +373,29 @@ impl OpenCADStudio {
                 return task;
             }
         }
+        // A command's name is `&'static str`, so this runs on every message —
+        // a mouse move included — without allocating.
+        #[cfg(not(target_arch = "wasm32"))]
+        let active_command = |app: &Self| -> Option<(u64, Option<&'static str>)> {
+            app.tabs
+                .get(app.active_tab)
+                .map(|tab| (tab.id, tab.active_cmd.as_ref().map(|command| command.name())))
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let command_before = active_command(self);
         let task = self.update_inner(msg);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let command_after = active_command(self);
+            if command_before != command_after {
+                if let Some((tab_id, command)) = command_after {
+                    crate::plugin::v4_support::publish_command_state_changed(
+                        tab_id,
+                        command.map(str::to_owned),
+                    );
+                }
+            }
+        }
         self.refresh_gpu_status();
         self.show_next_startup_modal();
         self.sync_open_command_history();
@@ -389,6 +429,8 @@ impl OpenCADStudio {
         // and plugin request draining).
         #[cfg(not(target_arch = "wasm32"))]
         self.notify_plugins_selection_changed();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.notify_plugins_document_changed();
         // OTRACK acquires tracking points only while a command or grip drag is
         // running; drop them once neither is active so the temporary tracking
         // points / vectors disappear when the command ends (issue #64).

@@ -17,7 +17,7 @@ use interprocess::TryClone;
 
 use crate::host::{
     DocumentReader, ExecutionResult, HostApi, HostNotification, InteractiveCommand,
-    PluginNotification, PluginRequestSender, PluginRequestError, ReaderEntity,
+    PluginNotification, PluginRequestSender, PluginRequestError, ReaderEntity, HostSettingValue,
 };
 use crate::ipc::protocol::{
     HostRequest, HostResponse, PluginRequest, PluginResponse, RunnerHandshake,
@@ -728,6 +728,104 @@ impl HostApi for V4PluginHostApi {
                 eprintln!("[plugin] DocumentPath request failed: {e}");
                 None
             }
+        }
+    }
+
+    fn system_variable(&self, name: &str) -> Option<HostSettingValue> {
+        match self.request(PluginRequest::GetSystemVariable { name: name.to_owned() }) {
+            Ok(PluginResponse::SystemVariable(value)) => value,
+            _ => None,
+        }
+    }
+
+    fn set_system_variable(
+        &mut self,
+        name: &str,
+        value: HostSettingValue,
+    ) -> Result<HostSettingValue, String> {
+        match self.request(PluginRequest::SetSystemVariable {
+            name: name.to_owned(),
+            value,
+        }) {
+            Ok(PluginResponse::SystemVariableResult(result)) => {
+                if result.is_ok() {
+                    self.document_cache = OnceCell::new();
+                }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected system variable response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn update_entities_transaction(
+        &mut self,
+        label: &str,
+        entities: Vec<EntityType>,
+    ) -> Result<(), String> {
+        match self.request(PluginRequest::UpdateEntitiesTransaction {
+            label: label.to_owned(), entities,
+        }) {
+            Ok(PluginResponse::EntityTransactionResult(result)) => {
+                if result.is_ok() { self.document_cache = OnceCell::new(); }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected entity transaction response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn selection(&self) -> Vec<Handle> {
+        match self.request(PluginRequest::GetSelection) {
+            Ok(PluginResponse::Selection(handles)) => handles,
+            _ => Vec::new(),
+        }
+    }
+
+    fn solid_operation(&mut self, operation: crate::host::SolidOperation) -> Result<Handle, String> {
+        match self.request(PluginRequest::SolidOperation { operation }) {
+            Ok(PluginResponse::SolidResult(result)) => {
+                if result.is_ok() { self.document_cache = OnceCell::new(); }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected solid operation response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn run_command(&mut self, request: crate::host::CommandRequest) -> Result<crate::host::CommandOutcome, String> {
+        match self.request(PluginRequest::RunCommand { request }) {
+            Ok(PluginResponse::CommandResult(result)) => {
+                self.document_cache = OnceCell::new();
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected command response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn table_operation(&mut self, operation: crate::host::TableOperation) -> Result<Handle, String> {
+        match self.request(PluginRequest::TableOperation { operation }) {
+            Ok(PluginResponse::TableResult(result)) => {
+                if result.is_ok() { self.document_cache = OnceCell::new(); }
+                result
+            }
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected table operation response: {other:?}")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn set_selection(&mut self, handles: &[Handle]) -> Result<(), String> {
+        match self.request(PluginRequest::SetSelection { handles: handles.to_vec() }) {
+            Ok(PluginResponse::SelectionResult(result)) => result,
+            Ok(PluginResponse::Error(error)) => Err(error),
+            Ok(other) => Err(format!("unexpected selection response: {other:?}")),
+            Err(error) => Err(error.to_string()),
         }
     }
 

@@ -10,6 +10,7 @@ license = "GPL-3.0-only"
 # registry types (`type_registry_types.rs`). The host feature no longer needs
 # to enable it explicitly.
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 
 # Pulled in only by the `host` feature, which adds the `acadrust`-typed
 # `HostApi` runtime surface. The default crate stays dependency-free so engine
@@ -30,7 +31,7 @@ getrandom = { version = "0.2", optional = true }
 # Enables the runtime host surface (`HostApi` trait) and the out-of-process
 # plugin runtime. The OpenCADStudio binary turns this on; pure-data consumers
 # leave it off.
-host = ["dep:acadrust", "dep:interprocess", "dep:bincode", "dep:serde_bytes", "dep:thiserror", "dep:libloading", "dep:memmap2", "dep:rkyv", "dep:getrandom"]
+host = ["dep:acadrust", "dep:serde_json", "dep:interprocess", "dep:bincode", "dep:serde_bytes", "dep:thiserror", "dep:libloading", "dep:memmap2", "dep:rkyv", "dep:getrandom"]
 
 [build-dependencies]
 serde-reflection = "0.6"

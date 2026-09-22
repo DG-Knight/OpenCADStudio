@@ -35,7 +35,7 @@ mod record_api;
 pub(crate) mod settings;
 mod shortcuts;
 mod startup;
-mod style_ops;
+pub(crate) mod style_ops;
 mod text_inline;
 mod tolerance_dialog;
 mod update;
@@ -634,6 +634,8 @@ pub(super) struct OpenCADStudio {
     /// Minutes between autosaves to a `.sv$` recovery file (SAVETIME command);
     /// 0 disables autosave.
     pub savetime_min: i32,
+    /// SCRIPTCOMMANDS: scripts may run OCS commands (see `UserSettings`).
+    pub script_commands: bool,
     /// Persisted default viewport background, restored from settings and applied
     /// to every drawing tab (new and opened) so a chosen background survives
     /// restarts (#188). `None` = the built-in dark-grey / off-white defaults.
@@ -904,6 +906,11 @@ pub(super) struct OpenCADStudio {
     /// `SelectionChangedV4` fires once per real change rather than per message.
     #[cfg(not(target_arch = "wasm32"))]
     last_plugin_selection: Option<(u64, u64)>,
+    /// `(tab id, geometry epoch)` last published to the V4 document view.
+    /// Built-in edits bypass HostSession, so this is checked at message
+    /// boundaries as well as after plugin-initiated writes.
+    #[cfg(not(target_arch = "wasm32"))]
+    last_plugin_document: Option<(u64, u64)>,
     /// External add-on packages found in the plugins folder, refreshed when the
     /// Plugin Manager opens.
     external_plugins: Vec<crate::plugin::external::ExternalPlugin>,
@@ -4000,6 +4007,7 @@ impl OpenCADStudio {
             suppress_plugin_dispatch: false,
             constraint_bar_mode: 4095,
             savetime_min: 10,
+            script_commands: true,
             default_bg_color: None,
             default_paper_bg_color: None,
             cliprompt_lines: 3,
@@ -4101,6 +4109,8 @@ impl OpenCADStudio {
             disabled_plugins: rustc_hash::FxHashSet::default(),
             #[cfg(not(target_arch = "wasm32"))]
             last_plugin_selection: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_plugin_document: None,
             external_plugins: Vec::new(),
             loaded_plugin_ids: rustc_hash::FxHashSet::default(),
             plugin_load_errors: rustc_hash::FxHashMap::default(),

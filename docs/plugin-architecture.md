@@ -9,12 +9,12 @@ with Open CAD Studio. The model follows [QGIS](https://plugins.qgis.org/)-style
 extensibility: a small metadata file, a single entry point, an optional separate
 engine crate, and user-installable packages from a curated index.
 
-> **Open CAD Studio ships no built-in plugins.** Every add-on is an **external
-> dynamic library** (`cdylib`) the host loads at runtime from the user plugins
-> folder. The host source only contains the generic plugin *runtime*
+> Plugins are **out-of-process dynamic libraries** (`cdylib`). The host loads
+> first-party packages from its application resources and third-party packages
+> from the user plugins folder. Both use the generic runtime
 > (`src/plugin/`, `src/app/plugin_host.rs`) and the stable contract crate
-> (`crates/ocs_plugin_api`). Add-ons live in their own repositories and
-> **consume** that contract.
+> (`crates/ocs_plugin_api`). A user package with the same id explicitly
+> overrides a bundled package.
 
 ---
 
@@ -24,7 +24,7 @@ engine crate, and user-installable packages from a curated index.
 |------|-----------|
 | **One package, one entry point** | Manifest, ribbon tab and commands ship together in the plugin crate; no edits to the host. |
 | **Stable contract** | Authors target the semver-versioned `ocs_plugin_api` crate, not `OpenCADStudio` internals. |
-| **Out-of-tree by default** | A plugin is its own repo + crate; the host never recompiles to gain one. |
+| **Out-of-tree by default** | Third-party plugins remain independent; selected first-party plugins may build and ship with OCS. |
 | **DWG round-trip** | Domain data lives on entities as XDATA, not in an opaque side database. |
 | **Engine reuse** | A headless `std`-only engine crate can run in WASM/CLI without the CAD host. |
 

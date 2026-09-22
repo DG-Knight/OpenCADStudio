@@ -283,6 +283,8 @@ impl OpenCADStudio {
         // selection check has to run on this path too.
         #[cfg(not(target_arch = "wasm32"))]
         self.notify_plugins_selection_changed();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.notify_plugins_document_changed();
         res
     }
 
@@ -767,6 +769,46 @@ impl OpenCADStudio {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clayer_command_sets_layer_used_by_new_geometry() {
+        let mut app = super::OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LAYER NEW Annotations"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"CLAYER Annotations"}"#);
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,0"}"#);
+        let lines = app.automation_op(r#"{"op":"query","type":"Line"}"#);
+        assert_eq!(lines["entities"][0]["layer"], "Annotations");
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn built_in_edits_advance_plugin_document_fingerprint_once() {
+        let mut app = super::OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let before = app.last_plugin_document.expect("new drawing published");
+        app.automation_op(r#"{"op":"run","cmd":"LINE 0,0 10,0"}"#);
+        let after = app.last_plugin_document.expect("line edit published");
+        assert_eq!(after.0, app.tabs[app.active_tab].id);
+        assert_ne!(after, before);
+        assert_eq!(after.1, app.tabs[app.active_tab].scene.geometry_epoch);
+        app.automation_op(r#"{"op":"query","type":"Line"}"#);
+        assert_eq!(app.last_plugin_document, Some(after));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn plugin_edit_publication_is_not_repeated_at_message_boundary() {
+        use acadrust::entities::Point;
+        use acadrust::EntityType;
+
+        let mut app = super::OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let tab = app.active_tab;
+        let mut host = super::super::plugin_host::HostSession::new(&mut app, tab);
+        host.add_entity(EntityType::Point(Point::new()));
+        let published = app.last_plugin_document.expect("plugin write published");
+        app.notify_plugins_document_changed();
+        assert_eq!(app.last_plugin_document, Some(published));
+    }
     use crate::app::OpenCADStudio;
 
     #[test]

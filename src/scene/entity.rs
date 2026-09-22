@@ -543,6 +543,9 @@ impl Scene {
         let Some(existing) = self.document.get_entity(handle) else {
             return false;
         };
+        // IPC snapshots omit storage-only payloads (notably Unknown/Extended
+        // entities). Preserve them when replacing a clone from a plugin.
+        entity.preserve_storage_data_from(existing);
         // The caller edited a snapshot copy; keep the live entity in its block.
         entity.common_mut().owner_handle = existing.common().owner_handle;
 

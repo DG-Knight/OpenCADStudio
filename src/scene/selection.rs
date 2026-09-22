@@ -158,6 +158,16 @@ impl Scene {
         self.bump_selection_set();
     }
 
+    /// Script-facing replacement: preserve exactly the validated input order.
+    /// UI picks still use `select_entity` and its leader/annotation expansion.
+    pub(crate) fn replace_selection_exact(&mut self, handles: &[Handle]) {
+        if self.selected_handles_in_order() == handles { return; }
+        self.selected_constraint = None;
+        self.selected = handles.iter().copied().collect();
+        self.selected_order = handles.to_vec();
+        self.bump_selection_set();
+    }
+
     pub fn select_all_visible(&mut self) -> usize {
         let block = self.interaction_block_handle();
         let frozen: Option<HashSet<Handle>> = self
