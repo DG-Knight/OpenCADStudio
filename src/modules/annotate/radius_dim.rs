@@ -88,6 +88,31 @@ impl RadiusDimensionCommand {
     }
 }
 
+/// A radius dimension for a dimensional constraint: the leader leaves the
+/// centre towards `location`, and the style places the text.
+pub(crate) fn radius_constraint_entity(
+    center: DVec3,
+    radius: f64,
+    location: DVec3,
+    text: Option<String>,
+) -> Option<EntityType> {
+    let direction = radial_direction(center, location)?;
+    let chord = center + direction * radius;
+    let mut dim = DimensionRadius::new(v3(center), v3(chord));
+    dim.base.definition_point = v3(chord);
+    dim.leader_length = chord.distance(location).max(radius * 0.5);
+    dim.base.actual_measurement = dim.measurement();
+    crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);
+    Some(EntityType::Dimension(Dimension::Radius(dim)))
+}
+
+/// The unit direction a radial constraint's dimension points in, from the
+/// centre to where its dimension line was picked.
+pub(crate) fn radial_direction(center: DVec3, location: DVec3) -> Option<DVec3> {
+    let delta = location - center;
+    (delta.length() > 1.0e-9).then(|| delta.normalize())
+}
+
 impl CadCommand for RadiusDimensionCommand {
     fn set_working_plane(&mut self, _plane: WorkingPlane) {
     }

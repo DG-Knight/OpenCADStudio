@@ -2368,6 +2368,12 @@ impl OpenCADStudio {
                                     acadrust::EntityType::Dimension(
                                         Dimension::Angular2Ln(_) | Dimension::Angular3Pt(_),
                                     ) => t!("Angular Dimensional Constraint"),
+                                    acadrust::EntityType::Dimension(Dimension::Radius(_)) => {
+                                        t!("Radius Dimensional Constraint")
+                                    }
+                                    acadrust::EntityType::Dimension(Dimension::Diameter(_)) => {
+                                        t!("Diameter Dimensional Constraint")
+                                    }
                                     _ => t!("Linear Dimensional Constraint"),
                                 }
                                 .into_owned()

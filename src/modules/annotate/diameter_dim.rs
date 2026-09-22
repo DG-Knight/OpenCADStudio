@@ -87,6 +87,25 @@ impl DiameterDimensionCommand {
     }
 }
 
+/// A diameter dimension for a dimensional constraint: the dimension line
+/// runs through the centre towards `location`, and the style places the
+/// text.
+pub(crate) fn diameter_constraint_entity(
+    center: DVec3,
+    radius: f64,
+    location: DVec3,
+    text: Option<String>,
+) -> Option<EntityType> {
+    let direction = super::radius_dim::radial_direction(center, location)?;
+    let chord = center + direction * radius;
+    let far_chord = center - direction * radius;
+    let mut dim = DimensionDiameter::new(v3(chord), v3(far_chord));
+    dim.leader_length = chord.distance(location).max(radius * 0.5);
+    dim.base.actual_measurement = dim.measurement();
+    crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);
+    Some(EntityType::Dimension(Dimension::Diameter(dim)))
+}
+
 impl CadCommand for DiameterDimensionCommand {
     fn set_working_plane(&mut self, _plane: WorkingPlane) {
     }

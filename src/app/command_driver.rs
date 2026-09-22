@@ -4246,6 +4246,177 @@ impl OpenCADStudio {
                 self.command_line.push_error(&message);
                 return self.apply_cmd_result(CmdResult::Cancel);
             }
+            CmdResult::AddRadialConstraint {
+                circle,
+                center,
+                radius,
+                location,
+                diameter,
+                name,
+                expression,
+                renamed,
+            } => {
+                use crate::modules::annotate::{diameter_dim, radius_dim};
+                use crate::scene::named_parameters::{is_valid_name, DrivingValue};
+                use crate::scene::parametric_constraints::{
+                    dynamic_dimension_text, ConstraintKind, ParametricRef,
+                };
+
+                let scope = self.tabs[i].current_parametric_scope();
+                let kind = if diameter {
+                    ConstraintKind::Diameter
+                } else {
+                    ConstraintKind::Radius
+                };
+                let refs = vec![circle];
+                // A circle already carrying a radius or diameter constraint
+                // is refused after the value, as the reference does.
+                let duplicate = self.tabs[i]
+                    .scene
+                    .parametric_constraint_set(scope)
+                    .is_some_and(|set| {
+                        set.constraints.iter().any(|c| {
+                            c.enabled
+                                && matches!(
+                                    c.kind,
+                                    ConstraintKind::Radius | ConstraintKind::Diameter
+                                )
+                                && c.refs.iter().any(|r| r.entity == circle.entity)
+                        })
+                    });
+                if duplicate {
+                    self.command_line
+                        .push_output("The constraint already exists on the selected objects.");
+                    self.tabs[i].active_cmd = None;
+                    self.tabs[i].snap_result = None;
+                    return Task::none();
+                }
+                if let Err(message) = self.tabs[i].scene.validate_parametric_constraint(
+                    kind,
+                    &refs,
+                    Some(&DrivingValue::Literal(1.0)),
+                ) {
+                    self.reprompt_active_command(i, message);
+                    return Task::none();
+                }
+                let name = name.trim().to_string();
+                if !is_valid_name(&name) {
+                    self.command_line.push_error(
+                        "Only alphanumeric names, starting with alpha characters, are allowed.",
+                    );
+                    self.reprompt_active_command(i, &format!("Invalid parameter name: {name}."));
+                    return Task::none();
+                }
+                if renamed && self.tabs[i].scene.named_parameters().contains(&name) {
+                    self.reprompt_active_command(i, "Parameter with this name already exists.");
+                    return Task::none();
+                }
+                let mut table = self.tabs[i].scene.named_parameters().clone();
+                if let Err(error) = table.set(&name, &expression) {
+                    self.reprompt_active_command(i, &error.to_string());
+                    return Task::none();
+                }
+                // A circle has no zero or negative size: the value is
+                // refused and the prompt comes back.
+                let value = match table.resolve(&name) {
+                    Ok(value) if value.is_finite() && value > 0.0 => value,
+                    _ => {
+                        self.command_line.push_error("Invalid expression.");
+                        self.reprompt_active_command(
+                            i,
+                            "The parameter is used in an expression which results in an invalid value for a dimensional constraint.",
+                        );
+                        return Task::none();
+                    }
+                };
+                let annotational = self.constraint_form_annotational;
+                let text = dynamic_dimension_text(
+                    &name,
+                    value,
+                    self.tabs[i].scene.constraint_name_format,
+                    false,
+                    Some(&expression),
+                    annotational,
+                    None,
+                );
+                let entity = if diameter {
+                    diameter_dim::diameter_constraint_entity(center, radius, location, Some(text))
+                } else {
+                    radius_dim::radius_constraint_entity(center, radius, location, Some(text))
+                };
+                let Some(mut entity) = entity else {
+                    self.reprompt_active_command(i, "No valid constraint point found.");
+                    return Task::none();
+                };
+                crate::scene::creation_style::apply_current_creation_styles(
+                    &self.tabs[i].scene.document,
+                    &mut entity,
+                );
+                if annotational {
+                    entity
+                        .as_entity_mut()
+                        .set_layer(self.tabs[i].active_layer.clone());
+                } else {
+                    self.tabs[i].scene.ensure_dynamic_dimension_layer();
+                    entity.as_entity_mut().set_layer(
+                        crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER.to_string(),
+                    );
+                    entity.common_mut().color = acadrust::types::Color::Rgb {
+                        r: 103,
+                        g: 109,
+                        b: 118,
+                    };
+                }
+                let constraints_before = self.tabs[i]
+                    .scene
+                    .parametric_constraint_set(scope)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        crate::scene::parametric_constraints::ParametricConstraintSet::new(scope)
+                    });
+                // The centre stays where it is; the value moves the rim.
+                let anchors = vec![ParametricRef::center(circle.entity)];
+                let pending = self.begin_undo(
+                    i,
+                    if diameter {
+                        "Diameter constraint"
+                    } else {
+                        "Radius constraint"
+                    },
+                    2,
+                    false,
+                );
+                self.tabs[i]
+                    .scene
+                    .record_undo_parametric_constraints_before(scope, constraints_before);
+                self.tabs[i].scene.record_undo_named_parameters_before();
+                self.tabs[i].scene.named_parameters = table;
+                let dimension = self.tabs[i].scene.add_entity(entity);
+                let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
+                let id = set.add(kind, refs, Some(DrivingValue::Named(name)));
+                set.dimensions.insert(id, dimension);
+                self.tabs[i].scene.note_parametric_constraint_applied(
+                    scope,
+                    id,
+                    self.constraint_bar_display,
+                );
+                self.tabs[i]
+                    .scene
+                    .attach_dimension_association(dimension, vec![Some(circle.entity)]);
+                let changes = vec![(circle.entity, crate::scene::ChangeKind::Modified)];
+                self.tabs[i]
+                    .scene
+                    .bump_entities_with_parametric_policy(&changes, &anchors, false);
+                self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
+                self.tabs[i].scene.refresh_dynamic_dimension_scales(true);
+                self.tabs[i].dirty = true;
+                self.tabs[i].active_cmd = None;
+                self.tabs[i].snap_result = None;
+                self.refresh_properties();
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
+            }
             CmdResult::AddAngularConstraint {
                 refs,
                 points,
