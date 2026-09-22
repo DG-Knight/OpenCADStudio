@@ -1989,7 +1989,13 @@ impl OpenCADStudio {
                         )
                     })
                     .collect::<Vec<_>>();
-                let target = (selected.len() == 1).then_some(selected[0]);
+                // `then_some` evaluates its argument eagerly: indexing an empty
+                // selection here crashed the app when SHELL was started with
+                // nothing selected.
+                let target = match selected.as_slice() {
+                    [handle] => Some(*handle),
+                    _ => None,
+                };
                 let new_cmd = if cmd == "SHELL" {
                     ShellCommand::direct(target)
                 } else {
