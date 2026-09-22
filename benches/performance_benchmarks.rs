@@ -62,7 +62,9 @@ use OpenCADStudio::scene::{ChangeKind, Scene};
 use OpenCADStudio::snap::Snapper;
 use OpenCADStudio::ui::icons::{self, CHECK};
 use OpenCADStudio::ui::overlay::{
-    grid_segments, should_reuse, GridCanvasState, GridKey, GridParams, GridStyle,
+    grid_segments, selection_overlay, should_reuse, CrosshairOptions, GridCanvasState,
+    GridKey, GridParams, GridStyle, GripMarker, OstTrackPoint, SelectionVisualOptions,
+    UcsIconParams,
 };
 use OpenCADStudio::ui::properties::LinetypeItem;
 use OpenCADStudio::ui::ribbon::{LayerInfo, Ribbon};
@@ -1362,9 +1364,9 @@ fn bench_ui_icon_caching(runner: &mut BenchmarkRunner) {
     }
 }
 
-// ── 12b. Plot Style Layer-Usage Table Rebuild ───────────────────────────────
-// Covers Mission #19 `build_layer_usage`: layer names bucketed by ACI into a
-// 256-bucket table, rebuilt per Plot Style modal view.
+// ── Plot Style Layer-Usage Table Rebuild ─────────────────────────────────────
+// Covers `build_layer_usage`: layer names bucketed by ACI into a 256-bucket
+// table, rebuilt per Plot Style modal view.
 
 fn bench_ui_plotstyle_layer_usage(runner: &mut BenchmarkRunner) {
     if !runner.should_run("ui_plotstyle_layer_usage") {
@@ -1710,6 +1712,116 @@ fn bench_ui_constraint_glyphs(runner: &mut BenchmarkRunner) {
         Some(((n_glyphs as f64) / (median_us / 1_000_000.0), "glyphs/s")),
         Some(0.5), // Target threshold < 0.5 µs (measured ~0.06 µs quick / ~0.15 µs full, ~3x headroom)
     );
+}
+
+fn bench_ui_selection_overlay(runner: &mut BenchmarkRunner) {
+    if !runner.should_run("ui_selection_overlay") {
+        return;
+    }
+
+    // Fixture: the per-frame selection-overlay shape — an active snap,
+    // crosshair, one UCS tripod, empty constraint glyphs. Grip count is the
+    // scaling axis: typical selections carry dozens, the grip budget caps at
+    // 4096, so full mode measures the cap. Element (widget-tree)
+    // construction only; canvas draw/tessellation runs in the renderer.
+    let n_grips = if runner.quick_mode { 128 } else { 4096 };
+    // Warm-up for allocator settling.
+    for _ in 0..10 {
+        let _ = black_box(build_selection_overlay_element(n_grips));
+    }
+
+    let n = if runner.quick_mode { 20 } else { 100 };
+    let runs = 5;
+    let mut samples = Vec::with_capacity(runs);
+
+    for _ in 0..runs {
+        let t0 = Instant::now();
+        for _ in 0..n {
+            let elem = build_selection_overlay_element(black_box(n_grips));
+            black_box(elem);
+        }
+        let per_us = (t0.elapsed().as_micros() as f64) / (n as f64);
+        samples.push(per_us);
+    }
+
+    let median_us = samples[samples.len() / 2];
+    runner.record(
+        "ui_selection_overlay",
+        &format!(
+            "Selection overlay Element construction with {} grips (widget tree, no draw)",
+            n_grips
+        ),
+        "µs",
+        samples,
+        Some((1_000_000.0 / median_us, "overlays/s")),
+        Some(50.0), // Target < 50 µs (2.4 µs at the 4096-grip cap, ~20x headroom)
+    );
+}
+
+fn build_selection_overlay_element(
+    n_grips: usize,
+) -> iced::Element<'static, OpenCADStudio::app::Message> {
+    use OpenCADStudio::app::{CursorType, IsoPlane};
+    use OpenCADStudio::scene::model::object::GripShape;
+    use OpenCADStudio::scene::parametric_constraints::GlyphEntry;
+    use OpenCADStudio::snap::SnapType;
+
+    let selection = Arc::new(std::cell::RefCell::new(SelectionState::default()));
+    let grips: Vec<GripMarker> = (0..n_grips)
+        .map(|i| GripMarker {
+            pos: Point::new(100.0 + i as f32 * 5.0, 200.0),
+            shape: GripShape::Square,
+            is_hot: false,
+            is_hovered: false,
+            dir: None,
+        })
+        .collect();
+    let ucs_icons = vec![UcsIconParams {
+        view_proj: Mat4::IDENTITY,
+        bounds: Rectangle { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0 },
+        axes: (Vec3::X, Vec3::Y, Vec3::Z),
+        origin_screen: None,
+        hover: false,
+        selected: false,
+    }];
+    let empty_glyphs: Arc<[GlyphEntry]> = Arc::from([]);
+    let empty_selected: Arc<[bool]> = Arc::from([]);
+    selection_overlay(
+        selection,
+        Some((Point::new(400.0, 300.0), SnapType::Endpoint)),
+        None,
+        None,
+        grips,
+        None,
+        None,
+        ucs_icons,
+        vec![OstTrackPoint { screen: Point::new(500.0, 500.0) }],
+        vec![(Point::new(0.0, 0.0), Point::new(100.0, 100.0))],
+        None,
+        true,
+        vec![],
+        None,
+        None,
+        false,
+        false,
+        false,
+        [0.1, 0.1, 0.1, 1.0],
+        CrosshairOptions {
+            size_percent: 5,
+            pick_box: 3,
+            cursor_type: CursorType::Crosshair,
+            color: None,
+            isometric: false,
+            iso_plane: IsoPlane::Top,
+            snap_angle_deg: 0.0,
+            point_mode: false,
+        },
+        SelectionVisualOptions::default(),
+        empty_glyphs,
+        empty_selected,
+        None,
+        None,
+    )
 }
 
 // ── 13. Wide & Tapered Arc + Donut Tessellation ─────────────────────────────
@@ -2216,6 +2328,7 @@ fn main() {
     bench_ui_statusbar_derived_data(&mut runner);
     bench_ui_grip_budget(&mut runner);
     bench_ui_constraint_glyphs(&mut runner);
+    bench_ui_selection_overlay(&mut runner);
     bench_wide_and_tapered_arc_tessellation(&mut runner);
     bench_zoom_extents_calculation(&mut runner);
     bench_batch_entity_mutation(&mut runner);

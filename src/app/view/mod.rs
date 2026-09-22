@@ -2121,6 +2121,10 @@ bg={bg_ms:.1}ms n={view_count}"
                     self.show_block_palette,
                 ));
             }
+            // Split the `chrome` bucket so live `view-detail` traces show
+            // ribbon vs status-bar construction separately (both gated on
+            // PERF; zero cost otherwise).
+            mark("ribbon");
             if self.show_file_tabs {
                 col = col.push(doc_tab_bar(
                     &self.tabs,
@@ -2262,6 +2266,7 @@ bg={bg_ms:.1}ms n={view_count}"
         })
         .width(Fill)
         .height(Fill);
+        mark("statusbar");
 
         // History labels are built only when their dropdown is actually open;
         // otherwise an empty slice short-circuits the overlay gate

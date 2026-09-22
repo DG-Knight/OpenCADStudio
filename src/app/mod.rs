@@ -50,6 +50,10 @@ pub use style_ops::StyleKind;
 /// private / `pub(crate)`; only these two names are reachable externally.
 pub use properties::apply_grip_budget;
 pub use settings::MAX_SELECTED_GRIPS;
+/// Re-exported for the `cargo bench` harness (`ui_selection_overlay`
+/// constructs `CrosshairOptions`, which names these types). Modules stay
+/// as they are; only these two names are reachable externally.
+pub use settings::{CursorType, IsoPlane};
 
 use document::DocumentTab;
 
