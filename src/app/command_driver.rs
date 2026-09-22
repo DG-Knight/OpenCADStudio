@@ -4442,6 +4442,172 @@ impl OpenCADStudio {
                     self.commit_undo_delta(i, pd);
                 }
             }
+            CmdResult::AddRadialConstraint {
+                circle,
+                location,
+                name,
+                expression,
+                renamed,
+            } => {
+                use crate::scene::named_parameters::{is_valid_name, DrivingValue};
+                use crate::scene::parametric_constraints::{dynamic_dimension_text, ConstraintKind};
+
+                let scope = self.tabs[i].current_parametric_scope();
+                let kind = ConstraintKind::Radius;
+                let refs = vec![circle];
+                // A second radius on the same circle is refused after the
+                // value, and the command ends.
+                let duplicate = self.tabs[i]
+                    .scene
+                    .parametric_constraint_set(scope)
+                    .is_some_and(|set| {
+                        set.constraints
+                            .iter()
+                            .any(|c| c.enabled && c.kind == kind && c.refs == refs)
+                    });
+                if duplicate {
+                    self.command_line
+                        .push_output("The constraint already exists on the selected objects.");
+                    self.tabs[i].active_cmd = None;
+                    self.tabs[i].snap_result = None;
+                    return Task::none();
+                }
+                if let Err(message) = self.tabs[i].scene.validate_parametric_constraint(
+                    kind,
+                    &refs,
+                    Some(&DrivingValue::Literal(1.0)),
+                ) {
+                    self.reprompt_active_command(i, message);
+                    return Task::none();
+                }
+                let name = name.trim().to_string();
+                if !is_valid_name(&name) {
+                    self.command_line.push_error(
+                        "Only alphanumeric names, starting with alpha characters, are allowed.",
+                    );
+                    self.reprompt_active_command(i, &format!("Invalid parameter name: {name}."));
+                    return Task::none();
+                }
+                if renamed && self.tabs[i].scene.named_parameters().contains(&name) {
+                    self.reprompt_active_command(i, "Parameter with this name already exists.");
+                    return Task::none();
+                }
+                let mut table = self.tabs[i].scene.named_parameters().clone();
+                if let Err(error) = table.set(&name, &expression) {
+                    self.reprompt_active_command(i, &error.to_string());
+                    return Task::none();
+                }
+                // A negative radius is its magnitude (`rad1=-20` is a radius
+                // of 20); a zero radius has no circle.
+                let value = match table.resolve(&name) {
+                    Ok(value) if value.is_finite() && value != 0.0 => value,
+                    _ => {
+                        self.command_line.push_error("Invalid expression.");
+                        self.reprompt_active_command(
+                            i,
+                            "The parameter is used in an expression which results in an invalid value for a dimensional constraint.",
+                        );
+                        return Task::none();
+                    }
+                };
+                let annotational = self.constraint_form_annotational;
+                let text = dynamic_dimension_text(
+                    &name,
+                    value,
+                    self.tabs[i].scene.constraint_name_format,
+                    false,
+                    Some(&expression),
+                    annotational,
+                    None,
+                );
+                let source = self.tabs[i]
+                    .scene
+                    .document
+                    .get_entity(circle.entity)
+                    .and_then(|entity| {
+                        crate::scene::dimension_assoc::radial_source_at(
+                            entity,
+                            acadrust::types::Vector3::new(location.x, location.y, location.z),
+                        )
+                    });
+                let Some(source) = source else {
+                    self.reprompt_active_command(
+                        i,
+                        crate::modules::parametric::DimConstraintCommand::NO_OBJECT,
+                    );
+                    return Task::none();
+                };
+                let mut entity = crate::modules::annotate::radius_dim::radial_dimension_entity(
+                    source,
+                    location,
+                    Some(text),
+                    None,
+                );
+                crate::scene::creation_style::apply_current_creation_styles(
+                    &self.tabs[i].scene.document,
+                    &mut entity,
+                );
+                if annotational {
+                    entity
+                        .as_entity_mut()
+                        .set_layer(self.tabs[i].active_layer.clone());
+                } else {
+                    self.tabs[i].scene.ensure_dynamic_dimension_layer();
+                    entity.as_entity_mut().set_layer(
+                        crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER.to_string(),
+                    );
+                    entity.common_mut().color = acadrust::types::Color::Rgb {
+                        r: 103,
+                        g: 109,
+                        b: 118,
+                    };
+                }
+                let constraints_before = self.tabs[i]
+                    .scene
+                    .parametric_constraint_set(scope)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        crate::scene::parametric_constraints::ParametricConstraintSet::new(scope)
+                    });
+                // The center stays; a value other than the measured radius
+                // resizes the circle about it.
+                let anchors = crate::scene::parametric_constraints::dimensional_anchor_refs(
+                    &self.tabs[i].scene.document,
+                    &refs,
+                );
+                let pending = self.begin_undo(i, "Radius constraint", 2, false);
+                self.tabs[i]
+                    .scene
+                    .record_undo_parametric_constraints_before(scope, constraints_before);
+                self.tabs[i].scene.record_undo_named_parameters_before();
+                self.tabs[i].scene.named_parameters = table;
+                let dimension = self.tabs[i].scene.add_entity(entity);
+                let set = self.tabs[i].scene.parametric_constraint_set_mut(scope);
+                let id = set.add(kind, refs, Some(DrivingValue::Named(name)));
+                set.dimensions.insert(id, dimension);
+                self.tabs[i].scene.note_parametric_constraint_applied(
+                    scope,
+                    id,
+                    self.constraint_bar_display,
+                );
+                self.tabs[i]
+                    .scene
+                    .attach_dimension_association(dimension, vec![Some(circle.entity)]);
+                self.tabs[i].scene.bump_entities_with_parametric_policy(
+                    &[(circle.entity, crate::scene::ChangeKind::Modified)],
+                    &anchors,
+                    false,
+                );
+                self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
+                self.tabs[i].scene.refresh_dynamic_dimension_scales(true);
+                self.tabs[i].dirty = true;
+                self.tabs[i].active_cmd = None;
+                self.tabs[i].snap_result = None;
+                self.refresh_properties();
+                if let Some(pd) = pending {
+                    self.commit_undo_delta(i, pd);
+                }
+            }
             CmdResult::MakeParallel {
                 first_line,
                 first_ends,
@@ -5886,6 +6052,16 @@ impl OpenCADStudio {
             CmdResult::Dispatch(cmd) => {
                 // End this interactive front-end, then run the assembled command
                 // through the normal dispatcher. Selection is left untouched.
+                // DIMCONSTRAINT's Radius option becomes its next default; the
+                // DCRADIUS command run on its own leaves the default alone.
+                if cmd == "DCRADIUS"
+                    && self.tabs[i]
+                        .active_cmd
+                        .as_ref()
+                        .is_some_and(|command| command.name() == "DIMCONSTRAINT")
+                {
+                    self.dim_constraint_last = "Radius";
+                }
                 self.tabs[i].active_cmd = None;
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();

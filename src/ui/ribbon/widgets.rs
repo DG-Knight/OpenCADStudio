@@ -480,6 +480,30 @@ pub(super) fn make_tip(tip: String) -> Element<'static, Message> {
     text(tip).size(11).into()
 }
 
+/// The sentence the reference shows under a tool's name, where known.
+fn tool_description(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "DCLINEAR" => "Constrains the horizontal or vertical distance between points",
+        "DCHORIZONTAL" => "Constrains the X-distance between points on an object, or between two points on different objects",
+        "DCVERTICAL" => "Constrains the Y-distance between points on an object, or between two points on different objects",
+        "DCALIGNED" => "Constrains the distance between two points on an object or between two points on different objects",
+        "DCRADIUS" => "Constrains the radius of a circle or arc",
+        "DCDIAMETER" => "Constrains the diameter of a circle or arc",
+        "DCANGULAR" => "Constrains the angle between line or polyline segments, the angle swept out by an arc or a polyline arc segment, or the angle between three points on objects",
+        "DCCONVERT" => "Convert dimensions to dimensional constraints",
+        _ => return None,
+    })
+}
+
+/// A tool's tooltip: its name, its description when one is known, and the
+/// command it runs.
+fn tool_tip_text(label: &str, id: &str) -> String {
+    match tool_description(id) {
+        Some(description) => format!("{label}\n{}\n{} {id}", t!(description), t!("Command:")),
+        None => format!("{label}\n{} {id}", t!("Command:")),
+    }
+}
+
 pub(super) fn tip_style(theme: &Theme) -> container::Style {
     let palette = theme.palette();
     container::Style {
@@ -511,7 +535,7 @@ pub(super) fn render_small<'a>(
             let active = is_active_tool(t.id, active_tool, &state);
             let event = t.event.clone();
             let tool_id = t.id.to_string();
-            let tip_text = format!("{}\n{} {}", t!(t.label), t!("Command:"), t.id);
+            let tip_text = tool_tip_text(&t!(t.label), t.id);
             let btn = button(make_icon(t.icon, SMALL_ICON))
                 .on_press(Message::RibbonToolClick { tool_id, event })
                 .style(move |theme: &Theme, status| tool_btn_style(theme, active, status))
@@ -530,7 +554,7 @@ pub(super) fn render_small<'a>(
             let event = t.event.clone();
             let tool_id = t.id.to_string();
             let label = t!(t.label).into_owned();
-            let tip_text = format!("{}\n{} {}", label, t!("Command:"), t.id);
+            let tip_text = tool_tip_text(&label, t.id);
             let content = row![
                 container(make_icon(t.icon, SMALL_ICON)).width(Length::Fixed(SMALL_W)),
                 text(label).size(10).wrapping(advanced_text::Wrapping::None),
@@ -588,7 +612,7 @@ pub(super) fn render_small<'a>(
                 })
                 .or_else(|| items.first().map(|(_, lbl, _)| *lbl))
                 .unwrap_or(*id);
-            let tip_text = format!("{}\n{} {}", t!(cur_label), t!("Command:"), last);
+            let tip_text = tool_tip_text(&t!(cur_label), last);
 
             let icon_btn = button(make_icon(cur_icon, SMALL_ICON))
                 .on_press(Message::RibbonToolClick {
@@ -658,7 +682,7 @@ pub(super) fn render_small<'a>(
                 .on_press(Message::ToggleRibbonDropdown(id.to_string()))
                 .style(move |theme: &Theme, status| tool_btn_style(theme, dd_open, status))
                 .width(Length::Fixed(ARROW_W)).height(ROW_H).padding(0);
-            let face_tip = format!("{}\n{} {}", localized_label, t!("Command:"), last);
+            let face_tip = tool_tip_text(&localized_label, last);
             let arrow_tip = format!("{} {}", localized_label, t!("options"));
             PosReport::new(*id, row![
                 tooltip(face_btn, make_tip(face_tip), TipPos::Right)
@@ -727,7 +751,7 @@ pub(super) fn render_large_dropdown<'a>(
         .or_else(|| items.first().map(|(_, lbl, _)| *lbl))
         .unwrap_or(id);
     let label = t!(explicit_label.unwrap_or(cur_label)).into_owned();
-    let tip_text = format!("{}\n{} {}", t!(cur_label), t!("Command:"), last);
+    let tip_text = tool_tip_text(&t!(cur_label), last);
     let arr_tip = format!("{} {}", label, t!("options"));
 
     // The label owns the bottom of the face. The icon's Fill container centers
@@ -864,7 +888,7 @@ pub(super) fn render_large<'a>(
             let event = t.event.clone();
             let tool_id = t.id.to_string();
             let label = t!(t.label).into_owned();
-            let tip_text = format!("{}\n{} {}", label, t!("Command:"), t.id);
+            let tip_text = tool_tip_text(&label, t.id);
             let btn = button(
                 column![
                     container(make_icon(t.icon, LARGE_ICON))

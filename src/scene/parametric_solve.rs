@@ -996,14 +996,15 @@ fn resolved_target(params: &ParameterTable, constraint: &ParametricConstraint) -
     // A dimensional distance keeps its sign in the parameter but measures
     // its magnitude, as the reference does (`d1=-50` shortens the line to
     // 50; `0` folds the points together).
-    if constraint.kind == ConstraintKind::Distance {
-        return Some(value.abs());
+    // A radius or diameter likewise (`rad1=-20` is a radius of 20); zero is
+    // no circle at all.
+    match constraint.kind {
+        ConstraintKind::Distance => Some(value.abs()),
+        ConstraintKind::Radius | ConstraintKind::Diameter => {
+            (value != 0.0).then(|| value.abs())
+        }
+        _ => Some(value),
     }
-    let must_be_positive = matches!(
-        constraint.kind,
-        ConstraintKind::Radius | ConstraintKind::Diameter
-    );
-    (!must_be_positive || value > 0.0).then_some(value)
 }
 
 fn oriented_distance(target: f64, current_projection: f64) -> f64 {
