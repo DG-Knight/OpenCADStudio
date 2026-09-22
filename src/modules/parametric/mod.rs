@@ -50,7 +50,7 @@ pub use tools::{
     perpendicular, symmetric, tangent, vertical,
 };
 pub use value::{
-    angle_tool, dimensional_tools, distance_tool, AngleConstraintCommand,
+    angle_tool, dimensional_tools, distance_tool,
     DistanceConstraintCommand, DistanceMode,
 };
 
@@ -123,9 +123,9 @@ impl CadModule for ParametricModule {
                             default: "DCLINEAR",
                         },
                         RibbonItem::LargeTool(dimensional_tools::aligned()),
-                        RibbonItem::LargeTool(dimensional_tools::angular()),
-                        RibbonItem::LargeTool(dimensional_tools::diameter()),
                         RibbonItem::LargeTool(dimensional_tools::radius()),
+                        RibbonItem::LargeTool(dimensional_tools::diameter()),
+                        RibbonItem::LargeTool(dimensional_tools::angular()),
                         RibbonItem::LargeTool(dimensional_tools::convert()),
                         RibbonItem::LabeledDropdown {
                             id: "DCVISIBILITY", label: "Show/Hide",
@@ -201,8 +201,8 @@ mod tests {
         assert_eq!(
             groups[1].tools.iter().map(item_id).collect::<Vec<_>>(),
             [
-                "DC_LINEAR_MENU", "DCALIGNED", "DCANGULAR", "DCDIAMETER",
-                "DCRADIUS", "DCCONVERT", "DCVISIBILITY", "DCSHOWALL", "DCHIDEALL",
+                "DC_LINEAR_MENU", "DCALIGNED", "DCRADIUS", "DCDIAMETER",
+                "DCANGULAR", "DCCONVERT", "DCVISIBILITY", "DCSHOWALL", "DCHIDEALL",
             ]
         );
         assert_eq!(groups[2].tools.iter().map(item_id).collect::<Vec<_>>(), ["DELCONSTRAINT", "PARAMETERS"]);

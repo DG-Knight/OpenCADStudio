@@ -1054,6 +1054,7 @@ impl OpenCADStudio {
                     | "CONSTRAINTBARMODE"
                     | "CONSTRAINTNAMEFORMAT"
                     | "DYNCONSTRAINTDISPLAY"
+                    | "CCONSTRAINTFORM"
             ) =>
             {
                 return self.dispatch_styleprops(&format!("SETVAR {cmd}"), i);
@@ -1279,6 +1280,7 @@ impl OpenCADStudio {
                             | "CONSTRAINTBARMODE"
                             | "CONSTRAINTNAMEFORMAT"
                             | "DYNCONSTRAINTDISPLAY"
+                            | "CCONSTRAINTFORM"
                     ) {
                         let current = match name.as_str() {
                             "CONSTRAINTSOLVEMODE" => i16::from(self.constraint_solve_mode),
@@ -1291,6 +1293,7 @@ impl OpenCADStudio {
                             "DYNCONSTRAINTDISPLAY" => {
                                 i16::from(self.tabs[i].scene.dynamic_constraint_display)
                             }
+                            "CCONSTRAINTFORM" => i16::from(self.constraint_form_annotational),
                             _ => unreachable!(),
                         };
                         let maximum = match name.as_str() {
@@ -1324,6 +1327,11 @@ impl OpenCADStudio {
                                             self.tabs[i].scene.dynamic_constraint_display =
                                                 mode != 0;
                                             self.tabs[i].scene.refresh_hidden_dynamic_dimensions();
+                                        }
+                                        // The form new dimensional constraints take
+                                        // (0 dynamic, 1 annotational), as DCFORM sets.
+                                        "CCONSTRAINTFORM" => {
+                                            self.constraint_form_annotational = mode != 0
                                         }
                                         _ => unreachable!(),
                                     }
