@@ -88,6 +88,7 @@ fn entity_boundary_source_on_plane(
     entity: &EntityType,
     plane: WorkingPlane,
     tolerance: f64,
+    clip_bounds: Option<([f64; 2], [f64; 2])>,
 ) -> Option<BoundarySource> {
     let curves = entity_curves_on_plane(entity, plane, tolerance);
 
@@ -95,25 +96,90 @@ fn entity_boundary_source_on_plane(
         return None;
     }
 
-    let segments: Vec<Line> = curves
-        .iter()
-        .flat_map(|curve| {
-            curve
-                .tessellate_angle(cadkernel::tessellation::DEFAULT_ANGLE)
-                .windows(2)
-                .filter_map(|pair| {
-                    let start = pair[0];
-                    let end = pair[1];
-
-                    (start.iter().chain(&end).all(|value| value.is_finite())
-                        && start != end)
-                        .then_some(Line { start, end })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let segments = live_segments_for_curves(&curves, clip_bounds, tolerance);
 
     (!segments.is_empty()).then_some(BoundarySource { segments, curves })
+}
+
+/// Finite extents of boundary segments, expanded by `tolerance` so clipped
+/// endpoints weld with the segments that produced the box. `None` when
+/// there is nothing finite to clip against.
+fn segments_bounds(segments: &[Line], tolerance: f64) -> Option<([f64; 2], [f64; 2])> {
+    let mut bounds: Option<([f64; 2], [f64; 2])> = None;
+    for segment in segments {
+        for point in [segment.start, segment.end] {
+            bounds = Some(match bounds {
+                None => ([point[0], point[1]], [point[0], point[1]]),
+                Some((min, max)) => (
+                    [min[0].min(point[0]), min[1].min(point[1])],
+                    [max[0].max(point[0]), max[1].max(point[1])],
+                ),
+            });
+        }
+    }
+    bounds.map(|(min, max)| {
+        (
+            [min[0] - tolerance, min[1] - tolerance],
+            [max[0] + tolerance, max[1] + tolerance],
+        )
+    })
+}
+
+/// Tessellate live curves to finite segments. Bounded curves tessellate as
+/// always; rays and infinite lines are clipped to `clip_bounds` instead —
+/// tessellating them raw yields a unit stub that can never close a face.
+/// With no bounds there is nothing to clip against, so unbounded curves
+/// contribute nothing.
+fn live_segments_for_curves(
+    curves: &[Curve],
+    clip_bounds: Option<([f64; 2], [f64; 2])>,
+    tolerance: f64,
+) -> Vec<Line> {
+    curves
+        .iter()
+        .flat_map(|curve| {
+            match curve {
+                Curve::Ray(ray) => clip_bounds
+                    .and_then(|(min, max)| {
+                        clip_unbounded_to_bounds(
+                            ray.origin,
+                            ray.direction,
+                            true,
+                            min,
+                            max,
+                            tolerance,
+                        )
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                Curve::XLine(line) => clip_bounds
+                    .and_then(|(min, max)| {
+                        clip_unbounded_to_bounds(
+                            line.base,
+                            line.direction,
+                            false,
+                            min,
+                            max,
+                            tolerance,
+                        )
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                _ => curve
+                    .tessellate_angle(cadkernel::tessellation::DEFAULT_ANGLE)
+                    .windows(2)
+                    .filter_map(|pair| {
+                        let start = pair[0];
+                        let end = pair[1];
+
+                        (start.iter().chain(&end).all(|value| value.is_finite())
+                            && start != end)
+                            .then_some(Line { start, end })
+                    })
+                    .collect::<Vec<_>>(),
+            }
+        })
+        .collect()
 }
 
 fn hatch_path_seed(path: &acadrust::entities::BoundaryPath) -> Option<[f64; 2]> {
@@ -794,6 +860,14 @@ impl Scene {
                 }
                 association_changed |= path.boundary_handles.len() != old_count;
                 modified |= association_changed;
+                // Finite extents for clipping unbounded live sources (rays /
+                // construction lines) below. `all_sources` already went
+                // through the same clipping in `boundary_sources_on_plane`.
+                let all_segments: Vec<Line> = all_sources
+                    .values()
+                    .flat_map(|source| source.segments.iter().copied())
+                    .collect();
+                let clip_bounds = segments_bounds(&all_segments, WELD_TOLERANCE);
                 let sources: rustc_hash::FxHashMap<_, _> = path
                     .boundary_handles
                     .iter()
@@ -809,6 +883,7 @@ impl Scene {
                                     entity,
                                     plane,
                                     WELD_TOLERANCE,
+                                    clip_bounds,
                                 )
                             })
                             .or_else(|| all_sources.get(source).cloned());
@@ -895,32 +970,14 @@ impl Scene {
                 .segments
                 .extend(segments);
         }
-        // Finite extents of the wire geometry. Rays and infinite
-        // construction lines are clipped to this box below: tessellating
-        // them raw yields a single unit stub at the base point, which can
-        // never close a face (and would overwrite the wire segments with
-        // it). Expanded by the weld tolerance so clipped endpoints meet
-        // the segments that produced the box.
-        let mut bounds: Option<([f64; 2], [f64; 2])> = None;
-        for source in sources.values() {
-            for segment in &source.segments {
-                for point in [segment.start, segment.end] {
-                    bounds = Some(match bounds {
-                        None => ([point[0], point[1]], [point[0], point[1]]),
-                        Some((min, max)) => (
-                            [min[0].min(point[0]), min[1].min(point[1])],
-                            [max[0].max(point[0]), max[1].max(point[1])],
-                        ),
-                    });
-                }
-            }
-        }
-        let bounds = bounds.map(|(min, max)| {
-            (
-                [min[0] - tolerance, min[1] - tolerance],
-                [max[0] + tolerance, max[1] + tolerance],
-            )
-        });
+        // Finite extents of the wire geometry, so rays and infinite
+        // construction lines clip to something real instead of tessellating
+        // to a unit stub (see `live_segments_for_curves`).
+        let all_wire_segments: Vec<Line> = sources
+            .values()
+            .flat_map(|source| source.segments.iter().copied())
+            .collect();
+        let bounds = segments_bounds(&all_wire_segments, tolerance);
         for (&handle, source) in &mut sources {
             let curves = self
                 .document
@@ -931,51 +988,7 @@ impl Scene {
             // Associative hatch regeneration must use the entity's live geometry,
             // not a potentially one-frame-old display wire. Grip edits and STRETCH
             // mutate the document before the resident wire cache catches up.
-            let live_segments: Vec<Line> = curves
-                .iter()
-                .flat_map(|curve| {
-                    match curve {
-                        Curve::Ray(ray) => bounds
-                            .and_then(|(min, max)| {
-                                clip_unbounded_to_bounds(
-                                    ray.origin,
-                                    ray.direction,
-                                    true,
-                                    min,
-                                    max,
-                                    tolerance,
-                                )
-                            })
-                            .into_iter()
-                            .collect::<Vec<_>>(),
-                        Curve::XLine(line) => bounds
-                            .and_then(|(min, max)| {
-                                clip_unbounded_to_bounds(
-                                    line.base,
-                                    line.direction,
-                                    false,
-                                    min,
-                                    max,
-                                    tolerance,
-                                )
-                            })
-                            .into_iter()
-                            .collect::<Vec<_>>(),
-                        _ => curve
-                            .tessellate_angle(cadkernel::tessellation::DEFAULT_ANGLE)
-                            .windows(2)
-                            .filter_map(|pair| {
-                                let start = pair[0];
-                                let end = pair[1];
-
-                                (start.iter().chain(&end).all(|value| value.is_finite())
-                                    && start != end)
-                                    .then_some(Line { start, end })
-                            })
-                            .collect::<Vec<_>>(),
-                    }
-                })
-                .collect();
+            let live_segments = live_segments_for_curves(&curves, bounds, tolerance);
 
             if !live_segments.is_empty() {
                 source.segments = live_segments;
@@ -1194,6 +1207,27 @@ mod boundary_xline_tests {
             2,
             "upward ray must split the 10x10 rectangle into two faces"
         );
+    }
+
+    #[test]
+    fn xline_source_clips_to_given_bounds() {
+        let xline = EntityType::XLine(acadrust::entities::XLine::new(
+            acadrust::types::Vector3::new(5.0, 0.0, 0.0),
+            acadrust::types::Vector3::new(0.0, 1.0, 0.0),
+        ));
+        let source = entity_boundary_source_on_plane(
+            &xline,
+            crate::command::WorkingPlane::default(),
+            1.0e-6,
+            Some(([0.0, 0.0], [10.0, 10.0])),
+        )
+        .expect("xline crossing the box must produce a source");
+        assert_eq!(source.segments.len(), 1);
+        let segment = &source.segments[0];
+        assert!((segment.start[0] - 5.0).abs() < 1e-6, "got {:?}", segment.start);
+        assert!((segment.start[1] - 0.0).abs() < 1e-6, "got {:?}", segment.start);
+        assert!((segment.end[0] - 5.0).abs() < 1e-6, "got {:?}", segment.end);
+        assert!((segment.end[1] - 10.0).abs() < 1e-6, "got {:?}", segment.end);
     }
 
     #[test]

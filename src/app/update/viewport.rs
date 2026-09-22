@@ -6773,6 +6773,48 @@ mod selection_preview_tests {
     }
 
     #[test]
+    fn xline_direction_grip_drag_changes_direction() {
+        use acadrust::{types::Vector3, EntityType};
+        let mut app = OpenCADStudio::new_for_test();
+        app.automation_op(r#"{"op":"new"}"#);
+        let i = app.active_tab;
+        app.tabs[i].scene.selection.borrow_mut().vp_size = (800.0, 600.0);
+        // Base away from the model origin so the UCS icon cannot swallow
+        // the press (it sits at the origin in a fresh drawing).
+        let handle = app.tabs[i].scene.add_entity(EntityType::XLine(
+            acadrust::entities::XLine::new(
+                Vector3::new(100.0, 50.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
+        ));
+        app.tabs[i].scene.selected.insert(handle);
+        app.refresh_selected_grips();
+        assert_eq!(app.tabs[i].selected_grips.len(), 2);
+        // Press on grip 1 (direction handle) and drag it to point along +X.
+        let bounds = iced::Rectangle::with_size(iced::Size::new(800.0, 600.0));
+        let g1world = app.tabs[i].selected_grips[1].world;
+        let g1cursor = app.tabs[i].scene.camera.borrow().project(g1world, bounds).unwrap();
+        app.tabs[i].scene.selection.borrow_mut().last_move_pos =
+            Some(iced::Point::new(g1cursor.x, g1cursor.y));
+        let _ = app.on_viewport_left_press();
+        assert_eq!(
+            app.tabs[i].active_grip.as_ref().map(|g| g.grip_id),
+            Some(1),
+            "press on the direction grip must engage grip 1"
+        );
+        let dir_target = glam::DVec3::new(200.0, 50.0, 0.0);
+        let dir_cursor = app.tabs[i].scene.camera.borrow().project(dir_target, bounds).unwrap();
+        let _ = app.on_viewport_move(iced::Point::new(dir_cursor.x, dir_cursor.y));
+        let EntityType::XLine(moved) = app.tabs[i].scene.document.get_entity(handle).unwrap()
+        else { panic!("expected xline") };
+        assert!(
+            (moved.direction.x - 1.0).abs() < 1e-6 && moved.direction.y.abs() < 1e-6,
+            "direction grip drag must point the xline along +X, got {:?}",
+            moved.direction
+        );
+    }
+
+    #[test]
     fn constraint_glyph_tooltip_appears_after_hover_dwell() {
         use crate::scene::parametric_constraints::{ConstraintKind, ParametricRef, ParametricScope};
         use acadrust::{entities::Line, types::Vector3, EntityType};
