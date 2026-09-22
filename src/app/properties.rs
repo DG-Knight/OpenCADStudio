@@ -3702,11 +3702,6 @@ fn set_row(sections: &mut [crate::scene::model::object::PropSection], field: &st
     }
 }
 
-/// Replace a row's value with an arbitrary control (editable field, dropdown,
-/// colour picker …) rather than plain read-only text.
-/// A dimensional constraint's Properties as the reference shows them: the
-/// Constraint rows, then only the text rotation for a dynamic dimension
-/// and the full dimension sections for an annotational one.
 /// A Yes/No list row, as the reference shows on/off object properties.
 fn yes_no_choice(flag: bool) -> crate::scene::model::object::PropValue {
     crate::scene::model::object::PropValue::Choice {
@@ -3715,6 +3710,9 @@ fn yes_no_choice(flag: bool) -> crate::scene::model::object::PropValue {
     }
 }
 
+/// A dimensional constraint's Properties as the reference shows them: the
+/// Constraint rows, then only the text rotation for a dynamic dimension
+/// and the full dimension sections for an annotational one.
 fn dynamic_dimension_sections(
     scene: &crate::scene::Scene,
     handle: Handle,
@@ -3850,6 +3848,8 @@ fn dynamic_dimension_sections(
     result
 }
 
+/// Replace a row's value with an arbitrary control (editable field, dropdown,
+/// colour picker …) rather than plain read-only text.
 fn set_row_value(
     sections: &mut [crate::scene::model::object::PropSection],
     field: &str,
