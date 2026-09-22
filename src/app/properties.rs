@@ -2333,6 +2333,13 @@ impl OpenCADStudio {
                         {
                             format!("{} ({})", t!("Surface"), t!("Extrusion"))
                         }
+                        // The reference names an angular dimension by its kind.
+                        acadrust::EntityType::Dimension(
+                            acadrust::entities::Dimension::Angular2Ln(_),
+                        ) => t!("Angular Dimension").into_owned(),
+                        acadrust::EntityType::Dimension(
+                            acadrust::entities::Dimension::Angular3Pt(_),
+                        ) => t!("3 Point Angular Dimension").into_owned(),
                         _ => entity_type_label(entity),
                     };
                     // A dynamic dimension shows only its constraint and text
