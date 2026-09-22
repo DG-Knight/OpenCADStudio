@@ -1844,6 +1844,7 @@ impl OpenCADStudio {
                             dov::DIMEXO,
                             dov::DIMEXE,
                             dov::DIMASZ,
+                            dov::DIMTAD,
                             dov::DIMTIH,
                             dov::DIMTOH,
                         ] {

@@ -3860,6 +3860,7 @@ fn tessellate_dimension_inner(
             ticks: dimtsz_raw > 1e-9,
             arrow_len: dimasz,
             text_width: text_layout.width,
+            text_height: dim_txt as f32,
             dimatfit: style.map(|s| s.dimatfit).unwrap_or(3),
             dimtix: style.is_some_and(|s| s.dimtix),
             dimtofl: style.map(|s| s.dimtofl).unwrap_or(false),
@@ -4691,6 +4692,8 @@ struct DimLineParams {
     /// Arrowhead length (DIMASZ, scaled) — used to decide arrow-outside fit.
     arrow_len: f32,
     text_width: f32,
+    /// Text height (DIMTXT, scaled) — a radial leader is sized by it.
+    text_height: f32,
     dimatfit: i16,
     dimtix: bool,
     dimtofl: bool,
@@ -4776,21 +4779,28 @@ fn dimension_geometry(
             }
             let radius = (point - center).length();
             let text_is_outside = text.distance(center) > radius + 1e-5;
-            // Text inside the arc: the dimension line runs from the arc point
-            // to the centre. Text outside: only a leader from the arc point to
-            // the text, unless DIMTOFL asks for the inside line as well.
-            if !jogged && !suppress.dim2 && (!text_is_outside || params.dimtofl) {
-                add_segment(&mut g.dim_lines, center, point);
+            // The dimension line runs from the centre to the arc point and
+            // is broken where the text sits on it. Text that no longer fits
+            // inside is reached by a leader from the arc point, and the
+            // arrowhead stays on the arc either way.
+            if !jogged && !suppress.dim2 {
+                add_segment_with_text_break(&mut g.dim_lines, center, point, params.text_break);
             }
             if text_is_outside && !suppress.dim2 {
-                append_radial_leader(&mut g, point, text, &params);
+                append_radial_leader(&mut g, point, point - center, text, &params);
             }
             if !suppress.dim2 {
-                // The arrowhead sits on the arc with its body toward the text.
-                let body = if text_is_outside { point - center } else { center - point };
-                append_arrow(&mut g, point, normalized_or(body, Vec3::X), arrow1);
+                // The arrowhead's tip is on the arc, its body inside.
+                append_arrow(
+                    &mut g,
+                    point,
+                    normalized_or(center - point, Vec3::X),
+                    arrow1,
+                );
             }
-            if text_is_outside {
+            // The centre mark belongs to a radius drawn without its inside
+            // line; the line itself already marks the centre.
+            if jogged || suppress.dim2 {
                 append_center_mark(&mut g, center, params.dimcen, radius);
             }
         }
@@ -4807,9 +4817,8 @@ fn dimension_geometry(
                 params,
                 suppress,
             );
-            let center = (chord + far_chord) * 0.5;
-            let radius = chord.distance(far_chord) * 0.5;
-            append_center_mark(&mut g, center, params.dimcen, radius);
+            // The centre mark belongs to a diameter drawn without its line
+            // across the circle; `append_diameter_dimension` adds it there.
         }
         Dimension::Angular2Ln(d) => {
             // A two-line angular dimension stores two LINES, not two rays:
@@ -5282,29 +5291,26 @@ fn append_linear_dimension(
 /// hook one arrow long that the text sits against; aligned text is reached by a
 /// straight leader that stops a gap short of it. `text_width` already carries
 /// a gap on each side.
-fn append_radial_leader(g: &mut DimGeom, tip: Vec3, text: Vec3, params: &DimLineParams) {
-    if params.horizontal_text {
-        let side = if text.x >= tip.x { 1.0 } else { -1.0 };
-        let (hook_start, text_edge) = match params.leader_anchor {
-            Some(anchor) => (anchor, anchor + Vec3::X * (side * params.arrow_len)),
-            None => {
-                let edge = Vec3::new(text.x - side * params.text_width * 0.5, text.y, text.z);
-                (edge - Vec3::X * (side * params.arrow_len), edge)
-            }
-        };
-        let slope = (hook_start - tip).y.abs().atan2((hook_start - tip).x.abs());
-        // A leader already within 15° of horizontal runs straight to the text.
-        if slope > 15.0_f32.to_radians() {
-            add_segment(&mut g.dim_lines, tip, hook_start);
-            add_segment(&mut g.dim_lines, hook_start, text_edge);
-        } else {
-            add_segment(&mut g.dim_lines, tip, text_edge);
-        }
-    } else {
-        let toward = normalized_or(text - tip, Vec3::X);
-        let reach = ((text - tip).length() - params.text_width * 0.5).max(0.0);
-        add_segment(&mut g.dim_lines, tip, tip + toward * reach);
-    }
+/// A radial dimension's leader: it leaves the rim along the dimension line,
+/// elbows level with the text and hooks under it, as the reference draws it.
+fn append_radial_leader(
+    g: &mut DimGeom,
+    tip: Vec3,
+    direction: Vec3,
+    text: Vec3,
+    params: &DimLineParams,
+) {
+    let side = if text.x >= tip.x { 1.0 } else { -1.0 };
+    let edge = match params.leader_anchor {
+        Some(anchor) => anchor,
+        None => Vec3::new(text.x - side * params.text_width * 0.5, text.y, text.z),
+    };
+    let elbow = tip
+        + normalized_or(direction, Vec3::X) * radial_leader_run(params.text_height as f64) as f32;
+    // The hook is horizontal at the text's height; the run reaches it.
+    let elbow = Vec3::new(elbow.x, edge.y, edge.z);
+    add_segment(&mut g.dim_lines, tip, elbow);
+    add_segment(&mut g.dim_lines, elbow, edge);
 }
 
 fn append_diameter_dimension(
@@ -5324,11 +5330,10 @@ fn append_diameter_dimension(
     }
     let center = (chord + far_chord) * 0.5;
     let text_is_outside = params.text_position.distance(center) > diameter * 0.5 + 1e-5;
-    if text_is_outside && !params.dimtofl {
-        // Outside text without DIMTOFL: no line across the circle, just a
-        // leader from the near side with the arrowhead on the circle and its
-        // body toward the text. DIMTMOVE 2 keeps the arrowhead and drops the
-        // leader.
+    if text_is_outside {
+        // Text that no longer fits inside is carried by a leader from the
+        // nearer end of the dimension line; the line and both arrowheads
+        // stay inside the circle. DIMTMOVE 2 drops the leader.
         let (tip, suppressed) = if params.text_position.distance_squared(chord)
             <= params.text_position.distance_squared(far_chord)
         {
@@ -5336,19 +5341,18 @@ fn append_diameter_dimension(
         } else {
             (far_chord, suppress.dim2)
         };
-        if !suppressed {
-            if params.text_movement != 2 {
-                append_radial_leader(g, tip, params.text_position, &params);
-            }
-            append_arrow(g, tip, normalized_or(tip - center, axis), arrow1);
+        if !suppressed && params.text_movement != 2 {
+            append_radial_leader(g, tip, tip - center, params.text_position, &params);
         }
-        return;
     }
     // Text projected outside the diameter requires inward-pointing arrowheads.
     let text_along = (params.text_position - chord).dot(axis);
     let text_outside = text_along < 0.0 || text_along > diameter;
 
     let arrows_outside = if params.ticks || params.arrow_len <= 1e-6 {
+        false
+    } else if text_is_outside {
+        // The leader carries the text; the arrowheads keep the circle.
         false
     } else if text_outside {
         true
@@ -5392,6 +5396,10 @@ fn append_diameter_dimension(
         }
     }
 
+    if !draw_inside_line {
+        let center = (chord + far_chord) * 0.5;
+        append_center_mark(g, center, params.dimcen, diameter * 0.5);
+    }
     if arrows_outside {
         append_arrow(g, chord, -axis, arrow1);
         append_arrow(g, far_chord, axis, arrow2);
@@ -7558,6 +7566,33 @@ fn radial_leader_tip(dim: &Dimension, text: Vector3) -> Vector3 {
     }
 }
 
+/// How far a radial leader runs out from the rim before its hook, and how
+/// long that hook is: about one text height, so the text always clears the
+/// circle.
+fn radial_leader_run(text_height: f64) -> f64 {
+    text_height
+}
+
+/// Where a radius or diameter dimension's text sits once it no longer fits
+/// inside: beside the circle, level with the end of the leader's run, its
+/// near edge one arrow away so the hook has room.
+fn radial_outside_text(
+    tip: Vector3,
+    ux: f64,
+    uy: f64,
+    text_height: f64,
+    text_width: f64,
+) -> Vector3 {
+    let run = radial_leader_run(text_height);
+    let elbow = Vector3::new(tip.x + ux * run, tip.y + uy * run, tip.z);
+    let side = if ux >= 0.0 { 1.0 } else { -1.0 };
+    Vector3::new(
+        elbow.x + side * (run + text_width * 0.5),
+        elbow.y,
+        elbow.z,
+    )
+}
+
 fn dimension_text_pos_f64(
     dim: &Dimension,
     style: Option<&DimStyle>,
@@ -7706,6 +7741,9 @@ fn dimension_text_pos_f64(
             let ux = dx / radius;
             let uy = dy / radius;
             let outside = dimension_text_is_outside(dim, style);
+            if outside {
+                return radial_outside_text(d.definition_point, ux, uy, text_height, text_w);
+            }
             let (mut x, mut y) = if outside {
                 let distance = arrow + text_w * 0.5 + dimgap;
                 (
@@ -7747,6 +7785,16 @@ fn dimension_text_pos_f64(
             let dx = d.definition_point.x - d.angle_vertex.x;
             let dy = d.definition_point.y - d.angle_vertex.y;
             let len = (dx * dx + dy * dy).sqrt().max(1e-12);
+            if dimension_text_is_outside(dim, style) {
+                // Beyond the end the dimension line was placed towards.
+                return radial_outside_text(
+                    d.angle_vertex,
+                    -dx / len,
+                    -dy / len,
+                    text_height,
+                    text_w,
+                );
+            }
             text_on_dim_line(
                 d.angle_vertex,
                 d.definition_point,
@@ -7854,6 +7902,7 @@ pub(crate) fn baked_large_radial_geometry(
             ticks: tick_size > 1.0e-9,
             arrow_len: arrow_size,
             text_width: text.width,
+            text_height: text_height as f32,
             dimatfit: style.map(|style| style.dimatfit).unwrap_or(3),
             dimtix: style.is_some_and(|style| style.dimtix),
             dimtofl: style.is_some_and(|style| style.dimtofl),

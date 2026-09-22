@@ -2388,6 +2388,7 @@ impl super::Scene {
                     ov::DIMEXO,
                     ov::DIMEXE,
                     ov::DIMASZ,
+                    ov::DIMTAD,
                     ov::DIMTIH,
                     ov::DIMTOH,
                 ] {
@@ -2426,7 +2427,7 @@ impl super::Scene {
                 continue;
             }
             let style_name = dimension.base().style_name.clone();
-            let text_height = self
+            let style = self
                 .document
                 .dim_styles
                 .iter()
@@ -2434,23 +2435,40 @@ impl super::Scene {
                     style.name.eq_ignore_ascii_case(&style_name)
                         || (style_name.trim().is_empty()
                             && style.name.eq_ignore_ascii_case("Standard"))
-                })
+                });
+            let text_height = style
                 .map(|style| style.dimtxt)
                 .filter(|height| *height > 1e-9)
                 .unwrap_or(0.18);
+            let size_of = |value: Option<f64>, fallback: f64| {
+                value.filter(|size| *size > 1e-9).unwrap_or(fallback)
+            };
+            let arrow_size = size_of(style.map(|style| style.dimasz), text_height);
+            let extension_over = size_of(style.map(|style| style.dimexe), text_height * 0.5);
+            let extension_offset = size_of(style.map(|style| style.dimexo), text_height * 0.25);
             let scale = f64::from(wpp) * f64::from(DYNAMIC_DIMENSION_TEXT_PX) / text_height;
             use crate::entities::dim_override as ov;
             let xdata = &dimension.base().common.extended_data;
             let current = ov::real(xdata, ov::DIMSCALE);
-            // Text gap, extension offset and overshoot and arrow size follow
-            // the text height on screen (the reference's ratios), whatever
-            // the style says in drawing units.
+            // The gap hugs the text, so it follows the text's screen size.
+            // Arrowheads and extension lines keep the style's size in
+            // drawing units: dividing by the screen factor the style's
+            // DIMSCALE re-applies leaves them unchanged as the view zooms.
             let sizes = [
                 (ov::DIMGAP, text_height * 0.25),
-                (ov::DIMEXO, text_height * 0.25),
-                (ov::DIMEXE, text_height * 0.5),
-                (ov::DIMASZ, text_height),
+                (ov::DIMEXO, extension_offset / scale),
+                (ov::DIMEXE, extension_over / scale),
+                (ov::DIMASZ, arrow_size / scale),
             ];
+            // A radius or diameter constraint reads on its own dimension
+            // line, which breaks around the text, so the text is centred on
+            // it rather than lifted above it.
+            let radial = matches!(
+                dimension,
+                acadrust::entities::Dimension::Radius(_)
+                    | acadrust::entities::Dimension::Diameter(_)
+            );
+            let centred = !radial || ov::int(xdata, ov::DIMTAD) == Some(0);
             let sizes_set = sizes.iter().all(|(code, size)| {
                 ov::real(xdata, *code).is_some_and(|value| (value - size).abs() < 1e-12)
             });
@@ -2463,8 +2481,20 @@ impl super::Scene {
             );
             let horizontal = angular
                 || (ov::int(xdata, ov::DIMTIH) == Some(1) && ov::int(xdata, ov::DIMTOH) == Some(1));
-            if current.is_some_and(|value| (value - scale).abs() < 1e-9) && horizontal && sizes_set {
+            if current.is_some_and(|value| (value - scale).abs() < 1e-9)
+                && horizontal
+                && sizes_set
+                && centred
+            {
                 continue;
+            }
+            if radial && !centred {
+                ov::set(
+                    &mut self.document,
+                    handle,
+                    ov::DIMTAD,
+                    Some(acadrust::xdata::XDataValue::Integer16(0)),
+                );
             }
             ov::set(
                 &mut self.document,
