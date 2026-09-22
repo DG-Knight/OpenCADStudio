@@ -2196,7 +2196,8 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         // The Annotative Yes/No list drives the per-object annotative toggle
         // (MTEXT's own flag, the annotation context for the rest).
         if field == "annotative" {
-            let wanted = value == t!("Yes").as_ref() || value.eq_ignore_ascii_case("yes");
+            let wanted =
+                value == crate::t!("Yes").as_ref() || value.eq_ignore_ascii_case("yes");
             let Some(handle) = handles.first().copied() else {
                 return Task::none();
             };
