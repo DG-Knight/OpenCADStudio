@@ -1569,10 +1569,8 @@ impl OpenCADStudio {
                             table
                                 .iter()
                                 .map(|parameter| {
-                                    let value = table
-                                        .resolve(&parameter.name)
-                                        .map(|value| format!("{value:.4}"))
-                                        .unwrap_or_else(|_| "**".to_string());
+                                    let value =
+                                        self.tabs[i].scene.parameter_value_text(&parameter.name);
                                     format!(
                                         "Parameter: {:<12} Expression: {:<21} Value: {value}",
                                         parameter.name, parameter.source
@@ -1597,10 +1595,7 @@ impl OpenCADStudio {
                         let old = {
                             let table = self.tabs[i].scene.named_parameters();
                             table.get(&name).map(|parameter| {
-                                let value = table
-                                    .resolve(&name)
-                                    .map(|value| format!("{value:.4}"))
-                                    .unwrap_or_else(|_| "**".to_string());
+                                let value = self.tabs[i].scene.parameter_value_text(&name);
                                 format!("Old Expression = {}, Value = {value}", parameter.source)
                             })
                         };
@@ -1941,41 +1936,19 @@ impl OpenCADStudio {
             }
 
             "ACONSTRAINT" | "DCANGULAR" => {
-                if cmd == "DCANGULAR" {
-                    self.dim_constraint_last = "ANgular";
-                }
-                let handles = self.tabs[i].scene.selected_handles_in_order();
-                if handles.is_empty() {
-                    use crate::modules::draw::select::SelectObjectsCommand;
-                    let sel = SelectObjectsCommand::new(cmd);
-                    self.command_line.push_info(&sel.prompt());
-                    self.tabs[i].active_cmd = Some(Box::new(sel));
-                } else if handles.len() != 2 {
-                    self.command_line.push_output(
-                        "Select exactly two lines (first = reference, second = the one that rotates), then run this constraint again.",
-                    );
-                } else {
-                    use crate::modules::parametric::AngleConstraintCommand;
-                    let command_name = if cmd == "DCANGULAR" {
-                        "DCANGULAR"
-                    } else {
-                        "ACONSTRAINT"
-                    };
-                    match AngleConstraintCommand::with_name(
-                        &self.tabs[i].scene,
-                        handles[0],
-                        handles[1],
-                        command_name,
-                    ) {
-                        Some(new_cmd) => {
-                            self.command_line.push_info(&new_cmd.prompt());
-                            self.tabs[i].active_cmd = Some(Box::new(new_cmd));
-                        }
-                        None => self
-                            .command_line
-                            .push_output("Select two lines for an angle constraint."),
-                    }
-                }
+                use crate::modules::parametric::{DimConstraintAxis, DimConstraintCommand};
+                use crate::scene::parametric_constraints::{
+                    angle_decimals, next_angular_parameter_name,
+                };
+                self.dim_constraint_last = "ANgular";
+                let name = next_angular_parameter_name(self.tabs[i].scene.named_parameters());
+                let decimals = angle_decimals(&self.tabs[i].scene.document, None);
+                // Both sides are picked inside the command.
+                self.tabs[i].scene.deselect_all();
+                let command = DimConstraintCommand::new(DimConstraintAxis::Angular, name)
+                    .with_angle_decimals(decimals);
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
             }
 
             // ── Model commands (3D primitives) ─────────────────────────────

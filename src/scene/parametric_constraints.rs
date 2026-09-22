@@ -363,6 +363,55 @@ pub(crate) fn next_dimensional_parameter_name(
         .unwrap_or_else(|| "d1".to_string())
 }
 
+/// The first free `ang1`, `ang2`, … name a new angular constraint takes.
+pub(crate) fn next_angular_parameter_name(
+    table: &super::named_parameters::ParameterTable,
+) -> String {
+    (1..)
+        .map(|n| format!("ang{n}"))
+        .find(|name| !table.contains(name))
+        .unwrap_or_else(|| "ang1".to_string())
+}
+
+/// An angle as the reference displays it: a negative or over-full value is
+/// brought into one turn (`-30` → `330`, `400` → `40`), a full turn stays.
+pub(crate) fn normalize_angle_display(degrees: f64) -> f64 {
+    if !degrees.is_finite() || (degrees.abs() - 360.0).abs() < 1.0e-9 {
+        degrees
+    } else {
+        degrees.rem_euclid(360.0)
+    }
+}
+
+/// The angular precision (DIMADEC, or DIMDEC when unset) of a dimension
+/// style, by name or the drawing's current one.
+pub(crate) fn angle_decimals(document: &acadrust::CadDocument, style_name: Option<&str>) -> usize {
+    let requested = style_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| document.header.current_dimstyle_name.trim());
+    let style = document
+        .dim_styles
+        .iter()
+        .find(|style| style.name.eq_ignore_ascii_case(requested))
+        .or_else(|| {
+            document
+                .dim_styles
+                .iter()
+                .find(|style| style.name.eq_ignore_ascii_case("Standard"))
+        });
+    style
+        .map(|style| {
+            if style.dimadec < 0 {
+                style.dimdec
+            } else {
+                style.dimadec
+            }
+        })
+        .unwrap_or(0)
+        .clamp(0, 8) as usize
+}
+
 /// The constraint-bar label that draws a dynamic dimension's lock mark.
 pub const DYNAMIC_DIMENSION_GLYPH: &str = "\u{1F512}";
 
@@ -385,12 +434,18 @@ pub(crate) fn dynamic_dimension_text(
     reference: bool,
     expression: Option<&str>,
     annotational: bool,
+    angle_decimals: Option<usize>,
 ) -> String {
     let formula = expression
         .map(str::trim)
         .filter(|source| !source.is_empty() && source.parse::<f64>().is_err());
     let shown = match formula {
         Some(source) => source.to_string(),
+        // An angle shows at angular precision, within one turn (`ang1=27`).
+        None if angle_decimals.is_some() => {
+            let decimals = angle_decimals.unwrap_or(0);
+            format!("{:.decimals$}", normalize_angle_display(value))
+        }
         // An annotational dimension shows the value at dimension precision
         // (`d1=100.0000`), as the reference does.
         None if annotational => format!("{value:.4}"),
@@ -510,10 +565,107 @@ fn dynamic_dimension_follow_points(
     true
 }
 
+/// The end points of a line reference: a line's two ends, or the picked
+/// polyline segment's vertices.
+fn line_ends(entity: &acadrust::EntityType, reference: ParametricRef) -> Option<(Vector3, Vector3)> {
+    let (start, end) = match reference.segment_index() {
+        Some(index) => {
+            let index = index as i32;
+            let end = resolve_point(entity, index + 1).map_or(0, |_| index + 1);
+            (index, end)
+        }
+        None => (0, 1),
+    };
+    resolve_point(entity, start).zip(resolve_point(entity, end))
+}
+
+/// Where an angular constraint's sides are now: both lines' ends for a
+/// two-line angle, `[vertex, first, second]` for a three-point one.
+fn angular_follow_points(
+    document: &acadrust::CadDocument,
+    constraint: &ParametricConstraint,
+) -> Option<Vec<Vector3>> {
+    match (constraint.kind, constraint.refs.as_slice()) {
+        (ConstraintKind::Angle, [first, second]) => {
+            let (a, b) = line_ends(document.get_entity(first.entity)?, *first)?;
+            let (c, d) = line_ends(document.get_entity(second.entity)?, *second)?;
+            Some(vec![a, b, c, d])
+        }
+        (ConstraintKind::Angle3Point, [first, vertex, second]) => {
+            let world = |reference: &ParametricRef| {
+                resolve_point(document.get_entity(reference.entity)?, reference.marker?)
+            };
+            Some(vec![world(vertex)?, world(first)?, world(second)?])
+        }
+        _ => None,
+    }
+}
+
+/// Rebuilds a dynamic angular dimension on its sides' current positions,
+/// keeping its arc point; true when anything moved.
+fn dynamic_dimension_follow_angle(
+    dimension: &mut acadrust::entities::Dimension,
+    points: &[Vector3],
+) -> bool {
+    use acadrust::entities::Dimension;
+    let same = |a: Vector3, b: Vector3| (a - b).length_squared() < 1.0e-16;
+    let to_dvec = |p: Vector3| glam::DVec3::new(p.x, p.y, p.z);
+    let text = dimension.base().user_text.clone();
+    let rebuilt = match (&*dimension, points) {
+        (Dimension::Angular2Ln(d), [a, b, c, e]) => {
+            if same(d.first_point, *a)
+                && same(d.second_point, *b)
+                && same(d.angle_vertex, *c)
+                && same(d.definition_point, *e)
+            {
+                return false;
+            }
+            crate::modules::annotate::angular_dim::angular_two_line_entity(
+                to_dvec(*a),
+                to_dvec(*b),
+                to_dvec(*c),
+                to_dvec(*e),
+                to_dvec(d.dimension_arc),
+                text,
+            )
+        }
+        (Dimension::Angular3Pt(d), [vertex, first, second]) => {
+            if same(d.angle_vertex, *vertex)
+                && same(d.first_point, *first)
+                && same(d.second_point, *second)
+            {
+                return false;
+            }
+            crate::modules::annotate::angular_dim::angular_three_point_entity(
+                to_dvec(*vertex),
+                to_dvec(*first),
+                to_dvec(*second),
+                to_dvec(d.definition_point),
+                text,
+            )
+        }
+        _ => return false,
+    };
+    let Some(acadrust::EntityType::Dimension(mut rebuilt)) = rebuilt else {
+        return false;
+    };
+    let base = dimension.base();
+    let target = rebuilt.base_mut();
+    target.common = base.common.clone();
+    target.style_name = base.style_name.clone();
+    target.text_rotation = base.text_rotation;
+    target.attachment_point = base.attachment_point;
+    target.line_spacing_style = base.line_spacing_style;
+    target.line_spacing_factor = base.line_spacing_factor;
+    *dimension = rebuilt;
+    true
+}
+
 /// What stays put when a dimensional constraint's value changes: its first
 /// point, and — when the distance runs perpendicular to a line that owns
 /// that point (2Lines, line-first Point & line) — the whole line, so the
-/// other object moves, as in the reference.
+/// other object moves, as in the reference. An angle keeps its first side
+/// (a two-line angle) or its vertex and first point (a three-point one).
 pub(crate) fn dimensional_anchor_refs(
     document: &acadrust::CadDocument,
     refs: &[ParametricRef],
@@ -521,6 +673,29 @@ pub(crate) fn dimensional_anchor_refs(
     let Some(&first) = refs.first() else {
         return Vec::new();
     };
+    // Three point references: a three-point angle `[first, vertex, second]`.
+    if refs.len() == 3
+        && refs
+            .iter()
+            .all(|reference| reference.marker.is_some() && reference.segment_index().is_none())
+    {
+        return vec![refs[1], first];
+    }
+    // A two-line angle whose first side is a polyline segment: pin its ends.
+    if refs.len() == 2 && first.marker.is_none() {
+        return vec![first];
+    }
+    if let (2, Some(index)) = (refs.len(), first.segment_index()) {
+        let index = index as i32;
+        let end = document
+            .get_entity(first.entity)
+            .and_then(|entity| resolve_point(entity, index + 1))
+            .map_or(0, |_| index + 1);
+        return vec![
+            ParametricRef::point(first.entity, index),
+            ParametricRef::point(first.entity, end),
+        ];
+    }
     let mut anchors = vec![first];
     if let Some(&line) = refs.get(2).filter(|line| line.entity == first.entity) {
         let ends = match line.segment_index() {
@@ -1803,7 +1978,12 @@ impl super::Scene {
     /// origins to where the solve left the constraint points.
     pub(crate) fn refresh_dynamic_dimension_texts(&mut self) {
         let format = self.constraint_name_format;
-        let mut updates: Vec<(Handle, String, Option<(Vector3, Vector3)>)> = Vec::new();
+        let mut updates: Vec<(
+            Handle,
+            String,
+            Option<(Vector3, Vector3)>,
+            Option<Vec<Vector3>>,
+        )> = Vec::new();
         // A reference (driven) constraint's parameter follows the geometry.
         let mut followed: Vec<(String, f64)> = Vec::new();
         for set in &self.parametric_constraints {
@@ -1826,7 +2006,11 @@ impl super::Scene {
                     _ => None,
                 };
                 let reference = !constraint.enabled;
-                let measured = points.map(|(first, second)| {
+                let angular = matches!(
+                    constraint.kind,
+                    ConstraintKind::Angle | ConstraintKind::Angle3Point
+                );
+                let measured = points.filter(|_| !angular).map(|(first, second)| {
                     let delta = second - first;
                     let axis = match self.document.get_entity(*dimension) {
                         Some(acadrust::EntityType::Dimension(
@@ -1863,6 +2047,16 @@ impl super::Scene {
                     None => continue,
                 };
                 let annotational = self.dimension_is_annotational(*dimension);
+                let decimals = angular.then(|| {
+                    let style = match self.document.get_entity(*dimension) {
+                        Some(acadrust::EntityType::Dimension(d)) => d.base().style_name.clone(),
+                        _ => String::new(),
+                    };
+                    angle_decimals(&self.document, Some(&style))
+                });
+                let angle_points = angular
+                    .then(|| angular_follow_points(&self.document, constraint))
+                    .flatten();
                 updates.push((
                     *dimension,
                     dynamic_dimension_text(
@@ -1872,8 +2066,10 @@ impl super::Scene {
                         reference,
                         source.as_deref(),
                         annotational,
+                        decimals,
                     ),
                     points,
+                    angle_points,
                 ));
             }
         }
@@ -1883,7 +2079,7 @@ impl super::Scene {
                 let _ = self.named_parameters.set(&name, &source);
             }
         }
-        for (handle, text, points) in updates {
+        for (handle, text, points, angle_points) in updates {
             let Some(acadrust::EntityType::Dimension(mut dimension)) =
                 self.document.get_entity(handle).cloned()
             else {
@@ -1892,6 +2088,11 @@ impl super::Scene {
             let mut changed = false;
             if let Some((first, second)) = points {
                 if dynamic_dimension_follow_points(&mut dimension, first, second) {
+                    changed = true;
+                }
+            }
+            if let Some(angle_points) = angle_points {
+                if dynamic_dimension_follow_angle(&mut dimension, &angle_points) {
                     changed = true;
                 }
             }
@@ -1995,6 +2196,31 @@ impl super::Scene {
         let _ = self.document.layers.add(layer);
     }
 
+    /// True when an angular constraint drives with the parameter `name`.
+    pub(crate) fn parameter_is_angular(&self, name: &str) -> bool {
+        self.parametric_constraints
+            .iter()
+            .flat_map(|set| set.constraints.iter())
+            .any(|constraint| {
+                matches!(constraint.kind, ConstraintKind::Angle | ConstraintKind::Angle3Point)
+                    && matches!(&constraint.driving_param, Some(DrivingValue::Named(used)) if used == name)
+            })
+    }
+
+    /// A parameter's value as -PARAMETERS prints it: an angle at angular
+    /// precision within one turn, anything else with four decimals.
+    pub(crate) fn parameter_value_text(&self, name: &str) -> String {
+        let Ok(value) = self.named_parameters.resolve(name) else {
+            return "**".to_string();
+        };
+        if self.parameter_is_angular(name) {
+            let decimals = angle_decimals(&self.document, None);
+            format!("{:.decimals$}", normalize_angle_display(value))
+        } else {
+            format!("{value:.4}")
+        }
+    }
+
     /// True for a dynamic dimension of a dimensional constraint (not an
     /// annotational one, which is an ordinary plotted dimension).
     pub(crate) fn is_dynamic_dimension(&self, handle: Handle) -> bool {
@@ -2078,8 +2304,15 @@ impl super::Scene {
             use crate::entities::dim_override as ov;
             let xdata = &dimension.base().common.extended_data;
             let current = ov::real(xdata, ov::DIMSCALE);
-            // The reference draws dynamic dimension text horizontally.
-            let horizontal = ov::int(xdata, ov::DIMTIH) == Some(1) && ov::int(xdata, ov::DIMTOH) == Some(1);
+            // The reference draws dynamic distance text horizontally; an
+            // angle's text keeps its style's alignment.
+            let angular = matches!(
+                dimension,
+                acadrust::entities::Dimension::Angular2Ln(_)
+                    | acadrust::entities::Dimension::Angular3Pt(_)
+            );
+            let horizontal = angular
+                || (ov::int(xdata, ov::DIMTIH) == Some(1) && ov::int(xdata, ov::DIMTOH) == Some(1));
             if current.is_some_and(|value| (value - scale).abs() < 1e-9) && horizontal {
                 continue;
             }

@@ -1630,7 +1630,25 @@ pub enum CmdResult {
         direction: Option<crate::scene::parametric_constraints::ParametricRef>,
         name: String,
         expression: String,
+        /// The user named the parameter (`name=expression`); an existing
+        /// name is then refused.
+        renamed: bool,
         label: &'static str,
+    },
+    /// Adds an angular constraint with its dynamic angular dimension and
+    /// the `angN` parameter that drives it. Two lines: `refs` =
+    /// `[first_line, second_line]`, `points` = both lines' ends; three
+    /// points: `refs` = `[first, vertex, second]`, `points` =
+    /// `[vertex, first, second]`.
+    AddAngularConstraint {
+        refs: Vec<crate::scene::parametric_constraints::ParametricRef>,
+        points: Vec<DVec3>,
+        location: DVec3,
+        /// Which of the four angles the dimension line location picked.
+        sector: u8,
+        name: String,
+        expression: String,
+        renamed: bool,
     },
     /// Aligned's 2Lines: makes `second_line` parallel to `first_line` (whose
     /// ends stay put), then hands the second line's solved ends back through
@@ -1812,6 +1830,8 @@ pub enum CmdResult {
     ReportMeasurement(String),
     /// Print an input error and keep the command active.
     ReportError(String),
+    /// Reports an error and ends the command (`Lines are parallel.`).
+    CancelWithMessage(String),
     /// Print a measurement result, clear the current selection, and keep the command active.
     ReportMeasurementAndDeselect(String),
     /// Clear the current selection and keep the command active at its updated step.
