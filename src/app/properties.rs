@@ -2369,7 +2369,10 @@ impl OpenCADStudio {
                                         Dimension::Angular2Ln(_) | Dimension::Angular3Pt(_),
                                     ) => t!("Angular Dimensional Constraint"),
                                     acadrust::EntityType::Dimension(Dimension::Radius(_)) => {
-                                        t!("Radial Dimension (Dynamic)")
+                                        t!("Radius Dimensional Constraint")
+                                    }
+                                    acadrust::EntityType::Dimension(Dimension::Diameter(_)) => {
+                                        t!("Diameter Dimensional Constraint")
                                     }
                                     _ => t!("Linear Dimensional Constraint"),
                                 }
@@ -2853,13 +2856,6 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                             );
                         }
                     }
-                } else if matches!(
-                    contextual.as_ref(),
-                    acadrust::EntityType::Dimension(acadrust::entities::Dimension::Radius(_))
-                ) && self.tabs[i].scene.is_dynamic_dimension(handle)
-                {
-                    // A dynamic radius shows only its text square.
-                    entity_grips.retain(|grip| grip.id == 2);
                 } else if self.tabs[i].scene.is_dynamic_dimension(handle) {
                     // A dynamic dimension shows the reference's grips: a
                     // triangle at each constraint point aimed at the other
@@ -3712,6 +3708,11 @@ fn set_row(sections: &mut [crate::scene::model::object::PropSection], field: &st
     }
 }
 
+/// Replace a row's value with an arbitrary control (editable field, dropdown,
+/// colour picker …) rather than plain read-only text.
+/// A dimensional constraint's Properties as the reference shows them: the
+/// Constraint rows, then only the text rotation for a dynamic dimension
+/// and the full dimension sections for an annotational one.
 /// A Yes/No list row, as the reference shows on/off object properties.
 fn yes_no_choice(flag: bool) -> crate::scene::model::object::PropValue {
     crate::scene::model::object::PropValue::Choice {
@@ -3720,9 +3721,6 @@ fn yes_no_choice(flag: bool) -> crate::scene::model::object::PropValue {
     }
 }
 
-/// A dimensional constraint's Properties as the reference shows them: the
-/// Constraint rows, then only the text rotation for a dynamic dimension
-/// and the full dimension sections for an annotational one.
 fn dynamic_dimension_sections(
     scene: &crate::scene::Scene,
     handle: Handle,
@@ -3858,8 +3856,6 @@ fn dynamic_dimension_sections(
     result
 }
 
-/// Replace a row's value with an arbitrary control (editable field, dropdown,
-/// colour picker …) rather than plain read-only text.
 fn set_row_value(
     sections: &mut [crate::scene::model::object::PropSection],
     field: &str,

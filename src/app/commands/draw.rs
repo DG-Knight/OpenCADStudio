@@ -1891,22 +1891,32 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(command));
             }
 
-            "DCRADIUS" => {
+            "DCRADIUS" | "DCDIAMETER" => {
                 use crate::modules::parametric::{DimConstraintAxis, DimConstraintCommand};
                 use crate::scene::parametric_constraints::next_radial_parameter_name;
-                // Run on its own it leaves DIMCONSTRAINT's default alone.
-                let name = next_radial_parameter_name(self.tabs[i].scene.named_parameters());
-                // The circle or arc is picked inside the command.
-                self.tabs[i].scene.deselect_all();
-                let command = DimConstraintCommand::new(DimConstraintAxis::Radius, name);
+                let diameter = cmd == "DCDIAMETER";
+                // Run on its own either one leaves DIMCONSTRAINT's default
+                // alone; the Dispatch arm sets it when DIMCONSTRAINT is what
+                // asked for this command.
+                // The reference asks for the circle itself, whatever is
+                // selected, so a pick-first set is left alone.
+                let name = next_radial_parameter_name(
+                    self.tabs[i].scene.named_parameters(),
+                    diameter,
+                );
+                let command = DimConstraintCommand::new(
+                    if diameter {
+                        DimConstraintAxis::Diameter
+                    } else {
+                        DimConstraintAxis::Radius
+                    },
+                    name,
+                );
                 self.command_line.push_info(&command.prompt());
                 self.tabs[i].active_cmd = Some(Box::new(command));
             }
 
-            "DCONSTRAINT" | "DCDIAMETER" => {
-                if cmd == "DCDIAMETER" {
-                    self.dim_constraint_last = "Diameter";
-                }
+            "DCONSTRAINT" => {
                 let handles = self.tabs[i].scene.selected_handles_in_order();
                 if handles.is_empty() {
                     use crate::modules::draw::select::SelectObjectsCommand;
@@ -1924,8 +1934,6 @@ impl OpenCADStudio {
                         "DCHORIZONTAL" => ("DCHORIZONTAL", DistanceMode::X),
                         "DCVERTICAL" => ("DCVERTICAL", DistanceMode::Y),
                         "DCALIGNED" => ("DCALIGNED", DistanceMode::Aligned),
-                        "DCRADIUS" => ("DCRADIUS", DistanceMode::Radius),
-                        "DCDIAMETER" => ("DCDIAMETER", DistanceMode::Diameter),
                         _ => ("DCONSTRAINT", DistanceMode::Auto),
                     };
                     match DistanceConstraintCommand::with_mode(

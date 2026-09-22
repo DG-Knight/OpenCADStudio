@@ -1635,6 +1635,22 @@ pub enum CmdResult {
         renamed: bool,
         label: &'static str,
     },
+    /// Adds a radius or diameter constraint with its dynamic radial
+    /// dimension and the `radN`/`diaN` parameter that drives it.
+    AddRadialConstraint {
+        circle: crate::scene::parametric_constraints::ParametricRef,
+        center: DVec3,
+        radius: f64,
+        /// Where the dimension line was picked; its direction from the
+        /// centre places the dimension.
+        location: DVec3,
+        diameter: bool,
+        name: String,
+        expression: String,
+        /// The user named the parameter (`name=expression`); an existing
+        /// name is then refused.
+        renamed: bool,
+    },
     /// Adds an angular constraint with its dynamic angular dimension and
     /// the `angN` parameter that drives it. Two lines: `refs` =
     /// `[first_line, second_line]`, `points` = both lines' ends; three
@@ -1646,15 +1662,6 @@ pub enum CmdResult {
         location: DVec3,
         /// Which of the four angles the dimension line location picked.
         sector: u8,
-        name: String,
-        expression: String,
-        renamed: bool,
-    },
-    /// Adds a radius constraint on a circle or arc with its dynamic radial
-    /// dimension (text at `location`) and the `radN` parameter that drives it.
-    AddRadialConstraint {
-        circle: crate::scene::parametric_constraints::ParametricRef,
-        location: DVec3,
         name: String,
         expression: String,
         renamed: bool,
