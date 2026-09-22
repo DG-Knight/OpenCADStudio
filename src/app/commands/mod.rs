@@ -43,12 +43,7 @@ impl OpenCADStudio {
     }
 
     pub(super) fn dispatch_command(&mut self, cmd: &str) -> Task<Message> {
-        self.dispatch_command_inner(cmd, false, false)
-    }
-
-    /// Dispatch a command skipping external plugin dispatch to prevent reentrant deadlocks.
-    pub(super) fn dispatch_command_without_plugins(&mut self, cmd: &str) -> Task<Message> {
-        self.dispatch_command_inner(cmd, false, true)
+        self.dispatch_command_inner(cmd, false)
     }
 
     /// Dispatch a verb typed at the interactive command line, falling back to
@@ -60,10 +55,10 @@ impl OpenCADStudio {
     /// callers (ribbon, plugins, headless automation) use `dispatch_command`
     /// and never get silent substitution.
     pub(super) fn dispatch_command_or_suggest(&mut self, cmd: &str) -> Task<Message> {
-        self.dispatch_command_inner(cmd, true, false)
+        self.dispatch_command_inner(cmd, true)
     }
 
-    fn dispatch_command_inner(&mut self, cmd: &str, allow_suggest: bool, skip_plugins: bool) -> Task<Message> {
+    fn dispatch_command_inner(&mut self, cmd: &str, allow_suggest: bool) -> Task<Message> {
         let i = self.active_tab;
         // Expand a command alias ("L" → "LINE") on the leading token before any
         // routing, so every path below (Start-tab gate, plugins, all dispatch
@@ -191,7 +186,7 @@ impl OpenCADStudio {
             return Task::none();
         }
 
-        if !skip_plugins && crate::plugin::try_dispatch(self, i, cmd) {
+        if !self.suppress_plugin_dispatch && crate::plugin::try_dispatch(self, i, cmd) {
             // try_dispatch returns true for both finished commands and interactive
             // commands that it just installed. If no command is now active, the
             // tool was a one-shot and we must turn the ribbon highlight off here —
@@ -230,7 +225,7 @@ impl OpenCADStudio {
             .next()
             {
                 if !top.eq_ignore_ascii_case(cmd) {
-                    return self.dispatch_command_inner(&top, false, skip_plugins);
+                    return self.dispatch_command_inner(&top, false);
                 }
             }
         }
@@ -244,7 +239,7 @@ impl OpenCADStudio {
     /// `Some(task)` for an arm it owns (early-returning or falling through to
     /// `finish_dispatch`), or `None` to defer to the next — equivalent to one
     /// sequential `match` over all arms.
-    pub(crate) fn dispatch_families(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
+    fn dispatch_families(&mut self, cmd: &str, i: usize) -> Option<Task<Message>> {
         if let Some(t) = self.dispatch_fileops(cmd, i) {
             return Some(t);
         }

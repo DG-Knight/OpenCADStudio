@@ -429,12 +429,20 @@ impl OpenCADStudio {
     /// through, so the routing from input → `on_*` method → `apply_cmd_result`
     /// lives in exactly one place. No-op when no command is active.
     pub(super) fn feed_command(&mut self, input: StepInput) -> Task<Message> {
+        self.feed_command_consumed(input).0
+    }
+
+    /// `feed_command`, also reporting whether the step actually took the input.
+    /// Only a `Text` token can come back unclaimed (`on_text_input` returning
+    /// `None`), which is what lets the caller read it as something else — a
+    /// typed distance, say — instead of guessing beforehand.
+    pub(super) fn feed_command_consumed(&mut self, input: StepInput) -> (Task<Message>, bool) {
         // Selection keywords (P / PREVIOUS, L / LAST) consume the token
         // before it reaches the command (#426).
         if let StepInput::Text(s) = &input {
             let kw_input = s.clone();
             if let Some(task) = self.try_selection_keyword(&kw_input) {
-                return task;
+                return (task, true);
             }
         }
         let i = self.active_tab;
@@ -450,14 +458,14 @@ impl OpenCADStudio {
         };
         if let StepInput::Point(point) = &input {
             if !self.command_point_allowed(i, *point) {
-                return Task::none();
+                return (Task::none(), true);
             }
             // Typed / dynamic-input / headless points carry no snap, but the
             // accepted-snap list must stay index-parallel with the points the
             // command collects. Interactive picks record themselves in
             // the click handler and never reach here.
             if !self.record_accepted_snap(i, None, None, *point) {
-                return Task::none();
+                return (Task::none(), true);
             }
         }
         if default_start {
@@ -473,7 +481,7 @@ impl OpenCADStudio {
         }
         if let StepInput::EntityPick(handle, point) = &input {
             if !self.dimension_acquisition_allowed(i, None) {
-                return Task::none();
+                return (Task::none(), true);
             }
             let solid_pick = matches!(
                 self.tabs[i].scene.document.get_entity(*handle),
@@ -555,7 +563,7 @@ impl OpenCADStudio {
         let is_escape = matches!(&input, StepInput::Escape);
         let result: Option<CmdResult> = {
             let Some(cmd) = self.tabs[i].active_cmd.as_mut() else {
-                return Task::none();
+                return (Task::none(), false);
             };
             cmd.set_ctrl(ctrl);
             cmd.set_shift(shift);
@@ -579,8 +587,8 @@ impl OpenCADStudio {
             self.tabs[i].pending_pause_tokens = None;
         }
         match result {
-            Some(r) => self.apply_cmd_result(r),
-            None => Task::none(),
+            Some(r) => (self.apply_cmd_result(r), true),
+            None => (Task::none(), false),
         }
     }
 
@@ -629,6 +637,14 @@ impl OpenCADStudio {
     /// terminated as if Enter were pressed. Shared by the GUI command line and
     /// the headless automation feeder so both behave identically.
     pub(super) fn run_command_line(&mut self, cmd: &str) -> Task<Message> {
+        self.run_command_line_streaming(cmd, true)
+    }
+
+    /// `run_command_line`, with the trailing Enter left off when `finish` is
+    /// false: the line is one instalment and the tool stays at its next prompt
+    /// for the following one. Only a plugin streaming a command feeds it that
+    /// way; the command line and the automation feeder always finish.
+    pub(super) fn run_command_line_streaming(&mut self, cmd: &str, finish: bool) -> Task<Message> {
         let i = self.active_tab;
         self.command_line.unconsumed.clear();
         let tokens: Vec<&str> = cmd.split_whitespace().collect();
@@ -640,9 +656,9 @@ impl OpenCADStudio {
         // dispatch first. A built-in interactive tool matches only its bare name
         // (`LINE`), so the full line is not a plugin command and falls through to
         // the first-word + fed-tokens path below. (#162)
-        if crate::plugin::try_dispatch(self, i, cmd) {
+        if !self.suppress_plugin_dispatch && crate::plugin::try_dispatch(self, i, cmd) {
             let toks: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
-            return self.finish_active_command(&toks);
+            return self.finish_active_command(&toks, finish);
         }
         if tokens[0].eq_ignore_ascii_case("BACKGROUND")
             || tokens[0].eq_ignore_ascii_case("COLORSCHEME")
@@ -655,7 +671,7 @@ impl OpenCADStudio {
             return self.dispatch_command(cmd);
         }
         let toks: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
-        let finish_task = self.finish_active_command(&toks);
+        let finish_task = self.finish_active_command(&toks, finish);
         Task::batch([start_task, finish_task])
     }
 
@@ -674,7 +690,7 @@ impl OpenCADStudio {
     ///   silently dropped and `TEXT 0,0 5 0 hi` created nothing at all.
     /// * Anything still left over was never claimed by any prompt; it is
     ///   recorded in [`CommandLine::unconsumed`] instead of vanishing.
-    pub(super) fn finish_active_command(&mut self, tokens: &[String]) -> Task<Message> {
+    pub(super) fn finish_active_command(&mut self, tokens: &[String], finish: bool) -> Task<Message> {
         let i = self.active_tab;
         if self.tabs[i].active_cmd.is_none() {
             return Task::none();
@@ -694,7 +710,12 @@ impl OpenCADStudio {
             }
             let trimmed = tok.trim();
             if trimmed.eq_ignore_ascii_case("PAUSE") || trimmed == "\\" {
-                let remainder: Vec<String> = tokens[1 + idx + 1..].to_vec();
+                let mut remainder: Vec<String> = tokens[1 + idx + 1..].to_vec();
+                // The line still ends with an Enter; it waits behind the pause
+                // instead of being dropped with it.
+                if finish {
+                    remainder.push("ENTER".to_string());
+                }
                 self.tabs[i].pending_pause_tokens = Some(remainder);
                 consumed = tokens.len();
                 paused = true;
@@ -730,7 +751,7 @@ impl OpenCADStudio {
         if consumed < tokens.len() {
             self.command_line.unconsumed = tokens[consumed..].to_vec();
         }
-        if !paused {
+        if !paused && finish {
             tasks.push(self.feed_command(StepInput::Enter));
         }
         Task::batch(tasks)
@@ -981,17 +1002,19 @@ impl OpenCADStudio {
             self.push_ucs_to_cmd(i);
             return self.feed_command(StepInput::Point(wcs));
         } else {
-            let consumed = self.tabs[i]
-                .active_cmd
-                .as_mut()
-                .and_then(|c| c.on_text_input(token));
-            if let Some(r) = consumed {
-                return self.apply_cmd_result(r);
-            }
-            if let Some(task) = self.try_direct_distance_entry(token) {
+            // The step reads the token first: at a great many point prompts a
+            // bare number is the step's own value, not a distance — ROTATE's
+            // angle, SCALE's factor, CIRCLE's radius. Only a token no step
+            // claims becomes direct distance entry, measured along the cursor
+            // direction from the command's anchor.
+            let (task, consumed) = self.feed_command_consumed(StepInput::Text(token.to_string()));
+            if consumed {
                 return task;
             }
-            return self.feed_command(StepInput::Text(token.to_string()));
+            if let Some(distance) = self.try_direct_distance_entry(token) {
+                return distance;
+            }
+            return task;
         }
     }
 
@@ -5958,7 +5981,7 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
-                dispatched = self.dispatch_command_without_plugins(&cmd);
+                dispatched = self.dispatch_command(&cmd);
             }
             CmdResult::EditTableCell { handle, point } => {
                 // TABLEDIT's pick: end the pick phase and hand (table, point)

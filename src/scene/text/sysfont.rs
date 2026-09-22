@@ -179,7 +179,10 @@ pub fn family_for_reference(reference: &str) -> Option<String> {
     if reference.is_empty() {
         return None;
     }
-    canonical_family_name(reference).or_else(|| family_for_file(reference))
+    // The file name is exact; the family lookup ends in a prefix/subset match
+    // that a longer file name loses to (`ISOCPEUI.TTF` would take `ISOCP`), so
+    // an installed face file answers first.
+    family_for_file(reference).or_else(|| canonical_family_name(reference))
 }
 
 /// Whether `family` matches an installed system font (case-insensitive via

@@ -623,6 +623,11 @@ pub(super) struct OpenCADStudio {
     pub constraint_form_annotational: bool,
     /// The dimensional constraint DIMCONSTRAINT offers by default: the last one used.
     pub dim_constraint_last: &'static str,
+    /// Set while a plugin drives the command line (`HostApi::execute_command`).
+    /// Dispatching a plugin command from there would call back into the plugin
+    /// that is still blocked waiting for this request, so plugin dispatch is
+    /// skipped for the length of the call.
+    pub(crate) suppress_plugin_dispatch: bool,
     pub constraint_bar_mode: i16,
     /// Minutes between autosaves to a `.sv$` recovery file (SAVETIME command);
     /// 0 disables autosave.
@@ -3964,6 +3969,7 @@ impl OpenCADStudio {
             constraint_bar_display: 3,
             constraint_form_annotational: false,
             dim_constraint_last: "Aligned",
+            suppress_plugin_dispatch: false,
             constraint_bar_mode: 4095,
             savetime_min: 10,
             default_bg_color: None,

@@ -420,62 +420,28 @@ impl<'a> HostSession<'a> {
             return false;
         }
 
-        // 4. Command execution
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.is_empty() {
-            return false;
-        }
-
+        // 4. Command execution. The command line's own driver owns this: it
+        //    resolves the alias, tears down whatever was running, dispatches an
+        //    inline-argument line as a whole (`CLAYER TEST`, `UCS ORIGIN 0,0`),
+        //    and otherwise starts the tool and feeds it the rest of the tokens,
+        //    PAUSE included. Leaving that here rather than repeating it keeps a
+        //    scripted line and a typed one on the same path.
         let tab = self.tab;
-        let is_new_cmd = self.app.tabs[tab].active_cmd.is_none();
-        if is_new_cmd {
-            // Check if the complete command string is handled directly by command families
-            // (e.g. "CLAYER TEST", "ZOOM EXTENTS", "COLOR RED", "VSCURRENT FLATSHADED", etc.) without needing token-by-token feeding
-            let full_resolved = self.app.resolve_alias(trimmed);
-            let full_effective = full_resolved.as_deref().unwrap_or(trimmed);
-            if let Some(task) = self.app.dispatch_families(full_effective, tab) {
-                let _ = self.app.drive_headless_task(task);
-                self.app.command_line.record_recent(full_effective);
-                self.app.refresh_layer_panel();
-                self.publish_document_view();
-                return true;
+        self.app.suppress_plugin_dispatch = true;
+        let task = if self.app.tabs[tab].active_cmd.is_some() {
+            // A running command owns these tokens: they answer its prompts.
+            let mut queue: Vec<String> =
+                trimmed.split_whitespace().map(str::to_string).collect();
+            if has_newline {
+                queue.push("ENTER".to_string());
             }
-
-            let cmd_name = parts[0];
-            let resolved = self.app.resolve_alias(cmd_name);
-            let effective = resolved.as_deref().unwrap_or(cmd_name);
-            let task = self.app.dispatch_command_without_plugins(effective);
-            let _ = self.app.drive_headless_task(task);
-        }
-
-        let mut paused = false;
-        let start_idx = if is_new_cmd { 1 } else { 0 };
-        for (idx, &part) in parts.iter().skip(start_idx).enumerate() {
-            if self.app.tabs[tab].active_cmd.is_none() {
-                break;
-            }
-            if part.eq_ignore_ascii_case("PAUSE") || part == "\\" {
-                let mut remainder: Vec<String> =
-                    parts[start_idx + idx + 1..].iter().map(|s| s.to_string()).collect();
-                if has_newline {
-                    remainder.push("ENTER".to_string());
-                }
-                self.app.tabs[tab].pending_pause_tokens = Some(remainder);
-                paused = true;
-                break;
-            }
-            let task = if part.eq_ignore_ascii_case("ENTER") || part.eq_ignore_ascii_case("RETURN") {
-                self.app.feed_command(crate::command::StepInput::Enter)
-            } else {
-                self.app.feed_active_cmd(part)
-            };
-            let _ = self.app.drive_headless_task(task);
-        }
-
-        if !paused && has_newline && self.app.tabs[tab].active_cmd.is_some() {
-            let task = self.app.feed_command(crate::command::StepInput::Enter);
-            let _ = self.app.drive_headless_task(task);
-        }
+            self.app.tabs[tab].pending_pause_tokens = Some(queue);
+            self.app.drain_pending_pause_tokens(tab)
+        } else {
+            self.app.run_command_line_streaming(trimmed, has_newline)
+        };
+        let _ = self.app.drive_headless_task(task);
+        self.app.suppress_plugin_dispatch = false;
 
         self.app.refresh_layer_panel();
         self.publish_document_view();

@@ -876,28 +876,29 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
     /// direction in the active UCS plane.
     pub(in crate::app) fn try_direct_distance_entry(&mut self, text: &str) -> Option<Task<Message>> {
         let i = self.active_tab;
-        let not_entity_pick = !self.tabs[i]
+        if self.tabs[i]
             .active_cmd
             .as_ref()
-            .map(|c| c.needs_entity_pick())
-            .unwrap_or(false);
-        if !not_entity_pick {
+            .is_some_and(|c| c.needs_entity_pick())
+        {
             return None;
         }
-
-        let anchor = self.tabs[i]
-            .active_cmd
-            .as_ref()
-            .and_then(|c| c.resolved_anchor())
-            .or(self.tabs[i].dyn_anchor)
-            .or(self.last_point)?;
 
         let dist = crate::entities::common::parse_length(text.trim())
             .or_else(|| crate::app::expr_eval::eval_number(text.trim()))?;
 
+        // A tracking ray carries its own base, so it needs no anchor: that is
+        // how OTRACK and Extension accepted a bare distance for the *first*
+        // point of a command, before any anchor exists.
         let pt = if let Some((base, dir)) = self.active_distance_ray(i) {
             base + dir * dist
         } else {
+            let anchor = self.tabs[i]
+                .active_cmd
+                .as_ref()
+                .and_then(|c| c.resolved_anchor())
+                .or(self.tabs[i].dyn_anchor)
+                .or(self.last_point)?;
             let w = self.tabs[i].last_cursor_world;
             let xf = self.tabs[i].ucs_xform();
             let d_ucs = xf.vec_to_ucs(w - anchor);
