@@ -778,25 +778,9 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
 
                     // OTRACK and Extension both allow a bare scalar to act as a
                     // distance measured along the active reference ray.
-                    if let Some((base, dir)) = self.active_distance_ray(i) {
-                        if let Some(dist) = crate::app::expr_eval::eval_number(text.trim()) {
-                            let pt = base + dir * dist;
-                            if !self.command_point_allowed(i, pt) {
-                                return Task::none();
-                            }
-                            self.last_point = Some(pt);
-                            self.dyn_user_reshaped = false;
-                            self.dyn_coord_absolute = false;
-                            self.sync_dyn_fields();
-                            self.reset_tracking_after_point();
-                            self.push_ucs_to_cmd(i);
-                            let result = self.tabs[i].active_cmd.as_mut().map(|c| c.on_point(pt));
-                            if let Some(r) = result {
-                                let task = self.apply_cmd_result(r);
-                                self.refresh_active_cmd_preview(i);
-                                return task;
-                            }
-                            return Task::none();
+                    if self.active_distance_ray(i).is_some() {
+                        if let Some(task) = self.try_direct_distance_entry(&text) {
+                            return task;
                         }
                     }
 
@@ -861,6 +845,13 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                         return self.apply_cmd_result(result);
                     }
 
+                    // Direct distance entry: if an anchor exists and a scalar distance was entered,
+                    // project along the active reference ray (if any) or the current cursor direction
+                    // in the active UCS plane.
+                    if let Some(task) = self.try_direct_distance_entry(&text) {
+                        return task;
+                    }
+
                     self.command_line.push_error(crate::tf!(
                         "Expected Cartesian, polar, cylindrical or spherical coordinates, or a number; got: \"{text}\""
                     ).as_ref());
@@ -877,6 +868,66 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
                     return self.dispatch_command(&cmd);
                 }
                 Task::none()
+    }
+
+    /// Attempt direct distance entry: if an active command is expecting a point,
+    /// has an established anchor, and `text` parses as a scalar distance,
+    /// project along the active reference ray (if any) or the current cursor
+    /// direction in the active UCS plane.
+    pub(in crate::app) fn try_direct_distance_entry(&mut self, text: &str) -> Option<Task<Message>> {
+        let i = self.active_tab;
+        let not_entity_pick = !self.tabs[i]
+            .active_cmd
+            .as_ref()
+            .map(|c| c.needs_entity_pick())
+            .unwrap_or(false);
+        if !not_entity_pick {
+            return None;
+        }
+
+        let anchor = self.tabs[i]
+            .active_cmd
+            .as_ref()
+            .and_then(|c| c.resolved_anchor())
+            .or(self.tabs[i].dyn_anchor)
+            .or(self.last_point)?;
+
+        let dist = crate::entities::common::parse_length(text.trim())
+            .or_else(|| crate::app::expr_eval::eval_number(text.trim()))?;
+
+        let pt = if let Some((base, dir)) = self.active_distance_ray(i) {
+            base + dir * dist
+        } else {
+            let w = self.tabs[i].last_cursor_world;
+            let xf = self.tabs[i].ucs_xform();
+            let d_ucs = xf.vec_to_ucs(w - anchor);
+            let dx = d_ucs.x;
+            let dy = d_ucs.y;
+            let dir_ucs = if (dx * dx + dy * dy) > 1e-12 {
+                glam::DVec3::new(dx, dy, 0.0).normalize()
+            } else if d_ucs.length_squared() > 1e-12 {
+                d_ucs.normalize()
+            } else {
+                glam::DVec3::X
+            };
+            anchor + xf.vec_to_wcs(dir_ucs * dist)
+        };
+
+        if !self.command_point_allowed(i, pt) {
+            return Some(Task::none());
+        }
+
+        self.last_point = Some(pt);
+        self.dyn_user_reshaped = false;
+        self.dyn_coord_absolute = false;
+        self.sync_dyn_fields();
+        self.reset_tracking_after_point();
+        self.push_ucs_to_cmd(i);
+
+        let result = self.tabs[i].active_cmd.as_mut().map(|c| c.on_point(pt))?;
+        let task = self.apply_cmd_result(result);
+        self.refresh_active_cmd_preview(i);
+        Some(task)
     }
 
     /// The active command's current step collects free-form prose from the
