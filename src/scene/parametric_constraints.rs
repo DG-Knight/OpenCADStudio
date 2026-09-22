@@ -353,24 +353,36 @@ pub(crate) fn equal_size_follower(
     Some(entity)
 }
 
+/// The first free `<prefix>1`, `<prefix>2`, … name a new constraint takes.
+fn next_prefixed_parameter_name(
+    table: &super::named_parameters::ParameterTable,
+    prefix: &str,
+) -> String {
+    (1..)
+        .map(|n| format!("{prefix}{n}"))
+        .find(|name| !table.contains(name))
+        .unwrap_or_else(|| format!("{prefix}1"))
+}
+
 /// The first free `d1`, `d2`, … name a new dimensional constraint takes.
 pub(crate) fn next_dimensional_parameter_name(
     table: &super::named_parameters::ParameterTable,
 ) -> String {
-    (1..)
-        .map(|n| format!("d{n}"))
-        .find(|name| !table.contains(name))
-        .unwrap_or_else(|| "d1".to_string())
+    next_prefixed_parameter_name(table, "d")
 }
 
 /// The first free `ang1`, `ang2`, … name a new angular constraint takes.
 pub(crate) fn next_angular_parameter_name(
     table: &super::named_parameters::ParameterTable,
 ) -> String {
-    (1..)
-        .map(|n| format!("ang{n}"))
-        .find(|name| !table.contains(name))
-        .unwrap_or_else(|| "ang1".to_string())
+    next_prefixed_parameter_name(table, "ang")
+}
+
+/// The first free `rad1`, `rad2`, … name a new radius constraint takes.
+pub(crate) fn next_radial_parameter_name(
+    table: &super::named_parameters::ParameterTable,
+) -> String {
+    next_prefixed_parameter_name(table, "rad")
 }
 
 /// An angle as the reference displays it: a negative or over-full value is
@@ -565,6 +577,52 @@ fn dynamic_dimension_follow_points(
     true
 }
 
+/// A circle's or arc's center and radius.
+fn radial_geometry(entity: &acadrust::EntityType) -> Option<(Vector3, f64)> {
+    match entity {
+        acadrust::EntityType::Circle(circle) => Some((circle.center_wcs(), circle.radius)),
+        acadrust::EntityType::Arc(arc) => Some((arc.center_wcs(), arc.radius)),
+        _ => None,
+    }
+}
+
+/// Moves a dynamic radial dimension onto its circle's current center and
+/// radius: the dimension line keeps its direction and the text keeps its
+/// distance beyond the circle, as in the reference; true when it moved.
+fn dynamic_dimension_follow_radius(
+    dimension: &mut acadrust::entities::Dimension,
+    center: Vector3,
+    radius: f64,
+) -> bool {
+    let acadrust::entities::Dimension::Radius(radial) = dimension else {
+        return false;
+    };
+    let to_dvec = |p: Vector3| glam::DVec3::new(p.x, p.y, p.z);
+    let to_vec = |p: glam::DVec3| Vector3::new(p.x, p.y, p.z);
+    let old_center = to_dvec(radial.angle_vertex);
+    let old_radius = (to_dvec(radial.definition_point) - old_center).length();
+    let center = to_dvec(center);
+    if (old_center - center).length_squared() < 1.0e-16 && (old_radius - radius).abs() < 1.0e-9 {
+        return false;
+    }
+    let toward_text = to_dvec(radial.base.text_middle_point) - old_center;
+    let direction = toward_text
+        .try_normalize()
+        .or_else(|| (to_dvec(radial.definition_point) - old_center).try_normalize())
+        .unwrap_or(glam::DVec3::X);
+    let beyond = toward_text.length() - old_radius;
+    let chord = center + direction * radius;
+    let text = center + direction * (radius + beyond);
+    radial.angle_vertex = to_vec(center);
+    radial.definition_point = to_vec(chord);
+    radial.base.definition_point = to_vec(chord);
+    radial.base.text_middle_point = to_vec(text);
+    radial.base.insertion_point = to_vec(text);
+    radial.leader_length = (text - chord).length();
+    radial.base.actual_measurement = radius;
+    true
+}
+
 /// The end points of a line reference: a line's two ends, or the picked
 /// polyline segment's vertices.
 fn line_ends(entity: &acadrust::EntityType, reference: ParametricRef) -> Option<(Vector3, Vector3)> {
@@ -673,6 +731,11 @@ pub(crate) fn dimensional_anchor_refs(
     let Some(&first) = refs.first() else {
         return Vec::new();
     };
+    // A whole circle or arc (a radius or diameter): its center stays and the
+    // value resizes it.
+    if refs.len() == 1 && first.marker.is_none() {
+        return vec![ParametricRef::center(first.entity)];
+    }
     // Three point references: a three-point angle `[first, vertex, second]`.
     if refs.len() == 3
         && refs
@@ -1983,6 +2046,7 @@ impl super::Scene {
             String,
             Option<(Vector3, Vector3)>,
             Option<Vec<Vector3>>,
+            Option<(Vector3, f64)>,
         )> = Vec::new();
         // A reference (driven) constraint's parameter follows the geometry.
         let mut followed: Vec<(String, f64)> = Vec::new();
@@ -2010,7 +2074,15 @@ impl super::Scene {
                     constraint.kind,
                     ConstraintKind::Angle | ConstraintKind::Angle3Point
                 );
-                let measured = points.filter(|_| !angular).map(|(first, second)| {
+                // A radius: the circle's or arc's center and radius now.
+                let radial = (constraint.kind == ConstraintKind::Radius)
+                    .then(|| {
+                        let reference = constraint.refs.first()?;
+                        radial_geometry(self.document.get_entity(reference.entity)?)
+                    })
+                    .flatten();
+                let measured = radial.map(|(_, radius)| radius);
+                let measured = measured.or(points.filter(|_| !angular).map(|(first, second)| {
                     let delta = second - first;
                     let axis = match self.document.get_entity(*dimension) {
                         Some(acadrust::EntityType::Dimension(
@@ -2026,7 +2098,7 @@ impl super::Scene {
                         }
                         _ => delta.length(),
                     }
-                });
+                }));
                 let (name, value, source) = match &constraint.driving_param {
                     Some(DrivingValue::Named(name)) => {
                         let value = match (reference, measured) {
@@ -2070,6 +2142,7 @@ impl super::Scene {
                     ),
                     points,
                     angle_points,
+                    radial,
                 ));
             }
         }
@@ -2079,7 +2152,7 @@ impl super::Scene {
                 let _ = self.named_parameters.set(&name, &source);
             }
         }
-        for (handle, text, points, angle_points) in updates {
+        for (handle, text, points, angle_points, radial) in updates {
             let Some(acadrust::EntityType::Dimension(mut dimension)) =
                 self.document.get_entity(handle).cloned()
             else {
@@ -2093,6 +2166,11 @@ impl super::Scene {
             }
             if let Some(angle_points) = angle_points {
                 if dynamic_dimension_follow_angle(&mut dimension, &angle_points) {
+                    changed = true;
+                }
+            }
+            if let Some((center, radius)) = radial {
+                if dynamic_dimension_follow_radius(&mut dimension, center, radius) {
                     changed = true;
                 }
             }

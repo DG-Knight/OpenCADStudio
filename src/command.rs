@@ -1650,6 +1650,15 @@ pub enum CmdResult {
         expression: String,
         renamed: bool,
     },
+    /// Adds a radius constraint on a circle or arc with its dynamic radial
+    /// dimension (text at `location`) and the `radN` parameter that drives it.
+    AddRadialConstraint {
+        circle: crate::scene::parametric_constraints::ParametricRef,
+        location: DVec3,
+        name: String,
+        expression: String,
+        renamed: bool,
+    },
     /// Aligned's 2Lines: makes `second_line` parallel to `first_line` (whose
     /// ends stay put), then hands the second line's solved ends back through
     /// `CadCommand::accept_parallel_line`.

@@ -1134,7 +1134,11 @@ impl Grippable for Dimension {
         // of the world origin, so it stays on the visible text and grabbable.
         let text = {
             let p = self.base().text_middle_point;
-            if p.x * p.x + p.y * p.y + p.z * p.z > 1e-16 {
+            // A dynamic radius constraint draws its text at mid-radius, not
+            // at the stored point; its grip sits on the drawn text.
+            let drawn_elsewhere =
+                matches!(self, Dimension::Radius(_)) && dynamic_constraint_dimension(self);
+            if p.x * p.x + p.y * p.y + p.z * p.z > 1e-16 && !drawn_elsewhere {
                 dv3(&p)
             } else {
                 dv3(&dimension_text_pos_f64(self, None, 2.5, 1.0))
@@ -4780,7 +4784,12 @@ fn dimension_geometry(
             // to the centre. Text outside: only a leader from the arc point to
             // the text, unless DIMTOFL asks for the inside line as well.
             if !jogged && !suppress.dim2 && (!text_is_outside || params.dimtofl) {
-                add_segment(&mut g.dim_lines, center, point);
+                if dynamic_constraint_dimension(dim) {
+                    // The line passes behind the mid-radius text.
+                    add_segment_with_text_break(&mut g.dim_lines, center, point, params.text_break);
+                } else {
+                    add_segment(&mut g.dim_lines, center, point);
+                }
             }
             if text_is_outside && !suppress.dim2 {
                 append_radial_leader(&mut g, point, text, &params);
@@ -7542,6 +7551,15 @@ fn stored_text_point(dim: &Dimension) -> Option<Vector3> {
     (p.x * p.x + p.y * p.y + p.z * p.z > 1e-16).then_some(p)
 }
 
+/// A dimensional constraint's dynamic dimension: the reference keeps it on
+/// its own hidden layer and draws it by its own rules.
+fn dynamic_constraint_dimension(dim: &Dimension) -> bool {
+    dim.base()
+        .common
+        .layer
+        .eq_ignore_ascii_case(crate::scene::parametric_constraints::DYNAMIC_DIMENSION_LAYER)
+}
+
 /// The point on the circle a radial leader leaves from: the arc point of a
 /// radius, or whichever end of a diameter's chord is nearer the text.
 fn radial_leader_tip(dim: &Dimension, text: Vector3) -> Vector3 {
@@ -7598,6 +7616,12 @@ fn dimension_text_pos_f64(
 
     if let Some(point) = stored_text_point(dim) {
         return match dim {
+            // A dynamic radius constraint draws its text at mid-radius on the
+            // dimension line, whatever text position the file stores (the
+            // picked location), as the reference does.
+            Dimension::Radius(d) if dynamic_constraint_dimension(dim) => {
+                (d.angle_vertex + d.definition_point) * 0.5
+            }
             // DIMTMOVE 1 stores where the leader's hook starts: one arrow of
             // hook, a gap, then the text, all running away from the arc.
             // Measured on 39 such dimensions the stored point sits 2.4 text

@@ -1891,10 +1891,20 @@ impl OpenCADStudio {
                 self.tabs[i].active_cmd = Some(Box::new(command));
             }
 
-            "DCONSTRAINT" | "DCRADIUS" | "DCDIAMETER" => {
-                if cmd == "DCRADIUS" {
-                    self.dim_constraint_last = "Radius";
-                } else if cmd == "DCDIAMETER" {
+            "DCRADIUS" => {
+                use crate::modules::parametric::{DimConstraintAxis, DimConstraintCommand};
+                use crate::scene::parametric_constraints::next_radial_parameter_name;
+                // Run on its own it leaves DIMCONSTRAINT's default alone.
+                let name = next_radial_parameter_name(self.tabs[i].scene.named_parameters());
+                // The circle or arc is picked inside the command.
+                self.tabs[i].scene.deselect_all();
+                let command = DimConstraintCommand::new(DimConstraintAxis::Radius, name);
+                self.command_line.push_info(&command.prompt());
+                self.tabs[i].active_cmd = Some(Box::new(command));
+            }
+
+            "DCONSTRAINT" | "DCDIAMETER" => {
+                if cmd == "DCDIAMETER" {
                     self.dim_constraint_last = "Diameter";
                 }
                 let handles = self.tabs[i].scene.selected_handles_in_order();
