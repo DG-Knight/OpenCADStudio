@@ -929,6 +929,16 @@ impl OpenCADStudio {
             self.push_ucs_to_cmd(i);
             return self.feed_command(StepInput::Point(wcs));
         } else {
+            let consumed = self.tabs[i]
+                .active_cmd
+                .as_mut()
+                .and_then(|c| c.on_text_input(token));
+            if let Some(r) = consumed {
+                return self.apply_cmd_result(r);
+            }
+            if let Some(task) = self.try_direct_distance_entry(token) {
+                return task;
+            }
             return self.feed_command(StepInput::Text(token.to_string()));
         }
     }

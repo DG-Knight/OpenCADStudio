@@ -940,4 +940,73 @@ mod transparent_tests {
             assert!(app.snapper.snap_enabled);
         });
     }
+
+    #[test]
+    fn test_direct_distance_entry_dyn_off() {
+        with_stack(|| {
+            let mut app = line_app();
+            app.dyn_input = false;
+            assert_eq!(active(&app), Some("LINE"));
+
+            // Point cursor in +X direction from origin
+            app.tabs[0].last_cursor_world = glam::DVec3::new(10.0, 0.0, 0.0);
+
+            // Type "50" into command line and submit
+            app.command_line.input = "50".to_string();
+            let _ = app.on_command_submit();
+
+            // Line segment should be created from (0,0) to (50,0)
+            let lines: Vec<_> = app.tabs[0]
+                .scene
+                .document
+                .entities()
+                .filter_map(|e| match e {
+                    acadrust::EntityType::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lines.len(), 1);
+            assert!((lines[0].start.x - 0.0).abs() < 1e-6 && (lines[0].start.y - 0.0).abs() < 1e-6);
+            assert!((lines[0].end.x - 50.0).abs() < 1e-6 && (lines[0].end.y - 0.0).abs() < 1e-6);
+
+            // Command should still be active for the next line segment
+            assert_eq!(active(&app), Some("LINE"));
+
+            // Point cursor in +Y direction from (50, 0)
+            app.tabs[0].last_cursor_world = glam::DVec3::new(50.0, 20.0, 0.0);
+
+            // Type "25" and submit
+            app.command_line.input = "25".to_string();
+            let _ = app.on_command_submit();
+
+            let lines: Vec<_> = app.tabs[0]
+                .scene
+                .document
+                .entities()
+                .filter_map(|e| match e {
+                    acadrust::EntityType::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lines.len(), 2);
+            assert!((lines[1].start.x - 50.0).abs() < 1e-6 && (lines[1].start.y - 0.0).abs() < 1e-6);
+            assert!((lines[1].end.x - 50.0).abs() < 1e-6 && (lines[1].end.y - 25.0).abs() < 1e-6);
+
+            // Point cursor in -X direction from (50, 25) using feed_active_cmd
+            app.tabs[0].last_cursor_world = glam::DVec3::new(0.0, 25.0, 0.0);
+            let _ = app.feed_active_cmd("50");
+            let lines: Vec<_> = app.tabs[0]
+                .scene
+                .document
+                .entities()
+                .filter_map(|e| match e {
+                    acadrust::EntityType::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lines.len(), 3);
+            assert!((lines[2].start.x - 50.0).abs() < 1e-6 && (lines[2].start.y - 25.0).abs() < 1e-6);
+            assert!((lines[2].end.x - 0.0).abs() < 1e-6 && (lines[2].end.y - 25.0).abs() < 1e-6);
+        });
+    }
 }
