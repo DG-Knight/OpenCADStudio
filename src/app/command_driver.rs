@@ -1838,7 +1838,7 @@ impl OpenCADStudio {
                         entity.common_mut().color = acadrust::types::Color::ByLayer;
                         // The dynamic form's screen-size and horizontal-text
                         // overrides go; the style draws it.
-                        for code in [dov::DIMSCALE, dov::DIMTIH, dov::DIMTOH] {
+                        for code in [dov::DIMSCALE, dov::DIMGAP, dov::DIMTIH, dov::DIMTOH] {
                             dov::set_on_entity(&mut entity, code, None);
                         }
                     } else {

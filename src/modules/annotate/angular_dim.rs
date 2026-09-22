@@ -1205,7 +1205,8 @@ pub(crate) fn angular_two_line_entity(
     dim.definition_point = v3(second_end);
     dim.dimension_arc = v3(arc_point);
     dim.base.definition_point = dim.definition_point;
-    dim.base.text_middle_point = dim.dimension_arc;
+    // No stored text point: the style places the text (DIMTAD) beside the
+    // arc at render time, as the reference draws a dynamic dimension.
     dim.base.insertion_point = dim.dimension_arc;
     dim.base.actual_measurement = dim.measurement_degrees();
     crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);
@@ -1224,7 +1225,7 @@ pub(crate) fn angular_three_point_entity(
     let mut dim = DimensionAngular3Pt::new(v3(vertex), v3(first), v3(second));
     dim.definition_point = v3(arc_point);
     dim.base.definition_point = dim.definition_point;
-    dim.base.text_middle_point = dim.definition_point;
+    dim.base.text_middle_point = Vector3::new(0.0, 0.0, 0.0);
     dim.base.insertion_point = dim.definition_point;
     dim.base.actual_measurement = dim.measurement_degrees();
     crate::entities::dimension::set_dimension_text_override(&mut dim.base, text);

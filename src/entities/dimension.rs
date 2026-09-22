@@ -4749,14 +4749,14 @@ fn dimension_geometry(
             let first = lv(d.first_point);
             let second = lv(d.second_point);
             let arc_point = lv(d.definition_point);
-            let explicit_sweep = two_line_angle_frame(
-                vertex,
-                first,
-                vertex,
-                second,
-                arc_point,
-            )
-            .map(|(_, start, end)| (start, end));
+            // The sweep starts at whichever ray the arc point says; the
+            // extension lines swap with it, or they would cross the angle.
+            let (first, second, explicit_sweep) =
+                match three_point_frame(vertex, first, second, arc_point) {
+                    Some((start, end, true)) => (second, first, Some((start, end))),
+                    Some((start, end, false)) => (first, second, Some((start, end))),
+                    None => (first, second, None),
+                };
             append_angular_dimension(
                 &mut g,
                 vertex,
@@ -5398,6 +5398,35 @@ fn two_line_angle_frame(
     Some((vertex, start, end))
 }
 
+/// The sweep of a three-point angular dimension: counter-clockwise from the
+/// first ray to the second when the arc point lies in that sweep, otherwise
+/// the other way round (`swapped`). Rays need no crossing, so a straight
+/// angle draws, and a reflex one is kept as picked.
+fn three_point_frame(
+    vertex: Vec3,
+    first: Vec3,
+    second: Vec3,
+    arc_point: Vec3,
+) -> Option<(f32, f32, bool)> {
+    let angle_of = |d: Vec3| d.y.atan2(d.x);
+    let (r1, r2, at) = (first - vertex, second - vertex, arc_point - vertex);
+    if r1.length_squared() <= 1e-12 || r2.length_squared() <= 1e-12 || at.length_squared() <= 1e-12
+    {
+        return None;
+    }
+    let tau = std::f32::consts::TAU;
+    let (a1, a2) = (angle_of(r1), angle_of(r2));
+    let sweep = (a2 - a1).rem_euclid(tau);
+    if sweep <= 1e-6 {
+        return None;
+    }
+    if (angle_of(at) - a1).rem_euclid(tau) <= sweep {
+        Some((a1, a1 + sweep, false))
+    } else {
+        Some((a2, a2 + (tau - sweep), true))
+    }
+}
+
 pub(crate) fn arc_dimension_angles(dimension: &DimensionArc) -> Option<(f32, f32)> {
     let raw = dimension.arc_end_parameter - dimension.arc_start_parameter;
     let mut sweep = raw.rem_euclid(std::f64::consts::TAU);
@@ -5668,8 +5697,7 @@ fn angular_dimension_frame(dim: &Dimension) -> Option<(Vec3, f32, f32, f32)> {
             let first = vec3_local(value.first_point);
             let second = vec3_local(value.second_point);
             let arc_point = vec3_local(value.definition_point);
-            let (vertex, start, end) =
-                two_line_angle_frame(vertex, first, vertex, second, arc_point)?;
+            let (start, end, _) = three_point_frame(vertex, first, second, arc_point)?;
             (vertex, start, end, arc_point)
         }
         Dimension::Arc(value) => {
