@@ -108,7 +108,7 @@ pub fn format_length(value: f64) -> String {
 
 /// Drop the sign from a formatted number whose digits all rounded to zero. A
 /// rotation leaves coordinates like -1e-15 behind, which read as `-0.0000`.
-fn without_negative_zero(text: String) -> String {
+pub fn without_negative_zero(text: String) -> String {
     match text.strip_prefix('-') {
         Some(rest)
             if rest.chars().any(|c| c.is_ascii_digit())

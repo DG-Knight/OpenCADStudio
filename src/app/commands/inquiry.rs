@@ -2403,4 +2403,39 @@ mod find_replace_command_tests {
             let _ = app.dispatch_inquiry(cmd, i);
         }
     }
+
+    #[test]
+    fn dist_command_respects_drawing_units_precision() {
+        let mut app = OpenCADStudio::new_for_test();
+        let i = app.active_tab;
+        // Simulate changing linear precision to 0 via UNITS dialog apply
+        app.drawing_units = Some(crate::ui::window::drawing_units::State {
+            linear_format: 2,
+            linear_precision: 0,
+            angular_format: 0,
+            angular_precision: 0,
+            clockwise: false,
+            base_angle: "0".into(),
+            insertion_units: 4,
+        });
+        let _ = app.update(Message::DrawingUnitsApply);
+
+        // Run DIST command
+        let _ = app.dispatch_inquiry("DIST", i);
+        assert!(app.tabs[i].active_cmd.is_some());
+
+        // First point
+        let _ = app.tabs[i].active_cmd.as_mut().unwrap().on_point(glam::DVec3::new(0.0, 0.0, 0.0));
+        // Second point
+        let res = app.tabs[i].active_cmd.as_mut().unwrap().on_point(glam::DVec3::new(10.0, 0.0, 0.0));
+        match res {
+            crate::command::CmdResult::Measurement(msg) => {
+                assert!(msg.contains("Distance = 10"), "Expected 'Distance = 10', got: {msg}");
+                assert!(msg.contains("Delta X = 10"), "Expected 'Delta X = 10', got: {msg}");
+                assert!(msg.contains("Delta Y = 0"), "Expected 'Delta Y = 0', got: {msg}");
+                assert!(msg.contains("Delta Z = 0"), "Expected 'Delta Z = 0', got: {msg}");
+            }
+            _ => panic!("Expected CmdResult::Measurement"),
+        }
+    }
 }

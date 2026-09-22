@@ -169,10 +169,13 @@ impl AreaCommand {
         match measurement.perimeter {
             Some(perimeter) => crate::tr!(
                 "area", "result",
-                area = format!("{:.4}", measurement.area),
-                perimeter = format!("{perimeter:.4}"),
+                area = crate::entities::common::format_area(measurement.area),
+                perimeter = crate::entities::common::format_length(perimeter),
             ),
-            None => crate::tr!("area", "result-area-only", area = format!("{:.4}", measurement.area)),
+            None => crate::tr!(
+                "area", "result-area-only",
+                area = crate::entities::common::format_area(measurement.area),
+            ),
         }
     }
 
@@ -180,15 +183,15 @@ impl AreaCommand {
         match measurement.perimeter {
             Some(perimeter) => crate::tr!(
                 "area", "running-result",
-                area = format!("{:.4}", measurement.area),
-                perimeter = format!("{perimeter:.4}"),
-                total_area = format!("{:.4}", self.total_area),
-                total_perimeter = format!("{:.4}", self.total_perimeter),
+                area = crate::entities::common::format_area(measurement.area),
+                perimeter = crate::entities::common::format_length(perimeter),
+                total_area = crate::entities::common::format_area(self.total_area),
+                total_perimeter = crate::entities::common::format_length(self.total_perimeter),
             ),
             None => crate::tr!(
                 "area", "running-result-area-only",
-                area = format!("{:.4}", measurement.area),
-                total_area = format!("{:.4}", self.total_area),
+                area = crate::entities::common::format_area(measurement.area),
+                total_area = crate::entities::common::format_area(self.total_area),
             ),
         }
     }
