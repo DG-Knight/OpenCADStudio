@@ -732,8 +732,15 @@ pub(crate) fn dimensional_anchor_refs(
         return Vec::new();
     };
     // A whole circle or arc (a radius or diameter): its center stays and the
-    // value resizes it.
-    if refs.len() == 1 && first.marker.is_none() {
+    // value resizes it. A single whole reference can also be a line's length,
+    // whose start is what stays, so the entity decides.
+    if refs.len() == 1
+        && first.marker.is_none()
+        && matches!(
+            document.get_entity(first.entity),
+            Some(acadrust::EntityType::Circle(_) | acadrust::EntityType::Arc(_))
+        )
+    {
         return vec![ParametricRef::center(first.entity)];
     }
     // Three point references: a three-point angle `[first, vertex, second]`.

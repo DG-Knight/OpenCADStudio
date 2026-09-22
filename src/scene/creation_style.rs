@@ -36,14 +36,16 @@ fn named_text_style(doc: &CadDocument, name: &str) -> Option<TextStyle> {
 }
 
 /// Adds the reference's ISO-25 dimension style (the current style of its
-/// metric template) when the drawing has none of that name.
-pub fn ensure_iso_dim_style(doc: &mut CadDocument) {
-    if doc
+/// metric template) when the drawing has none of that name, and hands back its
+/// handle: the header records the current dimension style by handle as well as
+/// by name, and a DWG carries only the handle.
+pub fn ensure_iso_dim_style(doc: &mut CadDocument) -> Handle {
+    if let Some(style) = doc
         .dim_styles
         .iter()
-        .any(|style| style.name.eq_ignore_ascii_case("ISO-25"))
+        .find(|style| style.name.eq_ignore_ascii_case("ISO-25"))
     {
-        return;
+        return style.handle;
     }
     let mut style = DimStyle::new("ISO-25");
     style.handle = doc.allocate_handle();
@@ -82,7 +84,9 @@ pub fn ensure_iso_dim_style(doc: &mut CadDocument) {
     style.dimjogang = std::f64::consts::FRAC_PI_2;
     style.dimmzf = 100.0;
     style.dimaltmzf = 100.0;
+    let handle = style.handle;
     let _ = doc.dim_styles.add(style);
+    handle
 }
 
 fn named_dim_style(doc: &CadDocument, name: &str) -> Option<DimStyle> {

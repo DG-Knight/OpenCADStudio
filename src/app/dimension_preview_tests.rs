@@ -63,7 +63,9 @@ fn ordinate_preview_matches_commit() {
     assert!(app.dimension_preview_entities(i, DVec3::ZERO).is_none());
     let _ = app.feed_command(StepInput::Point(DVec3::new(12.5, 40.0, 0.0)));
     let entity = commit_and_compare(&mut app, i, DVec3::new(12.5, 90.0, 0.0));
-    assert_eq!(text(&app, &entity), "12.5");
+    // A new drawing is metric and current on ISO-25, whose decimal separator
+    // is a comma and whose trailing zeros are suppressed.
+    assert_eq!(text(&app, &entity), "12,5");
 }
 
 #[test]

@@ -4152,7 +4152,8 @@ mod tests {
         )));
         let refs = [ParametricRef::point(line, 0), ParametricRef::point(line, 1)];
         // A distance keeps a negative value's sign in the parameter and
-        // measures its magnitude (`d1=-50`); a radius has no such reading.
+        // measures its magnitude (`d1=-50`); a radius reads the same way
+        // (`rad1=-20` is a radius of 20), and only zero leaves no circle.
         assert!(scene
             .validate_parametric_constraint(
                 ConstraintKind::Distance,
@@ -4169,6 +4170,13 @@ mod tests {
                 ConstraintKind::Radius,
                 &[ParametricRef::whole(circle)],
                 Some(&DrivingValue::Literal(-1.0)),
+            )
+            .is_ok());
+        assert!(scene
+            .validate_parametric_constraint(
+                ConstraintKind::Radius,
+                &[ParametricRef::whole(circle)],
+                Some(&DrivingValue::Literal(0.0)),
             )
             .is_err());
         assert!(scene

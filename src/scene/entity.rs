@@ -2733,8 +2733,11 @@ impl Scene {
         // current. Standard stays available for imperial work.
         self.document.header.measurement = 1;
         self.document.header.insertion_units = 4;
-        crate::scene::creation_style::ensure_iso_dim_style(&mut self.document);
+        let iso = crate::scene::creation_style::ensure_iso_dim_style(&mut self.document);
         self.document.header.current_dimstyle_name = "ISO-25".to_string();
+        // The name alone leaves the header pointing at the previous style, and
+        // a DWG writes the current style by handle only.
+        self.document.header.current_dimstyle_handle = iso;
         for obj in self.document.objects.values_mut() {
             if let acadrust::objects::ObjectType::Layout(l) = obj {
                 if l.name != "Model" {
