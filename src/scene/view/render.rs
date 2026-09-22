@@ -1333,10 +1333,6 @@ retained_contributors={}",
             if surface_clip.width == 0 || surface_clip.height == 0 {
                 continue;
             }
-            let vp_full_x = surface_dest.x as i32;
-            let vp_full_y = surface_dest.y as i32;
-            let vp_full_w = surface_dest.width as i32;
-            let vp_full_h = surface_dest.height as i32;
             // `mesh_fill` is false for Wireframe 2D / Wireframe 3D — flip
             // the draw path so meshes use the wireframe pipeline + the
             // pre-built triangle-edge index buffer.
@@ -1352,26 +1348,11 @@ retained_contributors={}",
                 vp.hidden_line,
                 vp.show_3d_edges,
             );
-            // The ViewCube renders directly to the surface at the full
-            // viewport rect. Skip it when the viewport's top-right corner
-            // (where the cube sits) is off-canvas — wgpu's `set_viewport`
-            // rejects negative origins, and a clamped cube would scale
-            // distortedly. The active viewport is normally fully visible.
-            if vp.show_viewcube
-                && surface_dest.width == placement.size.width
-                && surface_dest.height == placement.size.height
-                && vp_full_x >= clip.x as i32
-                && vp_full_y >= clip.y as i32
-                && vp_full_x + vp_full_w <= clip_right as i32
-                && vp_full_y + vp_full_h <= clip_bottom as i32
-            {
-                let vp_clip = Rectangle {
-                    x: vp_full_x as u32,
-                    y: vp_full_y as u32,
-                    width: vp_full_w as u32,
-                    height: vp_full_h as u32,
-                };
-                inner.viewcube.render(encoder, target, vp_clip);
+            // The ViewCube renders directly to the surface in the top-right corner
+            // of the viewport. Skip it only when the top-right corner is off-canvas
+            // or the visible area cannot fit the cube.
+            if vp.show_viewcube && inner.viewcube.should_render(surface_dest, surface_clip, clip) {
+                inner.viewcube.render(encoder, target, surface_clip);
             }
         }
         let render_ms = nav_render_started.elapsed().as_secs_f64() * 1000.0;
@@ -1639,6 +1620,108 @@ mod pixel_placement_tests {
         assert_eq!(first.size, moved.size);
         assert_eq!(first.uv_scale, moved.uv_scale);
         assert_eq!(moved.surface.x, first.surface.x + 20);
+    }
+
+    #[test]
+    fn viewcube_visibility_across_display_scales_and_bounds() {
+        use crate::scene::pipeline::viewcube::viewcube_should_render;
+
+        // Model space viewports across standard UI display scales and fractional layouts
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let window = Size::new((1920.0 * scale) as u32, (1080.0 * scale) as u32);
+            let bounds = Rectangle {
+                x: 0.0,
+                y: 154.5,
+                width: 1920.0,
+                height: 800.3,
+            };
+            let rect = Rectangle {
+                x: bounds.x * scale,
+                y: bounds.y * scale,
+                width: bounds.width * scale,
+                height: bounds.height * scale,
+            };
+            let placement = physical_viewport(rect, window);
+            let clip = Rectangle {
+                x: (bounds.x * scale).round() as u32,
+                y: (bounds.y * scale).round() as u32,
+                width: (bounds.width * scale).round() as u32,
+                height: (bounds.height * scale).round() as u32,
+            };
+            let clip_right = clip.x + clip.width;
+            let clip_bottom = clip.y + clip.height;
+            let left = placement.surface.x.max(clip.x);
+            let top = placement.surface.y.max(clip.y);
+            let surface_clip = Rectangle {
+                x: left,
+                y: top,
+                width: (placement.surface.x + placement.surface.width)
+                    .min(clip_right)
+                    .saturating_sub(left),
+                height: (placement.surface.y + placement.surface.height)
+                    .min(clip_bottom)
+                    .saturating_sub(top),
+            };
+            let viewcube_side = (crate::scene::VIEWCUBE_RENDER_PX.ceil() * scale).ceil() as u32;
+            assert!(
+                viewcube_should_render(placement.surface, surface_clip, &clip, viewcube_side),
+                "ViewCube must be visible in model space at scale {scale}"
+            );
+        }
+
+        // Paper space viewport scrolled off the top edge: should not render
+        let clip: Rectangle<u32> = Rectangle {
+            x: 0,
+            y: 100,
+            width: 1000,
+            height: 800,
+        };
+        let scrolled_off_top: Rectangle<u32> = Rectangle {
+            x: 50,
+            y: 50,
+            width: 400,
+            height: 300,
+        }; // y is above clip.y (100)
+        let left = scrolled_off_top.x.max(clip.x);
+        let top = scrolled_off_top.y.max(clip.y);
+        let surface_clip = Rectangle {
+            x: left,
+            y: top,
+            width: (scrolled_off_top.x + scrolled_off_top.width)
+                .min(clip.x + clip.width)
+                .saturating_sub(left),
+            height: (scrolled_off_top.y + scrolled_off_top.height)
+                .min(clip.y + clip.height)
+                .saturating_sub(top),
+        };
+        assert!(
+            !viewcube_should_render(scrolled_off_top, surface_clip, &clip, 120),
+            "ViewCube must hide when top-right corner is off top of canvas"
+        );
+
+        // Paper space viewport scrolled off the right edge: should not render
+        let scrolled_off_right: Rectangle<u32> = Rectangle {
+            x: 800,
+            y: 150,
+            width: 400,
+            height: 300,
+        }; // x + w (1200) exceeds clip right (1000)
+        let left = scrolled_off_right.x.max(clip.x);
+        let top = scrolled_off_right.y.max(clip.y);
+        let surface_clip = Rectangle {
+            x: left,
+            y: top,
+            width: (scrolled_off_right.x + scrolled_off_right.width)
+                .min(clip.x + clip.width)
+                .saturating_sub(left),
+            height: (scrolled_off_right.y + scrolled_off_right.height)
+                .min(clip.y + clip.height)
+                .saturating_sub(top),
+        };
+        assert!(
+            !viewcube_should_render(scrolled_off_right, surface_clip, &clip, 120),
+            "ViewCube must hide when top-right corner is off right of canvas"
+        );
     }
 
     #[test]
