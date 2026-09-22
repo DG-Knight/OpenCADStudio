@@ -2505,6 +2505,13 @@ impl OpenCADStudio {
                     if name == "PDMODE" || name == "PDSIZE" {
                         self.tabs[i].scene.invalidate_point_dependencies();
                     }
+                    if matches!(name.as_str(), "LUNITS" | "LUPREC" | "AUNITS" | "AUPREC") {
+                        crate::entities::common::set_unit_context(
+                            crate::entities::common::UnitContext::from_header(
+                                &self.tabs[i].scene.document.header,
+                            ),
+                        );
+                    }
                     // ORTHOMODE / OSMODE set the header directly; mirror them into
                     // the live Ortho / running OSNAP so the constraint + status
                     // bar follow and the save-time stamp doesn't revert them.

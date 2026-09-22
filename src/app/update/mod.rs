@@ -283,6 +283,11 @@ impl OpenCADStudio {
     }
 
     pub fn update(&mut self, msg: Message) -> Task<Message> {
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            crate::entities::common::set_unit_context(
+                crate::entities::common::UnitContext::from_header(&tab.scene.document.header),
+            );
+        }
         self.control_observe_user_message(&msg);
         let perf_started = crate::perf::enabled().then(Instant::now);
         let perf_label = perf_message_label(&msg);
@@ -4596,6 +4601,9 @@ impl OpenCADStudio {
                 self.tabs[i].dirty = true;
                 self.tabs[i].scene.bump_geometry();
                 self.refresh_properties();
+                crate::entities::common::set_unit_context(
+                    crate::entities::common::UnitContext::from_header(&self.tabs[i].scene.document.header),
+                );
                 Task::none()
             }
             Message::ToleranceDialogField(field) => {
@@ -4646,6 +4654,9 @@ impl OpenCADStudio {
                 self.tabs[i].dirty = true;
                 self.tabs[i].scene.bump_geometry();
                 self.refresh_properties();
+                crate::entities::common::set_unit_context(
+                    crate::entities::common::UnitContext::from_header(&self.tabs[i].scene.document.header),
+                );
                 let label = crate::modules::draw::units::linear_format_label(code);
                 self.command_line
                     .push_output(crate::tf!("Length format is now {label}.").as_ref());
