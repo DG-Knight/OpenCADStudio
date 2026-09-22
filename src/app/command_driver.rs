@@ -552,6 +552,7 @@ impl OpenCADStudio {
         } else {
             None
         };
+        let is_escape = matches!(&input, StepInput::Escape);
         let result: Option<CmdResult> = {
             let Some(cmd) = self.tabs[i].active_cmd.as_mut() else {
                 return Task::none();
@@ -574,10 +575,50 @@ impl OpenCADStudio {
             self.record_dimension_entity_points(i, None, handle, Vec::new());
         }
         self.sync_dimension_snaps(i);
+        if is_escape {
+            self.tabs[i].pending_pause_tokens = None;
+        }
         match result {
             Some(r) => self.apply_cmd_result(r),
             None => Task::none(),
         }
+    }
+
+    /// Process queued tokens buffered after a PAUSE (or `\`) until the queue is
+    /// empty or another PAUSE / cancellation is encountered.
+    pub(super) fn drain_pending_pause_tokens(&mut self, tab_idx: usize) -> Task<Message> {
+        let Some(mut tokens) = self.tabs[tab_idx].pending_pause_tokens.take() else {
+            return Task::none();
+        };
+        let mut tasks = Vec::new();
+        while !tokens.is_empty() {
+            if self.tabs[tab_idx].active_cmd.is_none() {
+                break;
+            }
+            let token = tokens.remove(0);
+            let trimmed = token.trim();
+            if trimmed.eq_ignore_ascii_case("PAUSE") || trimmed == "\\" {
+                self.tabs[tab_idx].pending_pause_tokens = Some(tokens);
+                break;
+            }
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("ENTER")
+                || trimmed.eq_ignore_ascii_case("RETURN")
+                || trimmed == "\n"
+            {
+                tasks.push(self.feed_command(StepInput::Enter));
+            } else if trimmed.eq_ignore_ascii_case("ESC")
+                || trimmed.eq_ignore_ascii_case("ESCAPE")
+                || trimmed.eq_ignore_ascii_case("CANCEL")
+            {
+                self.tabs[tab_idx].pending_pause_tokens = None;
+                tasks.push(self.feed_command(StepInput::Escape));
+                break;
+            } else {
+                tasks.push(self.feed_active_cmd(&token));
+            }
+        }
+        Task::batch(tasks)
     }
 
     /// Run one whole command-line string. A single word or an inline-argument
@@ -646,8 +687,17 @@ impl OpenCADStudio {
         let mut tasks = Vec::new();
         // First token is the command verb itself; prompts start consuming after it.
         let mut consumed = 1;
-        for tok in &tokens[1..] {
+        let mut paused = false;
+        for (idx, tok) in tokens[1..].iter().enumerate() {
             if self.tabs[i].active_cmd.is_none() {
+                break;
+            }
+            let trimmed = tok.trim();
+            if trimmed.eq_ignore_ascii_case("PAUSE") || trimmed == "\\" {
+                let remainder: Vec<String> = tokens[1 + idx + 1..].to_vec();
+                self.tabs[i].pending_pause_tokens = Some(remainder);
+                consumed = tokens.len();
+                paused = true;
                 break;
             }
             tasks.push(self.feed_active_cmd(tok));
@@ -680,7 +730,9 @@ impl OpenCADStudio {
         if consumed < tokens.len() {
             self.command_line.unconsumed = tokens[consumed..].to_vec();
         }
-        tasks.push(self.feed_command(StepInput::Enter));
+        if !paused {
+            tasks.push(self.feed_command(StepInput::Enter));
+        }
         Task::batch(tasks)
     }
 
@@ -1049,8 +1101,14 @@ impl OpenCADStudio {
             self.tabs[i].scene.set_hover_highlight(None);
             self.command_line.set_step_options(Vec::new());
             self.restore_add_selected_defaults();
+            self.tabs[i].pending_pause_tokens = None;
         }
-        task
+        if self.tabs[i].active_cmd.is_some() && self.tabs[i].pending_pause_tokens.is_some() {
+            let drain_task = self.drain_pending_pause_tokens(i);
+            Task::batch([task, drain_task])
+        } else {
+            task
+        }
     }
 
     /// Resolve the cell under `click` on table `handle` (or any table in the drawing
@@ -5900,7 +5958,7 @@ impl OpenCADStudio {
                 self.tabs[i].snap_result = None;
                 self.tabs[i].scene.clear_preview_wire();
                 self.restore_pre_cmd_tangent();
-                dispatched = self.dispatch_command(&cmd);
+                dispatched = self.dispatch_command_without_plugins(&cmd);
             }
             CmdResult::EditTableCell { handle, point } => {
                 // TABLEDIT's pick: end the pick phase and hand (table, point)

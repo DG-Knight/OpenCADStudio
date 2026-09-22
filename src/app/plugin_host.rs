@@ -370,6 +370,117 @@ impl<'a> HostSession<'a> {
         self.publish_document_view();
         true
     }
+
+    /// Run a command string on the active tab's command line (AutoLISP style).
+    /// Supports AutoCAD-style `PAUSE` (and `\`) input queuing, explicit `ENTER` /
+    /// `RETURN` tokens, and `\n` trailing newline execution.
+    pub fn execute_command(&mut self, cmd: &str) -> bool {
+        let has_newline = cmd.ends_with('\n') || cmd.ends_with('\r');
+        let trimmed = cmd.trim();
+
+        // 1. ESC / CANCEL handling
+        if trimmed.eq_ignore_ascii_case("ESC")
+            || trimmed.eq_ignore_ascii_case("ESCAPE")
+            || trimmed.eq_ignore_ascii_case("CANCEL")
+        {
+            self.app.tabs[self.tab].pending_pause_tokens = None;
+            let _ = self.app.feed_command(crate::command::StepInput::Escape);
+            self.publish_document_view();
+            return true;
+        }
+
+        // 2. If a PAUSE is already pending for this tab:
+        if let Some(ref mut queue) = self.app.tabs[self.tab].pending_pause_tokens {
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("ENTER")
+                || trimmed.eq_ignore_ascii_case("RETURN")
+            {
+                queue.push("ENTER".to_string());
+            } else {
+                for part in trimmed.split_whitespace() {
+                    queue.push(part.to_string());
+                }
+                if has_newline {
+                    queue.push("ENTER".to_string());
+                }
+            }
+            return true;
+        }
+
+        // 3. ENTER / RETURN / empty string handling when no pause is pending
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("ENTER")
+            || trimmed.eq_ignore_ascii_case("RETURN")
+        {
+            if self.app.tabs[self.tab].active_cmd.is_some() {
+                let _ = self.app.feed_command(crate::command::StepInput::Enter);
+                self.publish_document_view();
+                return true;
+            }
+            return false;
+        }
+
+        // 4. Command execution
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            return false;
+        }
+
+        let tab = self.tab;
+        let is_new_cmd = self.app.tabs[tab].active_cmd.is_none();
+        if is_new_cmd {
+            // Check if the complete command string is handled directly by command families
+            // (e.g. "CLAYER TEST", "ZOOM EXTENTS", "COLOR RED", "VSCURRENT FLATSHADED", etc.) without needing token-by-token feeding
+            let full_resolved = self.app.resolve_alias(trimmed);
+            let full_effective = full_resolved.as_deref().unwrap_or(trimmed);
+            if let Some(task) = self.app.dispatch_families(full_effective, tab) {
+                let _ = self.app.drive_headless_task(task);
+                self.app.command_line.record_recent(full_effective);
+                self.app.refresh_layer_panel();
+                self.publish_document_view();
+                return true;
+            }
+
+            let cmd_name = parts[0];
+            let resolved = self.app.resolve_alias(cmd_name);
+            let effective = resolved.as_deref().unwrap_or(cmd_name);
+            let task = self.app.dispatch_command_without_plugins(effective);
+            let _ = self.app.drive_headless_task(task);
+        }
+
+        let mut paused = false;
+        let start_idx = if is_new_cmd { 1 } else { 0 };
+        for (idx, &part) in parts.iter().skip(start_idx).enumerate() {
+            if self.app.tabs[tab].active_cmd.is_none() {
+                break;
+            }
+            if part.eq_ignore_ascii_case("PAUSE") || part == "\\" {
+                let mut remainder: Vec<String> =
+                    parts[start_idx + idx + 1..].iter().map(|s| s.to_string()).collect();
+                if has_newline {
+                    remainder.push("ENTER".to_string());
+                }
+                self.app.tabs[tab].pending_pause_tokens = Some(remainder);
+                paused = true;
+                break;
+            }
+            let task = if part.eq_ignore_ascii_case("ENTER") || part.eq_ignore_ascii_case("RETURN") {
+                self.app.feed_command(crate::command::StepInput::Enter)
+            } else {
+                self.app.feed_active_cmd(part)
+            };
+            let _ = self.app.drive_headless_task(task);
+        }
+
+        if !paused && has_newline && self.app.tabs[tab].active_cmd.is_some() {
+            let task = self.app.feed_command(crate::command::StepInput::Enter);
+            let _ = self.app.drive_headless_task(task);
+        }
+
+        self.app.refresh_layer_panel();
+        self.publish_document_view();
+        true
+    }
 }
 
 /// The stored spelling of `name` in the drawing's linetype table, loading the
@@ -490,6 +601,9 @@ impl HostApi for HostSession<'_> {
     fn modify_layer(&mut self, config: ocs_plugin_api::host::LayerConfig) -> bool {
         self.modify_layer(config)
     }
+    fn execute_command(&mut self, cmd: &str) -> bool {
+        self.execute_command(cmd)
+    }
 }
 
 /// Bridges a plugin's [`InteractiveCommand`](ocs_plugin_api::host::InteractiveCommand)
@@ -547,6 +661,7 @@ pub(crate) struct PluginProcessInteractiveAdapter {
     pub command_id: u64,
     prompt: Option<String>,
     needs_entity_pick: Option<bool>,
+    is_done: bool,
 }
 
 impl PluginProcessInteractiveAdapter {
@@ -561,12 +676,27 @@ impl PluginProcessInteractiveAdapter {
             command_id,
             prompt,
             needs_entity_pick,
+            is_done: false,
         }
     }
 
     fn refresh(&mut self) {
         self.prompt = self.process.get_prompt(self.command_id).ok();
         self.needs_entity_pick = self.process.needs_entity_pick(self.command_id).ok();
+    }
+
+    fn cancel(&mut self) {
+        if !self.is_done {
+            self.is_done = true;
+            use ocs_plugin_api::ipc::protocol::InteractiveEvent;
+            let _ = self.process.interactive_event(self.command_id, InteractiveEvent::Cancel);
+        }
+    }
+}
+
+impl Drop for PluginProcessInteractiveAdapter {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -587,6 +717,9 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
             )
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
+        if matches!(result, crate::command::CmdResult::CommitAndExit(_) | crate::command::CmdResult::Cancel) {
+            self.is_done = true;
+        }
         self.refresh();
         result
     }
@@ -597,8 +730,15 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
             .interactive_event(self.command_id, InteractiveEvent::Enter)
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
+        if matches!(result, crate::command::CmdResult::CommitAndExit(_) | crate::command::CmdResult::Cancel) {
+            self.is_done = true;
+        }
         self.refresh();
         result
+    }
+    fn on_escape(&mut self) -> crate::command::CmdResult {
+        self.cancel();
+        crate::command::CmdResult::Cancel
     }
     fn needs_entity_pick(&self) -> bool {
         self.needs_entity_pick.unwrap_or(false)
@@ -616,6 +756,9 @@ impl crate::command::CadCommand for PluginProcessInteractiveAdapter {
             )
             .map(plugin_step_to_result)
             .unwrap_or(crate::command::CmdResult::Cancel);
+        if matches!(result, crate::command::CmdResult::CommitAndExit(_) | crate::command::CmdResult::Cancel) {
+            self.is_done = true;
+        }
         self.refresh();
         result
     }
@@ -1048,5 +1191,101 @@ mod tests {
             ..Default::default()
         };
         assert!(!host.modify_layer(non_existent));
+    }
+
+    #[test]
+    fn test_plugin_execute_command() {
+        let mut app = OpenCADStudio::new_for_test();
+        app.tabs[0].is_start = false;
+        let mut host = HostSession::new(&mut app, 0);
+
+        // 1. Single-line command with newline finishes command
+        assert!(host.execute_command("LINE 0,0 10,10\n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 1);
+
+        // 2. Streamed command without newline leaves tool active
+        assert!(host.execute_command("LINE 10,10"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        // Feed next point without newline
+        assert!(host.execute_command("20,20"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        // Send explicit ENTER
+        assert!(host.execute_command("ENTER"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 2);
+
+        // 3. Command with PAUSE buffers remaining tokens until point is provided
+        assert!(host.execute_command("LINE 20,20 PAUSE ENTER"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        assert_eq!(
+            host.app.tabs[0].pending_pause_tokens,
+            Some(vec!["ENTER".to_string()])
+        );
+        // User clicks second point in viewport (which calls on_point + apply_cmd_result)
+        let r = host.app.tabs[0]
+            .active_cmd
+            .as_mut()
+            .unwrap()
+            .on_point(glam::DVec3::new(30.0, 30.0, 0.0));
+        let _ = host.app.apply_cmd_result(r);
+        // Draining in apply_cmd_result should have executed ENTER and completed LINE
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 3);
+
+        // 4. Command with PAUSE and trailing \n
+        assert!(host.execute_command("LINE 30,30 PAUSE\n"));
+        assert!(host.app.tabs[0].active_cmd.is_some());
+        assert_eq!(
+            host.app.tabs[0].pending_pause_tokens,
+            Some(vec!["ENTER".to_string()])
+        );
+        // Escape cancels paused command cleanly
+        assert!(host.execute_command("ESC"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.app.tabs[0].pending_pause_tokens, None);
+
+        // 5. CLAYER command
+        host.add_layer(ocs_plugin_api::host::LayerConfig {
+            name: "TEST".to_string(),
+            ..Default::default()
+        });
+        assert!(host.execute_command("CLAYER TEST\n"));
+        assert_eq!(host.document().header.current_layer_name, "TEST");
+
+        // 6. Non-typical command: POINT
+        assert!(host.execute_command("POINT 50,50\n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert_eq!(host.document().entities().count(), 4);
+
+        // 7. Non-typical command: DONUT
+        assert!(host.execute_command("DONUT 10 30 100,100 \n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+        assert!(host.document().entities().count() >= 5);
+
+        // 8. Non-typical command: ELLIPSE
+        assert!(host.execute_command("ELLIPSE 0,0 80,0 30\n"));
+        assert!(host.app.tabs[0].active_cmd.is_none());
+
+        // 9. Non-typical inline commands: UCS
+        assert!(host.execute_command("UCS ORIGIN 50,50,0\n"));
+        assert!(host.app.tabs[0].active_ucs.is_some());
+        assert!(host.execute_command("UCS W\n"));
+        assert!(host.app.tabs[0].active_ucs.is_none());
+
+        // 10. Non-typical inline commands: SETVAR
+        assert!(host.execute_command("SETVAR PDMODE 35\n"));
+
+        // 11. Viewport visual style via drive_headless_task
+        assert!(host.execute_command("VSCURRENT FLATSHADED\n"));
+        assert_eq!(
+            host.app.tabs[0].render_mode,
+            ocs_plugin_api::host::acadrust::entities::ViewportRenderMode::FlatShaded
+        );
+
+        // 12. Drafting aids toggle via drive_headless_task
+        let initial_grid = host.app.show_grid;
+        assert!(host.execute_command("GRID\n"));
+        assert_eq!(host.app.show_grid, !initial_grid);
     }
 }

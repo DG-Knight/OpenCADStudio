@@ -27,9 +27,14 @@ pub use acadrust::{CadDocument, EntityType, Handle};
 /// Events the host forwards to an active plugin `InteractiveCommand`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InteractiveEvent {
+    /// User clicked or specified a point coordinate.
     Point([f64; 3]),
+    /// User pressed Enter or Return to complete input.
     Enter,
+    /// User selected an existing entity in the drawing.
     ObjectPick { handle: Handle, pt: [f64; 3] },
+    /// User cancelled the prompt (e.g. pressed ESC), resetting interactive collection.
+    Cancel,
 }
 
 /// Initial handshake sent by the plugin runner immediately after connecting.
@@ -142,6 +147,8 @@ pub enum PluginRequest {
     AddLayer(crate::host::LayerConfig),
     /// Modify specified properties of an existing layer in the active document.
     ModifyLayer(crate::host::LayerConfig),
+    /// Run a command on the active document tab's command line (AutoLISP style).
+    ExecuteCommand(String),
 }
 
 /// Responses the host sends back for `PluginRequest`.

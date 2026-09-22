@@ -556,6 +556,8 @@ pub trait HostApi {
     /// Add a layer to the active document with full initial properties.
     /// If an optional property in `config` is `None`, standard CAD defaults are applied.
     /// Returns `None` if the layer already exists or `config.name` is invalid.
+    ///
+    /// To modify properties of an already existing layer, use [`modify_layer`](Self::modify_layer).
     fn add_layer(&mut self, config: LayerConfig) -> Option<Handle> {
         let _ = config;
         None
@@ -564,8 +566,26 @@ pub trait HostApi {
     /// Modify specified properties of an existing layer in the active document.
     /// Properties that are `None` in `config` are left untouched as-is.
     /// Returns `false` if the layer does not exist or `config.name` is invalid.
+    ///
+    /// To create a new layer, use [`add_layer`](Self::add_layer).
     fn modify_layer(&mut self, config: LayerConfig) -> bool {
         let _ = config;
+        false
+    }
+
+    /// Run a command on the active document tab's command line (AutoLISP / script style).
+    ///
+    /// The string is passed to the host command driver as if entered into the command line,
+    /// supporting command names, space/newline-delimited arguments, AutoCAD-compatible
+    /// aliases, system variable setters (e.g. `SETVAR PDMODE 3`), and display commands
+    /// (e.g. `VSCURRENT`, `GRID`, `SNAP`).
+    ///
+    /// Headless async tasks spawned by commands are automatically pumped through the host
+    /// application lifecycle.
+    ///
+    /// Returns `true` if the command was recognized and initiated successfully, `false` otherwise.
+    fn execute_command(&mut self, cmd: &str) -> bool {
+        let _ = cmd;
         false
     }
 }

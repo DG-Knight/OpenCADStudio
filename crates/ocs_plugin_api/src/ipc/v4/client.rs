@@ -733,7 +733,12 @@ impl HostApi for V4PluginHostApi {
 
     fn add_layer(&mut self, config: crate::host::LayerConfig) -> Option<Handle> {
         match self.request(PluginRequest::AddLayer(config)) {
-            Ok(PluginResponse::OptHandle(h)) => h,
+            Ok(PluginResponse::OptHandle(h)) => {
+                if h.is_some() {
+                    self.document_cache = OnceCell::new();
+                }
+                h
+            }
             Ok(other) => {
                 eprintln!("[plugin] unexpected AddLayer response: {other:?}");
                 None
@@ -747,13 +752,32 @@ impl HostApi for V4PluginHostApi {
 
     fn modify_layer(&mut self, config: crate::host::LayerConfig) -> bool {
         match self.request(PluginRequest::ModifyLayer(config)) {
-            Ok(PluginResponse::Bool(b)) => b,
+            Ok(PluginResponse::Bool(b)) => {
+                if b {
+                    self.document_cache = OnceCell::new();
+                }
+                b
+            }
             Ok(other) => {
                 eprintln!("[plugin] unexpected ModifyLayer response: {other:?}");
                 false
             }
             Err(e) => {
                 eprintln!("[plugin] ModifyLayer request failed: {e}");
+                false
+            }
+        }
+    }
+
+    fn execute_command(&mut self, cmd: &str) -> bool {
+        match self.request(PluginRequest::ExecuteCommand(cmd.to_string())) {
+            Ok(PluginResponse::Bool(b)) => b,
+            Ok(other) => {
+                eprintln!("[plugin] unexpected ExecuteCommand response: {other:?}");
+                false
+            }
+            Err(e) => {
+                eprintln!("[plugin] ExecuteCommand failed: {e}");
                 false
             }
         }

@@ -425,6 +425,17 @@ std::thread::spawn(move || {
 // Pass `port` to the child process via environment variable.
 ```
 
+### Command execution and layer management
+
+Plugins can execute native CAD commands and manage drawing tables through `HostApi`:
+
+- **Command Execution (`HostApi::execute_command`)**:
+  Executes AutoCAD-compatible commands, scripts, and tokens on the active document tab's command driver (e.g. `LINE 0,0 10,10`, `SETVAR PDMODE 3`, `VSCURRENT FLATSHADED`, `GRID ON`). The host automatically executes any resulting asynchronous headless tasks (such as render mode updates and grid state changes) through the application message loop without freezing the UI.
+- **Layer Creation (`HostApi::add_layer`)**:
+  Creates a new layer in the document table with optional color, visibility, and line weight settings. Returns `Some(Handle)` on success, or `None` if the layer name already exists or is invalid.
+- **Layer Modification (`HostApi::modify_layer`)**:
+  Updates properties of an existing layer in-place. Properties left as `None` remain unchanged. Returns `true` on success, or `false` if the layer does not exist.
+
 ### Further reading
 
 - Internal architecture & invariants: [`ARCHITECTURE.md`](./ARCHITECTURE.md)
