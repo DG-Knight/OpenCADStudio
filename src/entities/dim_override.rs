@@ -702,12 +702,14 @@ pub fn set_property(
             | "dim_alt_precision"
             | "dim_tolerance_precision"
             | "dim_alt_tolerance_precision" => parse_precision_label(trimmed),
+            // "On" is text aligned with its dimension line: the horizontal
+            // flag (DIMTIH/DIMTOH) off.
+            "dim_text_outside_align" | "dim_text_inside_align" | "dim_line_inside" => {
+                yes(trimmed).map(|value| i16::from(value == 0))
+            }
             "dim_ext_line_fixed"
-            | "dim_text_outside_align"
-            | "dim_text_inside_align"
             | "dim_text_inside"
             | "dim_line_forced"
-            | "dim_line_inside"
             | "dim_alt_enabled" => yes(trimmed),
             "dim_decimal_separator" => trimmed
                 .chars()

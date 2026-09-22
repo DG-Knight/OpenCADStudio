@@ -2342,6 +2342,8 @@ impl OpenCADStudio {
                         handle,
                     ) {
                         Some((set, constraint)) => {
+                            let annotational =
+                                self.tabs[i].scene.dimension_is_annotational(handle);
                             sections = dynamic_dimension_sections(
                                 &self.tabs[i].scene,
                                 handle,
@@ -2349,11 +2351,23 @@ impl OpenCADStudio {
                                 constraint,
                                 sections,
                             );
-                            match entity {
-                                acadrust::EntityType::Dimension(
-                                    acadrust::entities::Dimension::Aligned(_),
-                                ) => t!("Aligned Dimensional Constraint").into_owned(),
-                                _ => t!("Linear Dimensional Constraint").into_owned(),
+                            // An annotational constraint is an ordinary
+                            // dimension to the panel; the dynamic form is
+                            // named after its constraint.
+                            if annotational {
+                                title
+                            } else {
+                                use acadrust::entities::Dimension;
+                                match entity {
+                                    acadrust::EntityType::Dimension(Dimension::Aligned(_)) => {
+                                        t!("Aligned Dimensional Constraint")
+                                    }
+                                    acadrust::EntityType::Dimension(
+                                        Dimension::Angular2Ln(_) | Dimension::Angular3Pt(_),
+                                    ) => t!("Angular Dimensional Constraint"),
+                                    _ => t!("Linear Dimensional Constraint"),
+                                }
+                                .into_owned()
                             }
                         }
                         None => title,
@@ -2805,7 +2819,35 @@ handles={handles_ms:.1} panel={:.1} ribbon={ribbon_ms:.1} tail={:.1} selected={}
                         }
                     }
                 }
-                if self.tabs[i].scene.is_dynamic_dimension(handle) {
+                let dynamic_angle = match contextual.as_ref() {
+                    acadrust::EntityType::Dimension(
+                        dim @ (acadrust::entities::Dimension::Angular2Ln(_)
+                        | acadrust::entities::Dimension::Angular3Pt(_)),
+                    ) if self.tabs[i].scene.is_dynamic_dimension(handle) => Some(dim),
+                    _ => None,
+                };
+                if let Some(dim) = dynamic_angle {
+                    // A dynamic angle shows a triangle at each end of its arc
+                    // pointing away from it, and squares at the arc point and
+                    // the text — nothing on the sides.
+                    let (arc_id, text_id) =
+                        if matches!(dim, acadrust::entities::Dimension::Angular2Ln(_)) {
+                            (4, 5)
+                        } else {
+                            (3, 4)
+                        };
+                    if let Some(ends) = crate::entities::dimension::angular_arc_ends(dim) {
+                        entity_grips.retain(|grip| grip.id == arc_id || grip.id == text_id);
+                        for (point, away) in ends {
+                            entity_grips.insert(
+                                0,
+                                crate::entities::common::oriented_triangle_grip(
+                                    arc_id, point, away,
+                                ),
+                            );
+                        }
+                    }
+                } else if self.tabs[i].scene.is_dynamic_dimension(handle) {
                     // A dynamic dimension shows the reference's grips: a
                     // triangle at each constraint point aimed at the other
                     // one, and the text square — no dimension line grip.
@@ -3738,7 +3780,14 @@ fn dynamic_dimension_sections(
             row(
                 t!("Value").as_ref(),
                 "dyn_constraint_value",
-                PropValue::ReadOnly(value.map(|v| format!("{v:.4}")).unwrap_or_default()),
+                // An angle's value reads at the angular precision, as on the
+                // dimension and in -PARAMETERS.
+                PropValue::ReadOnly(match &constraint.driving_param {
+                    Some(DrivingValue::Named(name)) if set.local_parameters.is_empty() => {
+                        scene.parameter_value_text(name)
+                    }
+                    _ => value.map(|v| format!("{v:.4}")).unwrap_or_default(),
+                }),
             ),
             row(
                 t!("Description").as_ref(),
@@ -3748,7 +3797,39 @@ fn dynamic_dimension_sections(
         ],
     }];
     if annotational {
-        result.extend(sections);
+        // The reference lists General first, then the constraint, then the
+        // dimension's own groups; the constraint's dimension is not an
+        // associative dimension to it, and its text is the constraint's.
+        let mut sections = sections;
+        sections.retain(|section| {
+            section.title != t!("3D Visualization").as_ref()
+                && section.title != "Associative Data"
+        });
+        for section in &mut sections {
+            section
+                .props
+                .retain(|property| property.field != "association_status");
+            for property in &mut section.props {
+                match property.field {
+                    "associative" => property.value = PropValue::ReadOnly("No".to_string()),
+                    "text_override" => {
+                        if let PropValue::PlainText(text) | PropValue::EditText(text) =
+                            &property.value
+                        {
+                            property.value = PropValue::ReadOnly(text.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let constraint_section = result.remove(0);
+        let general = (!sections.is_empty()).then(|| sections.remove(0));
+        result = general
+            .into_iter()
+            .chain(std::iter::once(constraint_section))
+            .chain(sections)
+            .collect();
     } else if let Some(text_rotation) = text_rotation {
         result.push(PropSection {
             title: t!("Text").into_owned(),

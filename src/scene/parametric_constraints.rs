@@ -2252,7 +2252,15 @@ impl super::Scene {
                 if self.dimension_is_annotational(handle) {
                     continue;
                 }
-                for code in [ov::DIMSCALE, ov::DIMGAP, ov::DIMTIH, ov::DIMTOH] {
+                for code in [
+                    ov::DIMSCALE,
+                    ov::DIMGAP,
+                    ov::DIMEXO,
+                    ov::DIMEXE,
+                    ov::DIMASZ,
+                    ov::DIMTIH,
+                    ov::DIMTOH,
+                ] {
                     ov::set(&mut document, handle, code, None);
                 }
             }
@@ -2304,10 +2312,18 @@ impl super::Scene {
             use crate::entities::dim_override as ov;
             let xdata = &dimension.base().common.extended_data;
             let current = ov::real(xdata, ov::DIMSCALE);
-            // The gap between the text and its line is a quarter of the text
-            // height on screen, whatever the style's DIMGAP is in units.
-            let gap = text_height * 0.25;
-            let gap_set = ov::real(xdata, ov::DIMGAP).is_some_and(|value| (value - gap).abs() < 1e-12);
+            // Text gap, extension offset and overshoot and arrow size follow
+            // the text height on screen (the reference's ratios), whatever
+            // the style says in drawing units.
+            let sizes = [
+                (ov::DIMGAP, text_height * 0.25),
+                (ov::DIMEXO, text_height * 0.25),
+                (ov::DIMEXE, text_height * 0.5),
+                (ov::DIMASZ, text_height),
+            ];
+            let sizes_set = sizes.iter().all(|(code, size)| {
+                ov::real(xdata, *code).is_some_and(|value| (value - size).abs() < 1e-12)
+            });
             // The reference draws dynamic distance text horizontally; an
             // angle's text keeps its style's alignment.
             let angular = matches!(
@@ -2317,7 +2333,7 @@ impl super::Scene {
             );
             let horizontal = angular
                 || (ov::int(xdata, ov::DIMTIH) == Some(1) && ov::int(xdata, ov::DIMTOH) == Some(1));
-            if current.is_some_and(|value| (value - scale).abs() < 1e-9) && horizontal && gap_set {
+            if current.is_some_and(|value| (value - scale).abs() < 1e-9) && horizontal && sizes_set {
                 continue;
             }
             ov::set(
@@ -2326,13 +2342,15 @@ impl super::Scene {
                 ov::DIMSCALE,
                 Some(acadrust::xdata::XDataValue::Real(scale)),
             );
-            if !gap_set {
-                ov::set(
-                    &mut self.document,
-                    handle,
-                    ov::DIMGAP,
-                    Some(acadrust::xdata::XDataValue::Real(gap)),
-                );
+            if !sizes_set {
+                for (code, size) in sizes {
+                    ov::set(
+                        &mut self.document,
+                        handle,
+                        code,
+                        Some(acadrust::xdata::XDataValue::Real(size)),
+                    );
+                }
             }
             if !horizontal {
                 for code in [ov::DIMTIH, ov::DIMTOH] {
