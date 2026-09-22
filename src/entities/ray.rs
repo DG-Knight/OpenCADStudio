@@ -3,7 +3,7 @@ use crate::t;
 
 use crate::command::EntityTransform;
 use crate::entities::common::{
-    center_grip, edit_prop as edit, format_length, ro_prop as ro, square_grip,
+    edit_prop as edit, format_length, ro_prop as ro, square_grip,
 };
 use crate::entities::curve::{point_along, unit_direction};
 use crate::entities::traits::{Grippable, PropertyEditable, Transformable, RenderConvertible};
@@ -48,11 +48,14 @@ impl Grippable for Ray {
         let bp = &self.base_point;
         let dir = &self.direction;
         // Grip 0: base point (movable)
-        // Grip 1: a point along the direction (changes direction)
+        // Grip 1: a point along the direction (changes direction). A stretch
+        // grip, not a move handle: `center_grip` would flag it `is_midpoint`
+        // and the drag would arrive as `Translate`, which the direction arm
+        // ignores — the grip would silently do nothing.
         let guide_dist = 10.0_f64;
         vec![
             square_grip(0, glam::DVec3::new(bp.x, bp.y, bp.z)),
-            center_grip(
+            square_grip(
                 1,
                 glam::DVec3::new(
                     bp.x + dir.x * guide_dist,
@@ -191,7 +194,8 @@ impl Grippable for XLine {
         let guide_dist = 10.0_f64;
         vec![
             square_grip(0, glam::DVec3::new(bp.x, bp.y, bp.z)),
-            center_grip(
+            // Direction handle: a stretch grip, not a move handle (see Ray).
+            square_grip(
                 1,
                 glam::DVec3::new(
                     bp.x + dir.x * guide_dist,
