@@ -2245,6 +2245,37 @@ pub(super) fn on_tab_close(&mut self, idx: usize) -> Task<Message> {
         }
         let i = self.active_tab;
         let handles = self.property_target_handles(i);
+        // The Annotative Yes/No list drives the per-object annotative toggle
+        // (MTEXT's own flag, the annotation context for the rest).
+        if field == "annotative" {
+            let wanted =
+                value == crate::t!("Yes").as_ref() || value.eq_ignore_ascii_case("yes");
+            let Some(handle) = handles.first().copied() else {
+                return Task::none();
+            };
+            let document = &self.tabs[i].scene.document;
+            let (toggle, current) = match document.get_entity(handle) {
+                Some(acadrust::EntityType::MText(text)) => ("is_annotative", text.is_annotative),
+                Some(entity) => (
+                    "annotative_ctx",
+                    crate::scene::annotative::is_annotative(document, entity)
+                        || match entity {
+                            acadrust::EntityType::Dimension(dimension) => {
+                                crate::scene::annotative::dim_style_is_annotative(
+                                    document,
+                                    &dimension.base().style_name,
+                                )
+                            }
+                            _ => false,
+                        },
+                ),
+                None => return Task::none(),
+            };
+            if wanted != current {
+                return self.update(Message::PropBoolToggle(toggle));
+            }
+            return Task::none();
+        }
 
         if !handles.is_empty() {
             if matches!(

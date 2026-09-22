@@ -2160,13 +2160,12 @@ impl OpenCADStudio {
                             // remaining style-only types stay read-only.
                             if anno_field == "annotative" {
                                 match entity {
+                                    // The reference offers Yes/No; the choice
+                                    // drives the same per-object toggle.
                                     acadrust::EntityType::MText(t) => set_row_value(
                                         &mut sections,
                                         "annotative",
-                                        crate::scene::model::object::PropValue::BoolToggle {
-                                            field: "is_annotative",
-                                            value: t.is_annotative,
-                                        },
+                                        yes_no_choice(t.is_annotative),
                                     ),
                                     acadrust::EntityType::Dimension(
                                         acadrust::entities::Dimension::Arc(_),
@@ -2190,10 +2189,7 @@ impl OpenCADStudio {
                                     | acadrust::EntityType::Dimension(_) => set_row_value(
                                         &mut sections,
                                         "annotative",
-                                        crate::scene::model::object::PropValue::BoolToggle {
-                                            field: "annotative_ctx",
-                                            value: is_anno,
-                                        },
+                                        yes_no_choice(is_anno),
                                     ),
                                     _ => set_row(
                                         &mut sections,
@@ -2333,6 +2329,13 @@ impl OpenCADStudio {
                         {
                             format!("{} ({})", t!("Surface"), t!("Extrusion"))
                         }
+                        // The reference names an angular dimension by its kind.
+                        acadrust::EntityType::Dimension(
+                            acadrust::entities::Dimension::Angular2Ln(_),
+                        ) => t!("Angular Dimension").into_owned(),
+                        acadrust::EntityType::Dimension(
+                            acadrust::entities::Dimension::Angular3Pt(_),
+                        ) => t!("3 Point Angular Dimension").into_owned(),
                         _ => entity_type_label(entity),
                     };
                     // A dynamic dimension shows only its constraint and text
@@ -3704,6 +3707,14 @@ fn set_row(sections: &mut [crate::scene::model::object::PropSection], field: &st
 /// A dimensional constraint's Properties as the reference shows them: the
 /// Constraint rows, then only the text rotation for a dynamic dimension
 /// and the full dimension sections for an annotational one.
+/// A Yes/No list row, as the reference shows on/off object properties.
+fn yes_no_choice(flag: bool) -> crate::scene::model::object::PropValue {
+    crate::scene::model::object::PropValue::Choice {
+        selected: if flag { t!("Yes") } else { t!("No") }.into_owned(),
+        options: vec![t!("Yes").into_owned(), t!("No").into_owned()],
+    }
+}
+
 fn dynamic_dimension_sections(
     scene: &crate::scene::Scene,
     handle: Handle,
